@@ -1,0 +1,16 @@
+# Ralph Context Snapshot
+- task statement: Implement Phase 1 of the OpenClaw -> OMX bridge from the existing PRD.
+- desired outcome: A working NestJS bridge with file-backed job queue, POST/GET jobs API, single FIFO runner, omx exec adapter, and tests.
+- known facts/evidence:
+  - PRD exists at .omx/plans/prd-openclaw-omx-bridge-phase1.md.
+  - Test spec exists at .omx/plans/test-spec-openclaw-omx-bridge-phase1.md.
+  - Repo appears largely empty aside from AGENTS/OMX state.
+- constraints:
+  - Use Node.js + TypeScript + NestJS.
+  - File-based queue; no new dependencies beyond what is needed for NestJS app.
+  - Verify with tests/build/diagnostics.
+- unknowns/open questions:
+  - Exact current repository contents and whether NestJS scaffolding already exists.
+  - Which test runner setup is most minimal for the repo.
+- likely codebase touchpoints:
+  - package.json, tsconfig.json, nest-cli.json, src/**, test/**, .omx/state/bridge-jobs/**.
