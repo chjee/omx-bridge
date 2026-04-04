@@ -3,6 +3,7 @@ dist/
 coverage/
 .DS_Store
 result.txt
+.env
 .omx/logs/
 .omx/state/
 .omx/metrics.json
