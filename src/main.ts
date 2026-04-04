@@ -1,10 +1,12 @@
 import 'reflect-metadata';
 import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  const configService = app.get(ConfigService);
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -13,7 +15,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  await app.listen(process.env.PORT ? Number(process.env.PORT) : 3000);
+  await app.listen(configService.get<number>('PORT', 3992));
 }
 
 void bootstrap();

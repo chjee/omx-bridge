@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
-import type { JobExecutionMetadata, OmxExecutionResult } from './job.types';
+import type { JobExecutionMetadata, OmxExecutionResult, TerminalJobStatus } from './job.types';
 
 export type SpawnFunction = (
   command: string,
@@ -11,6 +11,10 @@ export type SpawnFunction = (
 
 export const OMX_SPAWN = Symbol('OMX_SPAWN');
 
+export interface ExecuteOmxOptions {
+  signal?: AbortSignal;
+}
+
 @Injectable()
 export class OmxExecService {
   constructor(
@@ -18,7 +22,7 @@ export class OmxExecService {
     @Inject(OMX_SPAWN) private readonly spawnFn: SpawnFunction,
   ) {}
 
-  async execute(prompt: string): Promise<OmxExecutionResult> {
+  async execute(prompt: string, options: ExecuteOmxOptions = {}): Promise<OmxExecutionResult> {
     const startedAt = Date.now();
 
     return new Promise<OmxExecutionResult>((resolve) => {
@@ -27,6 +31,7 @@ export class OmxExecService {
       let outputTruncated = false;
       let settled = false;
       let timedOut = false;
+      let cancelled = false;
       let exitCode: number | null = null;
 
       const child = this.spawnFn(this.config.omxCommand, ['exec', prompt], {
@@ -50,7 +55,7 @@ export class OmxExecService {
       };
 
       const finish = (
-        status: 'succeeded' | 'failed',
+        status: TerminalJobStatus,
         overrides: Partial<JobExecutionMetadata> = {},
       ): void => {
         if (settled) {
@@ -58,6 +63,7 @@ export class OmxExecService {
         }
         settled = true;
         clearTimeout(timeoutHandle);
+        options.signal?.removeEventListener('abort', handleAbort);
 
         resolve({
           status,
@@ -92,6 +98,10 @@ export class OmxExecService {
 
       child.once('close', (code) => {
         exitCode = code;
+        if (cancelled) {
+          finish('cancelled', { errorType: 'cancelled' });
+          return;
+        }
         if (timedOut) {
           finish('failed', { errorType: 'timeout' });
           return;
@@ -112,6 +122,20 @@ export class OmxExecService {
         stderr = stderr || `Command timed out after ${this.config.jobTimeoutMs}ms`;
         child.kill('SIGTERM');
       }, this.config.jobTimeoutMs);
+
+      const handleAbort = (): void => {
+        cancelled = true;
+        stderr = stderr || 'Command cancelled';
+        child.kill('SIGTERM');
+      };
+
+      if (options.signal) {
+        if (options.signal.aborted) {
+          handleAbort();
+        } else {
+          options.signal.addEventListener('abort', handleAbort, { once: true });
+        }
+      }
     });
   }
 }

@@ -140,4 +140,23 @@ describe('OmxExecService', () => {
       execution: { outputTruncated: true },
     });
   });
+
+  it('maps abort signals into cancelled results', async () => {
+    const child = new MockChildProcess();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+    );
+    const controller = new AbortController();
+
+    const pending = service.execute('cancel me', { signal: controller.signal });
+    controller.abort();
+    child.emit('close', null);
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled',
+      exitCode: null,
+      execution: { errorType: 'cancelled' },
+    });
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+  });
 });

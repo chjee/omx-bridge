@@ -8,6 +8,7 @@ import type { BridgeJob } from './job.types';
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobRunnerService.name);
   private intervalHandle?: NodeJS.Timeout;
+  private readonly abortControllers = new Map<string, AbortController>();
   private running = false;
 
   constructor(
@@ -30,6 +31,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.intervalHandle);
       this.intervalHandle = undefined;
     }
+
+    for (const controller of this.abortControllers.values()) {
+      controller.abort();
+    }
+    this.abortControllers.clear();
   }
 
   async recoverInterruptedJobs(): Promise<void> {
@@ -72,15 +78,30 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async cancel(jobId: string): Promise<boolean> {
+    const controller = this.abortControllers.get(jobId);
+    if (!controller) {
+      return false;
+    }
+
+    controller.abort();
+    return true;
+  }
+
   private async getNextQueuedJob(): Promise<BridgeJob | null> {
     const queuedJobs = await this.repository.listByStatus('queued');
     return queuedJobs[0] ?? null;
   }
 
   private async executeJob(job: BridgeJob): Promise<void> {
+    const currentJob = await this.repository.getById(job.id);
+    if (!currentJob || currentJob.status !== 'queued') {
+      return;
+    }
+
     this.logger.log(`Running job ${job.id}`);
     const runningJob: BridgeJob = {
-      ...job,
+      ...currentJob,
       status: 'running',
       startedAt: new Date().toISOString(),
       finishedAt: undefined,
@@ -90,15 +111,29 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
     await this.repository.save(runningJob);
 
-    const result = await this.omxExecService.execute(job.prompt);
-    await this.repository.save({
-      ...runningJob,
-      status: result.status,
-      finishedAt: new Date().toISOString(),
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-      execution: result.execution,
-    });
+    const abortController = new AbortController();
+    this.abortControllers.set(job.id, abortController);
+
+    try {
+      const result = await this.omxExecService.execute(job.prompt, {
+        signal: abortController.signal,
+      });
+      const latestJob = await this.repository.getById(job.id);
+      if (!latestJob || latestJob.status !== 'running') {
+        return;
+      }
+
+      await this.repository.save({
+        ...latestJob,
+        status: result.status,
+        finishedAt: new Date().toISOString(),
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        execution: result.execution,
+      });
+    } finally {
+      this.abortControllers.delete(job.id);
+    }
   }
 }

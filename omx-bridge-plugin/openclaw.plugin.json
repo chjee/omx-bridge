@@ -1,0 +1,23 @@
+{
+  "id": "omx-bridge-plugin",
+  "name": "OMX Bridge Plugin",
+  "description": "Registers OpenClaw agent tools that submit, inspect, list, and cancel jobs on a local omx-bridge service.",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "bridgeUrl": {
+        "type": "string",
+        "default": "http://localhost:3000",
+        "description": "Base URL for the local omx-bridge service."
+      }
+    }
+  },
+  "uiHints": {
+    "bridgeUrl": {
+      "label": "Bridge URL",
+      "placeholder": "http://localhost:3000"
+    }
+  }
+}
