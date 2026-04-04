@@ -9,6 +9,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? 'job-1',
     prompt: overrides.prompt ?? 'hello',
+    queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
     createdAt: overrides.createdAt ?? '2026-04-02T00:00:00.000Z',
     startedAt: overrides.startedAt,

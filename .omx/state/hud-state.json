@@ -1,5 +1,5 @@
 {
-  "last_turn_at": "2026-04-02T11:31:33.760Z",
-  "turn_count": 2,
-  "last_agent_output": ""
+  "last_turn_at": "2026-04-04T11:20:37.377Z",
+  "turn_count": 3,
+  "last_agent_output": "Phase 2 is implemented.\n\nThe bridge now exposes `GET /jobs`, `POST /jobs/:id/callback`, and `POST /j"
 }
