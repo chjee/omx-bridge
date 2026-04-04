@@ -1,0 +1,16 @@
+[Unit]
+Description=OMX Bridge Service
+After=network.target
+
+[Service]
+Type=simple
+User=chjee
+WorkingDirectory=/home/chjee/workspace/omx-bridge
+ExecStart=/home/chjee/.nvm/versions/node/v24.14.1/bin/node dist/main.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/chjee/workspace/omx-bridge/.env
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
