@@ -14,8 +14,8 @@
     "test:e2e": "jest --runInBand test/jobs.e2e-spec.ts"
   },
   "dependencies": {
-    "@nestjs/config": "file:vendor/nestjs-config",
     "@nestjs/common": "^11.1.6",
+    "@nestjs/config": "^4.0.3",
     "@nestjs/core": "^11.1.6",
     "@nestjs/platform-express": "^11.1.6",
     "class-transformer": "^0.5.1",
