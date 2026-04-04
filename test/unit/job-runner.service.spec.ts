@@ -9,6 +9,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? 'job-1',
     prompt: overrides.prompt ?? 'hello',
+    queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
     createdAt: overrides.createdAt ?? '2026-04-02T00:00:00.000Z',
     startedAt: overrides.startedAt,
@@ -89,7 +90,7 @@ describe('JobRunnerService', () => {
       (job) => job?.status === 'running',
     );
     expect(runningJob?.status).toBe('running');
-    expect(execute).toHaveBeenCalledWith('hello');
+    expect(execute).toHaveBeenCalledWith('hello', expect.any(Object));
 
     resolveExecution?.();
     await firstRun;
@@ -131,6 +132,70 @@ describe('JobRunnerService', () => {
       status: 'failed',
       stderr: 'boom',
       exitCode: 1,
+    });
+  });
+
+  it('aborts running jobs and preserves external terminal updates', async () => {
+    let abortSignal: AbortSignal | undefined;
+    let resolveExecution: (() => void) | undefined;
+    const runner = new JobRunnerService(
+      repository,
+      {
+        execute: jest.fn().mockImplementation(
+          (_prompt: string, options?: { signal?: AbortSignal }) =>
+            new Promise<OmxExecutionResult>((resolve) => {
+              abortSignal = options?.signal;
+              resolveExecution = () =>
+                resolve(
+                  createExecutionResult({
+                    status: 'cancelled',
+                    stderr: 'Command cancelled',
+                    exitCode: null,
+                    execution: {
+                      command: 'omx',
+                      timeoutMs: 1000,
+                      maxOutputChars: 1000,
+                      errorType: 'cancelled',
+                    },
+                  }),
+                );
+            }),
+        ),
+      } as unknown as OmxExecService,
+      config,
+    );
+
+    await repository.create(createJob());
+
+    const runPromise = runner.runOnce();
+    await waitFor(
+      () => repository.getById('job-1'),
+      (job) => job?.status === 'running',
+    );
+
+    expect(await runner.cancel('job-1')).toBe(true);
+    expect(abortSignal?.aborted).toBe(true);
+
+    await repository.save(
+      createJob({
+        status: 'cancelled',
+        finishedAt: '2026-04-02T00:00:05.000Z',
+        stderr: 'Cancelled by API request',
+        execution: {
+          command: 'omx',
+          timeoutMs: 1000,
+          maxOutputChars: 1000,
+          errorType: 'cancelled',
+        },
+      }),
+    );
+
+    resolveExecution?.();
+    await runPromise;
+
+    await expect(repository.getById('job-1')).resolves.toMatchObject({
+      status: 'cancelled',
+      stderr: 'Cancelled by API request',
     });
   });
 

@@ -61,10 +61,17 @@ export class JobQueueRepository {
     return jobs
       .filter((job): job is BridgeJob => job !== null)
       .sort((left, right) => {
-        if (left.createdAt === right.createdAt) {
-          return left.id.localeCompare(right.id);
+        const lo = left.queueOrder ?? left.createdAt;
+        const ro = right.queueOrder ?? right.createdAt;
+        if (lo !== ro) {
+          return lo.localeCompare(ro);
         }
-        return left.createdAt.localeCompare(right.createdAt);
+
+        if (left.createdAt !== right.createdAt) {
+          return left.createdAt.localeCompare(right.createdAt);
+        }
+
+        return left.id.localeCompare(right.id);
       });
   }
 

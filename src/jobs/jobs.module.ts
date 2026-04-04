@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { BRIDGE_CONFIG, buildBridgeConfig } from '../config/bridge-config';
 import { JobsController } from './jobs.controller';
 import { JobQueueRepository } from './job-queue.repository';
@@ -11,7 +12,8 @@ import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
   providers: [
     {
       provide: BRIDGE_CONFIG,
-      useFactory: () => buildBridgeConfig(),
+      useFactory: (configService: ConfigService) => buildBridgeConfig(configService),
+      inject: [ConfigService],
     },
     {
       provide: OMX_SPAWN,
