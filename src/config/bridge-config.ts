@@ -7,6 +7,8 @@ export interface BridgeConfig {
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
+  /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
+  callbackSecret?: string;
 }
 
 export const BRIDGE_CONFIG = Symbol('BRIDGE_CONFIG');
@@ -42,5 +44,6 @@ export function buildBridgeConfig(
       configService.get<string>('BRIDGE_MAX_OUTPUT_CHARS'),
       32_000,
     ),
+    callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
   };
 }

@@ -1,6 +1,7 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob, JobStatus } from './job.types';
 
@@ -81,13 +82,18 @@ export class JobQueueRepository {
   }
 
   private jobPath(id: string): string {
+    // Fix: Path Traversal — UUID 포맷 검증으로 디렉터리 탈출 방지
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new BadRequestException(`Invalid job id: ${id}`);
+    }
     return path.join(this.config.jobsDirectory, `${id}.json`);
   }
 
   private async writeJob(job: BridgeJob): Promise<void> {
     await this.ensureReady();
     const targetPath = this.jobPath(job.id);
-    const tempPath = `${targetPath}.tmp`;
+    // Fix: tmp 파일 레이스 — 랜덤 suffix로 동시 쓰기 충돌 방지
+    const tempPath = `${targetPath}.${randomUUID()}.tmp`;
     await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
     await fs.rename(tempPath, targetPath);
   }

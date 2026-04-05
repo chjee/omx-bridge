@@ -7,7 +7,7 @@ import { createTempDir, waitFor } from '../helpers';
 
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
-    id: overrides.id ?? 'job-1',
+    id: overrides.id ?? '00000000-0000-4000-a000-000000000001',
     prompt: overrides.prompt ?? 'hello',
     queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
@@ -76,17 +76,17 @@ describe('JobRunnerService', () => {
     );
 
     await repository.create(
-      createJob({ id: 'job-2', createdAt: '2026-04-02T00:00:02.000Z' }),
+      createJob({ id: '00000000-0000-4000-a000-000000000002', createdAt: '2026-04-02T00:00:02.000Z' }),
     );
     await repository.create(
-      createJob({ id: 'job-1', createdAt: '2026-04-02T00:00:01.000Z' }),
+      createJob({ id: '00000000-0000-4000-a000-000000000001', createdAt: '2026-04-02T00:00:01.000Z' }),
     );
 
     const firstRun = runner.runOnce();
     expect(await runner.runOnce()).toBe(false);
 
     const runningJob = await waitFor(
-      () => repository.getById('job-1'),
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
       (job) => job?.status === 'running',
     );
     expect(runningJob?.status).toBe('running');
@@ -95,7 +95,7 @@ describe('JobRunnerService', () => {
     resolveExecution?.();
     await firstRun;
 
-    const completedJob = await repository.getById('job-1');
+    const completedJob = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(completedJob?.status).toBe('succeeded');
 
     await runner.runOnce();
@@ -128,7 +128,7 @@ describe('JobRunnerService', () => {
     await repository.create(createJob());
     await runner.runOnce();
 
-    await expect(repository.getById('job-1')).resolves.toMatchObject({
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
       status: 'failed',
       stderr: 'boom',
       exitCode: 1,
@@ -169,11 +169,11 @@ describe('JobRunnerService', () => {
 
     const runPromise = runner.runOnce();
     await waitFor(
-      () => repository.getById('job-1'),
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
       (job) => job?.status === 'running',
     );
 
-    expect(await runner.cancel('job-1')).toBe(true);
+    expect(await runner.cancel('00000000-0000-4000-a000-000000000001')).toBe(true);
     expect(abortSignal?.aborted).toBe(true);
 
     await repository.save(
@@ -193,7 +193,7 @@ describe('JobRunnerService', () => {
     resolveExecution?.();
     await runPromise;
 
-    await expect(repository.getById('job-1')).resolves.toMatchObject({
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
       status: 'cancelled',
       stderr: 'Cancelled by API request',
     });
@@ -215,7 +215,7 @@ describe('JobRunnerService', () => {
 
     await runner.recoverInterruptedJobs();
 
-    const recovered = await repository.getById('job-1');
+    const recovered = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(recovered).toMatchObject({
       status: 'queued',
       execution: { recoveredFromRestart: true },
