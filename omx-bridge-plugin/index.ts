@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { Type, type Static } from "@sinclair/typebox";
 import {
   definePluginEntry,
@@ -14,6 +15,11 @@ const pluginConfigSchema = Type.Object(
       Type.String({
         default: DEFAULT_BRIDGE_URL,
         description: "Base URL for the omx-bridge HTTP service.",
+      }),
+    ),
+    callbackSecret: Type.Optional(
+      Type.String({
+        description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server.",
       }),
     ),
   },
@@ -128,7 +134,27 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
       typeof pluginConfig.bridgeUrl === "string" && pluginConfig.bridgeUrl.length > 0
         ? pluginConfig.bridgeUrl
         : DEFAULT_BRIDGE_URL,
+    callbackSecret:
+      typeof pluginConfig.callbackSecret === "string" && pluginConfig.callbackSecret.length > 0
+        ? pluginConfig.callbackSecret
+        : undefined,
   };
+}
+
+/**
+ * 콜백 요청에 붙일 HMAC-SHA256 서명 헤더를 생성합니다.
+ * 서버의 CallbackAuthGuard와 동일한 방식:
+ *   HMAC-SHA256(key=callbackSecret, message=`${jobId}:${JSON.stringify(body)}`)
+ *   헤더: X-Callback-Signature: sha256=<hex>
+ */
+function buildCallbackSignatureHeader(
+  secret: string,
+  jobId: string,
+  body: unknown,
+): string {
+  const message = `${jobId}:${JSON.stringify(body)}`;
+  const hex = createHmac("sha256", secret).update(message).digest("hex");
+  return `sha256=${hex}`;
 }
 
 function buildBridgeUrl(api: OpenClawPluginApi, path: string): URL {
@@ -144,12 +170,14 @@ async function requestJson<T>(
   api: OpenClawPluginApi,
   path: string,
   init?: RequestInit,
+  signatureHeader?: string,
 ): Promise<T> {
   const response = await fetch(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
   });
@@ -252,6 +280,50 @@ export default definePluginEntry({
           {
             method: "POST",
           },
+        );
+
+        return toTextResult(result);
+      },
+    });
+
+    api.registerTool({
+      name: "omx_callback_job",
+      description: "Send a callback to mark an omx-bridge job as completed (used by external processes). Automatically signs the request with X-Callback-Signature when callbackSecret is configured.",
+      parameters: Type.Object(
+        {
+          jobId: Type.String({ minLength: 1, description: "Bridge job identifier." }),
+          status: Type.Union(
+            [Type.Literal("succeeded"), Type.Literal("failed"), Type.Literal("cancelled")],
+            { description: "Terminal status to set on the job." },
+          ),
+          stdout: Type.Optional(Type.String({ description: "Standard output from the job." })),
+          stderr: Type.Optional(Type.String({ description: "Standard error from the job." })),
+          exitCode: Type.Optional(Type.Union([Type.Number(), Type.Null()], { description: "Exit code." })),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_id: string, params: { jobId: string; status: string; stdout?: string; stderr?: string; exitCode?: number | null }) {
+        const body = {
+          status: params.status,
+          ...(params.stdout !== undefined ? { stdout: params.stdout } : {}),
+          ...(params.stderr !== undefined ? { stderr: params.stderr } : {}),
+          ...(params.exitCode !== undefined ? { exitCode: params.exitCode } : {}),
+        };
+
+        // 콜백시크릿이 설정된 경우 HMAC 서명 헤더 생성
+        const config = getPluginConfig(api);
+        const signatureHeader = config.callbackSecret
+          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, body)
+          : undefined;
+
+        const result = await requestJson<BridgeJob>(
+          api,
+          `jobs/${encodeURIComponent(params.jobId)}/callback`,
+          {
+            method: "POST",
+            body: JSON.stringify(body),
+          },
+          signatureHeader,
         );
 
         return toTextResult(result);
