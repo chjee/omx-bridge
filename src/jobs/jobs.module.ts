@@ -6,6 +6,7 @@ import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
 import { JobsService } from './jobs.service';
 import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
+import { CallbackAuthGuard } from './callback-auth.guard';
 
 @Module({
   controllers: [JobsController],
@@ -23,6 +24,7 @@ import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
     JobsService,
     OmxExecService,
     JobRunnerService,
+    CallbackAuthGuard,
   ],
 })
 export class JobsModule {}

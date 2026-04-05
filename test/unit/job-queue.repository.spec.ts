@@ -5,9 +5,14 @@ import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
 import type { BridgeJob } from '../../src/jobs/job.types';
 import { createTempDir } from '../helpers';
 
+// UUID v4 형식의 테스트용 고정 ID (UUID 검증 로직에 대응)
+const TEST_ID_1 = '00000000-0000-4000-a000-000000000001';
+const TEST_ID_2 = '00000000-0000-4000-a000-000000000002';
+const TEST_ID_3 = '00000000-0000-4000-a000-000000000003';
+
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
-    id: overrides.id ?? 'job-1',
+    id: overrides.id ?? TEST_ID_1,
     prompt: overrides.prompt ?? 'hello',
     queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
@@ -81,14 +86,14 @@ describe('JobQueueRepository', () => {
 
   it('lists queued jobs in deterministic FIFO order', async () => {
     await repository.create(
-      createJob({ id: 'job-2', createdAt: '2026-04-02T00:00:02.000Z' }),
+      createJob({ id: TEST_ID_2, createdAt: '2026-04-02T00:00:02.000Z' }),
     );
     await repository.create(
-      createJob({ id: 'job-1', createdAt: '2026-04-02T00:00:01.000Z' }),
+      createJob({ id: TEST_ID_1, createdAt: '2026-04-02T00:00:01.000Z' }),
     );
     await repository.create(
       createJob({
-        id: 'job-3',
+        id: TEST_ID_3,
         createdAt: '2026-04-02T00:00:03.000Z',
         status: 'failed',
       }),
@@ -96,13 +101,16 @@ describe('JobQueueRepository', () => {
 
     const queuedJobs = await repository.listByStatus('queued');
 
-    expect(queuedJobs.map((job) => job.id)).toEqual(['job-1', 'job-2']);
+    expect(queuedJobs.map((job) => job.id)).toEqual([TEST_ID_1, TEST_ID_2]);
   });
 
   it('handles malformed job files predictably', async () => {
-    await fs.writeFile(path.join(jobsDirectory, 'broken.json'), '{not-json', 'utf8');
+    // 파일 이름에 UUID가 아닌 값은 getById에서 BadRequestException이 발생함
+    // listAll()은 파일명에서 직접 jobId를 추출하므로 UUID 검증 없이 파싱 시도
+    const brokenId = '11111111-1111-4111-b111-111111111111';
+    await fs.writeFile(path.join(jobsDirectory, `${brokenId}.json`), '{not-json', 'utf8');
 
-    await expect(repository.getById('broken')).resolves.toBeNull();
+    await expect(repository.getById(brokenId)).resolves.toBeNull();
     await expect(repository.listAll()).resolves.toEqual([]);
   });
 });

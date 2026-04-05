@@ -7,11 +7,13 @@ import {
   Param,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 import { CreateJobDto } from './dto/create-job.dto';
 import { JobCallbackDto } from './dto/job-callback.dto';
 import { ListJobsDto } from './dto/list-jobs.dto';
 import { JobsService } from './jobs.service';
+import { CallbackAuthGuard } from './callback-auth.guard';
 
 @Controller('jobs')
 export class JobsController {
@@ -38,6 +40,7 @@ export class JobsController {
   }
 
   @Post(':id/callback')
+  @UseGuards(CallbackAuthGuard)  // Fix: 콜백 인증 — HMAC 서명 검증
   async handleJobCallback(@Param('id') id: string, @Body() body: JobCallbackDto) {
     return this.jobsService.completeJobFromCallback(id, body);
   }
