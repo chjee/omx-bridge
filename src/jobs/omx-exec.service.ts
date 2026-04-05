@@ -33,6 +33,7 @@ export class OmxExecService {
       let timedOut = false;
       let cancelled = false;
       let exitCode: number | null = null;
+      let sigkillHandle: NodeJS.Timeout | undefined;
 
       const child = this.spawnFn(this.config.omxCommand, ['exec', prompt], {
         stdio: 'pipe',
@@ -63,6 +64,8 @@ export class OmxExecService {
         }
         settled = true;
         clearTimeout(timeoutHandle);
+        // Fix: SIGKILL fallback — 프로세스가 종료되면 SIGKILL 예약 취소
+        clearTimeout(sigkillHandle);
         options.signal?.removeEventListener('abort', handleAbort);
 
         resolve({
@@ -117,16 +120,25 @@ export class OmxExecService {
         });
       });
 
+      // Fix: SIGKILL fallback — SIGTERM 후 5초 뒤에도 프로세스가 젬료되지 않으면 SIGKILL
+      const sendSigkillAfterDelay = (): void => {
+        sigkillHandle = setTimeout(() => {
+          child.kill('SIGKILL');
+        }, 5_000);
+      };
+
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
         stderr = stderr || `Command timed out after ${this.config.jobTimeoutMs}ms`;
         child.kill('SIGTERM');
+        sendSigkillAfterDelay();
       }, this.config.jobTimeoutMs);
 
       const handleAbort = (): void => {
         cancelled = true;
         stderr = stderr || 'Command cancelled';
         child.kill('SIGTERM');
+        sendSigkillAfterDelay();
       };
 
       if (options.signal) {
