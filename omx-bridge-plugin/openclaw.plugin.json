@@ -11,6 +11,10 @@
         "type": "string",
         "default": "http://localhost:3000",
         "description": "Base URL for the local omx-bridge service."
+      },
+      "callbackSecret": {
+        "type": "string",
+        "description": "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server."
       }
     }
   },
@@ -18,6 +22,10 @@
     "bridgeUrl": {
       "label": "Bridge URL",
       "placeholder": "http://localhost:3000"
+    },
+    "callbackSecret": {
+      "label": "Callback Secret",
+      "placeholder": "BRIDGE_CALLBACK_SECRET 값과 동일하게 설정"
     }
   }
 }
