@@ -117,6 +117,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     try {
       const result = await this.omxExecService.execute(job.prompt, {
         signal: abortController.signal,
+        cwd: job.cwd,
       });
       const latestJob = await this.repository.getById(job.id);
       if (!latestJob || latestJob.status !== 'running') {

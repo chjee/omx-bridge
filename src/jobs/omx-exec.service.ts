@@ -13,6 +13,7 @@ export const OMX_SPAWN = Symbol('OMX_SPAWN');
 
 export interface ExecuteOmxOptions {
   signal?: AbortSignal;
+  cwd?: string;
 }
 
 @Injectable()
@@ -35,9 +36,10 @@ export class OmxExecService {
       let exitCode: number | null = null;
       let sigkillHandle: NodeJS.Timeout | undefined;
 
-      const child = this.spawnFn(this.config.omxCommand, ['exec', prompt], {
+      const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', prompt], {
         stdio: 'pipe',
         env: process.env,
+        ...(options.cwd ? { cwd: options.cwd } : {}),
       });
       child.stdin.end();
 

@@ -17,6 +17,7 @@ export interface JobExecutionMetadata {
 export interface BridgeJob {
   id: string;
   prompt: string;
+  cwd?: string;
   queueOrder: string;
   requestId?: string;
   metadata?: Record<string, unknown>;
