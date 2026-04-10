@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { spawn } from 'node:child_process';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob } from './job.types';
 
@@ -26,17 +27,24 @@ export class TelegramNotifyService {
       .join('\n');
 
     try {
-      const res = await fetch(
-        `https://api.telegram.org/bot${botToken}/sendMessage`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: chatId, text }),
-        },
-      );
-      if (!res.ok) {
-        this.logger.warn(`Telegram notify failed: ${res.status}`);
-      }
+      await new Promise<void>((resolve) => {
+        const body = JSON.stringify({ chat_id: chatId, text });
+        const child = spawn('curl', [
+          '-s', '-o', '/dev/null',
+          '-X', 'POST',
+          `https://api.telegram.org/bot${botToken}/sendMessage`,
+          '-H', 'Content-Type: application/json',
+          '-d', body,
+        ]);
+        child.once('close', (code) => {
+          if (code !== 0) this.logger.warn(`Telegram notify curl exited: ${code}`);
+          resolve();
+        });
+        child.once('error', (err) => {
+          this.logger.warn(`Telegram notify error: ${String(err)}`);
+          resolve();
+        });
+      });
     } catch (err) {
       this.logger.warn(`Telegram notify error: ${String(err)}`);
     }
