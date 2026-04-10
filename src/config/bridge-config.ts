@@ -9,6 +9,11 @@ export interface BridgeConfig {
   maxOutputChars: number;
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
+  /** 텔레그램 알림 설정 */
+  telegram?: {
+    botToken: string;
+    chatId: string;
+  };
 }
 
 export const BRIDGE_CONFIG = Symbol('BRIDGE_CONFIG');
@@ -45,5 +50,13 @@ export function buildBridgeConfig(
       32_000,
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
+    ...(configService.get<string>('TELEGRAM_BOT_TOKEN') && configService.get<string>('TELEGRAM_NOTIFY_CHAT_ID')
+      ? {
+          telegram: {
+            botToken: configService.get<string>('TELEGRAM_BOT_TOKEN')!,
+            chatId: configService.get<string>('TELEGRAM_NOTIFY_CHAT_ID')!,
+          },
+        }
+      : {}),
   };
 }
