@@ -11,7 +11,7 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:unit": "jest --runInBand test/unit",
-    "test:e2e": "jest --runInBand test/jobs.e2e-spec.ts"
+    "test:e2e": "jest --runInBand --testPathPatterns=test/.*\\.e2e-spec\\.ts$"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",

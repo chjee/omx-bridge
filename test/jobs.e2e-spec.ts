@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { AppModule } from '../src/app.module';
 import { JobRunnerService } from '../src/jobs/job-runner.service';
@@ -247,5 +248,119 @@ describe('Jobs API (e2e)', () => {
       status: 'cancelled',
     });
     expect(cancelledJob.stderr).toContain('Cancelled by API request');
+  });
+});
+
+describe('Jobs API real OMX -> Codex chain (e2e)', () => {
+  let app: INestApplication;
+  let jobsDirectory: string;
+  let runner: JobRunnerService;
+  let controller: JobsController;
+  let traceFile: string;
+  let fakeOmxPath: string;
+  let fakeCodexPath: string;
+
+  beforeEach(async () => {
+    jobsDirectory = await createTempDir('bridge-real-e2e');
+    traceFile = path.join(jobsDirectory, 'trace.log');
+    fakeCodexPath = path.join(jobsDirectory, 'fake-codex.mjs');
+    fakeOmxPath = path.join(jobsDirectory, 'fake-omx.sh');
+
+    await fs.writeFile(
+      fakeCodexPath,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+
+const prompt = process.argv[2] ?? '';
+appendFileSync(process.env.BRIDGE_TRACE_FILE, \`codex:\${prompt}\\n\`);
+console.log(\`codex-result:\${prompt}\`);
+`,
+      'utf8',
+    );
+    await fs.chmod(fakeCodexPath, 0o755);
+
+    await fs.writeFile(
+      fakeOmxPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "\${1-}" != "exec" ]; then
+  echo "unsupported omx command: \${1-}" >&2
+  exit 64
+fi
+
+prompt="\${2-}"
+printf 'omx:%s\n' "$prompt" >> "$BRIDGE_TRACE_FILE"
+exec node "$FAKE_CODEX_PATH" "$prompt"
+`,
+      'utf8',
+    );
+    await fs.chmod(fakeOmxPath, 0o755);
+
+    process.env.BRIDGE_JOBS_DIR = jobsDirectory;
+    process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
+    process.env.BRIDGE_JOB_TIMEOUT_MS = '5000';
+    process.env.OMX_COMMAND = fakeOmxPath;
+    process.env.BRIDGE_TRACE_FILE = traceFile;
+    process.env.FAKE_CODEX_PATH = fakeCodexPath;
+
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+    runner = app.get(JobRunnerService);
+    controller = app.get(JobsController);
+  });
+
+  afterEach(async () => {
+    await app.close();
+    delete process.env.BRIDGE_JOBS_DIR;
+    delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
+    delete process.env.BRIDGE_JOB_TIMEOUT_MS;
+    delete process.env.OMX_COMMAND;
+    delete process.env.BRIDGE_TRACE_FILE;
+    delete process.env.FAKE_CODEX_PATH;
+  });
+
+  it('accepts an Andy-side job payload, runs OMX, and completes through Codex output', async () => {
+    const createResponse = await controller.createJob({
+      prompt: 'Andy asks Codex for bridge verification',
+      requestId: 'andy-e2e-1',
+      metadata: {
+        source: 'andy',
+      },
+    });
+
+    const { jobId } = createResponse;
+    await runner.runOnce();
+
+    const job = await waitFor(
+      () => controller.getJob(jobId),
+      (currentJob) => currentJob.status === 'succeeded',
+      5_000,
+    );
+
+    expect(job).toMatchObject({
+      id: jobId,
+      prompt: 'Andy asks Codex for bridge verification',
+      requestId: 'andy-e2e-1',
+      metadata: {
+        source: 'andy',
+      },
+      status: 'succeeded',
+      stderr: '',
+      exitCode: 0,
+      execution: {
+        command: fakeOmxPath,
+      },
+    });
+
+    const trace = await fs.readFile(traceFile, 'utf8');
+    expect(trace.trim().split(os.EOL)).toEqual([
+      'omx:Andy asks Codex for bridge verification',
+      'codex:Andy asks Codex for bridge verification',
+    ]);
   });
 });
