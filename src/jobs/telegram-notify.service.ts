@@ -10,9 +10,37 @@ export class TelegramNotifyService {
   constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
 
   async notifyJobComplete(job: BridgeJob): Promise<void> {
-    if (!this.config.telegram) {
-      return;
-    }
+    await this.notifyOpenClawHooks(job);
+    await this._sendTelegram(job);
+  }
+
+  private async notifyOpenClawHooks(job: BridgeJob): Promise<void> {
+    if (!this.config.openclawHooks) return;
+    const { url, token, sessionKey } = this.config.openclawHooks;
+    const icon = job.status === 'succeeded' ? '✅' : '❌';
+    const message = [
+      `${icon} omx job ${job.status} (${job.id.slice(0, 8)})`,
+      job.cwd ? `Dir: ${job.cwd}` : '',
+      job.stdout?.slice(0, 300) || '',
+    ].filter(Boolean).join('\n');
+    try {
+      await new Promise<void>((resolve) => {
+        const body = JSON.stringify({ message, agentId: 'main', sessionKey, deliver: true });
+        const child = spawn('curl', [
+          '-s', '-o', '/dev/null',
+          '-X', 'POST', url,
+          '-H', `Authorization: Bearer ${token}`,
+          '-H', 'Content-Type: application/json',
+          '-d', body,
+        ]);
+        child.once('close', () => resolve());
+        child.once('error', () => resolve());
+      });
+    } catch { /* best-effort */ }
+  }
+
+  private async _sendTelegram(job: BridgeJob): Promise<void> {
+    if (!this.config.telegram) return;
 
     const { botToken, chatId } = this.config.telegram;
     const icon = job.status === 'succeeded' ? '✅' : '❌';
