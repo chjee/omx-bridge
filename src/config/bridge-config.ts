@@ -14,6 +14,12 @@ export interface BridgeConfig {
     botToken: string;
     chatId: string;
   };
+  /** OpenClaw hooks 알림 설정 */
+  openclawHooks?: {
+    url: string;
+    token: string;
+    sessionKey: string;
+  };
 }
 
 export const BRIDGE_CONFIG = Symbol('BRIDGE_CONFIG');
@@ -50,6 +56,15 @@ export function buildBridgeConfig(
       32_000,
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
+    ...(configService.get<string>('OPENCLAW_HOOKS_URL')
+      ? {
+          openclawHooks: {
+            url: configService.get<string>('OPENCLAW_HOOKS_URL')!,
+            token: configService.get<string>('OPENCLAW_HOOKS_TOKEN')!,
+            sessionKey: configService.get<string>('OPENCLAW_HOOKS_SESSION_KEY') || 'agent:main:telegram:direct',
+          },
+        }
+      : {}),
     ...(configService.get<string>('TELEGRAM_BOT_TOKEN') && configService.get<string>('TELEGRAM_NOTIFY_CHAT_ID')
       ? {
           telegram: {
