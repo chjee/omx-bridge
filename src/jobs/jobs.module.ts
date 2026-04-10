@@ -7,6 +7,7 @@ import { JobRunnerService } from './job-runner.service';
 import { JobsService } from './jobs.service';
 import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
 import { CallbackAuthGuard } from './callback-auth.guard';
+import { TelegramNotifyService } from './telegram-notify.service';
 
 @Module({
   controllers: [JobsController],
@@ -25,6 +26,7 @@ import { CallbackAuthGuard } from './callback-auth.guard';
     OmxExecService,
     JobRunnerService,
     CallbackAuthGuard,
+    TelegramNotifyService,
   ],
 })
 export class JobsModule {}
