@@ -21,6 +21,7 @@ export class JobsService {
     const job: BridgeJob = {
       id: randomUUID(),
       prompt: input.prompt,
+      cwd: input.cwd,
       queueOrder: this.nextQueueOrder(),
       requestId: input.requestId,
       metadata: input.metadata,

@@ -10,6 +10,11 @@ export class CreateJobDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(500)
+  cwd?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(200)
   requestId?: string;
 

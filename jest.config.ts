@@ -5,6 +5,7 @@ const config: Config = {
   rootDir: '.',
   testEnvironment: 'node',
   testRegex: '.*(\\.spec|\\.e2e-spec)\\.ts$',
+  cache: false,
   transform: {
     '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
   },
