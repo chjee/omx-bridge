@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { JobQueueRepository } from './job-queue.repository';
 import { OmxExecService } from './omx-exec.service';
+import { TelegramNotifyService } from './telegram-notify.service';
 import type { BridgeJob } from './job.types';
 
 @Injectable()
@@ -14,6 +15,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly repository: JobQueueRepository,
     private readonly omxExecService: OmxExecService,
+    private readonly telegramNotify: TelegramNotifyService,
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
   ) {}
 
@@ -124,7 +126,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      await this.repository.save({
+      const savedJob = await this.repository.save({
         ...latestJob,
         status: result.status,
         finishedAt: new Date().toISOString(),
@@ -133,6 +135,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         exitCode: result.exitCode,
         execution: result.execution,
       });
+      // best-effort 텔레그램 알림
+      void this.telegramNotify.notifyJobComplete(savedJob);
     } finally {
       this.abortControllers.delete(job.id);
     }
