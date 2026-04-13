@@ -19,6 +19,9 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 100,
       jobTimeoutMs: 900000,
       maxOutputChars: 32000,
+      notifyMode: 'openclaw',
+      callbackSecret: undefined,
+      claudeNotifyUrl: undefined,
     });
   });
 
@@ -39,6 +42,9 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 250,
       jobTimeoutMs: 1234,
       maxOutputChars: 999,
+      notifyMode: 'openclaw',
+      callbackSecret: undefined,
+      claudeNotifyUrl: undefined,
     });
   });
 });
