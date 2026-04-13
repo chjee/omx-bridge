@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -14,6 +15,7 @@ import {
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
+const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "3993", 10);
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -55,6 +57,17 @@ interface CreateJobResponse {
   status: JobStatus;
 }
 
+interface JobNotification {
+  receivedAt: string;
+  job: BridgeJob;
+}
+
+// ---------------------------------------------------------------------------
+// 알림 큐 (in-memory)
+// ---------------------------------------------------------------------------
+
+const notificationQueue: JobNotification[] = [];
+
 // ---------------------------------------------------------------------------
 // HTTP 헬퍼
 // ---------------------------------------------------------------------------
@@ -71,6 +84,16 @@ function buildCallbackSignatureHeader(jobId: string, body: unknown): string {
   const message = `${jobId}:${JSON.stringify(body)}`;
   const hex = createHmac("sha256", BRIDGE_CALLBACK_SECRET).update(message).digest("hex");
   return `sha256=${hex}`;
+}
+
+function verifyWebhookSignature(jobId: string, body: unknown, signature: string): boolean {
+  if (!BRIDGE_CALLBACK_SECRET) return true; // secret 미설정 시 검증 생략
+  const expected = buildCallbackSignatureHeader(jobId, body);
+  try {
+    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
 }
 
 function safeJsonParse(value: string): unknown {
@@ -117,13 +140,109 @@ function toTextResult(payload: unknown) {
 }
 
 // ---------------------------------------------------------------------------
+// Webhook HTTP 서버
+// ---------------------------------------------------------------------------
+
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function sendJsonResponse(res: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+  });
+  res.end(payload);
+}
+
+let mcpServer: Server | null = null; // MCP 서버 참조 (알림 발송용)
+
+function startWebhookServer(): void {
+  const http = createServer(async (req, res) => {
+    if (req.method === "POST" && req.url === "/notify") {
+      let rawBody: string;
+      try {
+        rawBody = await readBody(req);
+      } catch {
+        sendJsonResponse(res, 400, { error: "Failed to read request body" });
+        return;
+      }
+
+      let job: BridgeJob;
+      try {
+        job = JSON.parse(rawBody) as BridgeJob;
+      } catch {
+        sendJsonResponse(res, 400, { error: "Invalid JSON body" });
+        return;
+      }
+
+      const signature = req.headers["x-callback-signature"] as string | undefined;
+      if (BRIDGE_CALLBACK_SECRET && !signature) {
+        sendJsonResponse(res, 401, { error: "Missing X-Callback-Signature header" });
+        return;
+      }
+      if (signature && !verifyWebhookSignature(job.id, job, signature)) {
+        sendJsonResponse(res, 403, { error: "Signature verification failed" });
+        return;
+      }
+
+      const notification: JobNotification = {
+        receivedAt: new Date().toISOString(),
+        job,
+      };
+      notificationQueue.push(notification);
+
+      // MCP logging 알림 발송 (Claude Code 로그에 노출)
+      if (mcpServer) {
+        try {
+          await mcpServer.sendLoggingMessage({
+            level: "info",
+            data: `[omx-bridge] Job ${job.id} ${job.status}: ${job.stdout.slice(0, 200)}`,
+          });
+        } catch {
+          // MCP 연결이 끊겼을 경우 무시
+        }
+      }
+
+      sendJsonResponse(res, 200, { ok: true, queued: notificationQueue.length });
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/health") {
+      sendJsonResponse(res, 200, { ok: true, pending: notificationQueue.length });
+      return;
+    }
+
+    sendJsonResponse(res, 404, { error: "Not found" });
+  });
+
+  http.listen(WEBHOOK_PORT, "127.0.0.1", () => {
+    process.stderr.write(
+      `[omx-bridge-mcp] Webhook server listening on http://127.0.0.1:${WEBHOOK_PORT}\n`,
+    );
+  });
+
+  http.on("error", (err) => {
+    process.stderr.write(`[omx-bridge-mcp] Webhook server error: ${err.message}\n`);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // MCP 서버
 // ---------------------------------------------------------------------------
 
 const server = new Server(
-  { name: "omx-bridge-mcp", version: "0.1.0" },
-  { capabilities: { tools: {} } },
+  { name: "omx-bridge-mcp", version: "0.2.0" },
+  { capabilities: { tools: {}, logging: {} } },
 );
+
+mcpServer = server;
 
 // ---------------------------------------------------------------------------
 // 도구 목록
@@ -244,6 +363,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
+    {
+      name: "omx_get_notifications",
+      description:
+        "Return all pending job-completion notifications received via the webhook channel and clear the queue. Call this to check whether any OMX jobs have finished since the last poll.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
   ],
 }));
 
@@ -326,6 +455,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       return toTextResult(result);
     }
 
+    case "omx_get_notifications": {
+      const pending = notificationQueue.splice(0);
+      return toTextResult({ count: pending.length, notifications: pending });
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -334,6 +468,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 // ---------------------------------------------------------------------------
 // 시작
 // ---------------------------------------------------------------------------
+
+startWebhookServer();
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
