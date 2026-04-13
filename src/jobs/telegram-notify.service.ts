@@ -10,8 +10,52 @@ export class TelegramNotifyService {
   constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
 
   async notifyJobComplete(job: BridgeJob): Promise<void> {
-    await this.notifyOpenClawHooks(job);
-    await this._sendTelegram(job);
+    if (this.config.notifyMode === 'claude') {
+      await this._notifyClaudeWebhook(job);
+    } else {
+      await this.notifyOpenClawHooks(job);
+      await this._sendTelegram(job);
+    }
+  }
+
+  /**
+   * claude 모드: CLAUDE_NOTIFY_URL로 완료 이벤트 webhook POST.
+   * omx-bridge-mcp 채널 엔드포인트가 수신해서 Claude에 push한다.
+   */
+  private async _notifyClaudeWebhook(job: BridgeJob): Promise<void> {
+    if (!this.config.claudeNotifyUrl) {
+      this.logger.warn('NOTIFY_MODE=claude 이지만 CLAUDE_NOTIFY_URL이 설정되지 않았습니다.');
+      return;
+    }
+
+    const payload = {
+      jobId: job.id,
+      status: job.status,
+      prompt: job.prompt,
+      cwd: job.cwd,
+      exitCode: job.exitCode,
+      stdout: job.stdout?.slice(0, 2000) || '',
+      stderr: job.stderr?.slice(0, 500) || '',
+      metadata: job.metadata,
+      execution: {
+        durationMs: job.execution.durationMs,
+        outputTruncated: job.execution.outputTruncated,
+        timedOut: job.execution.timedOut,
+      },
+    };
+
+    try {
+      const response = await fetch(this.config.claudeNotifyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        this.logger.warn(`Claude webhook 응답 오류: ${response.status} ${response.statusText}`);
+      }
+    } catch (err) {
+      this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
+    }
   }
 
   private async notifyOpenClawHooks(job: BridgeJob): Promise<void> {

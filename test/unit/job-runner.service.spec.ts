@@ -3,7 +3,12 @@ import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
 import { JobRunnerService } from '../../src/jobs/job-runner.service';
 import type { BridgeJob, OmxExecutionResult } from '../../src/jobs/job.types';
 import type { OmxExecService } from '../../src/jobs/omx-exec.service';
+import type { TelegramNotifyService } from '../../src/jobs/telegram-notify.service';
 import { createTempDir, waitFor } from '../helpers';
+
+const mockTelegramNotify = {
+  notifyJobComplete: jest.fn().mockResolvedValue(undefined),
+} as unknown as TelegramNotifyService;
 
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
@@ -54,6 +59,7 @@ describe('JobRunnerService', () => {
       jobPollIntervalMs: 10,
       jobTimeoutMs: 1000,
       maxOutputChars: 1000,
+      notifyMode: 'openclaw',
     };
     repository = new JobQueueRepository(config);
   });
@@ -72,6 +78,7 @@ describe('JobRunnerService', () => {
     const runner = new JobRunnerService(
       repository,
       { execute } as unknown as OmxExecService,
+      mockTelegramNotify,
       config,
     );
 
@@ -122,6 +129,7 @@ describe('JobRunnerService', () => {
             }),
           ),
       } as unknown as OmxExecService,
+      mockTelegramNotify,
       config,
     );
 
@@ -162,6 +170,7 @@ describe('JobRunnerService', () => {
             }),
         ),
       } as unknown as OmxExecService,
+      mockTelegramNotify,
       config,
     );
 
@@ -210,6 +219,7 @@ describe('JobRunnerService', () => {
     const runner = new JobRunnerService(
       repository,
       { execute: jest.fn() } as unknown as OmxExecService,
+      mockTelegramNotify,
       config,
     );
 

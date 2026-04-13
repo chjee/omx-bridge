@@ -21,6 +21,7 @@ function createService(
     jobPollIntervalMs: 10,
     jobTimeoutMs: 100,
     maxOutputChars: 10,
+    notifyMode: 'openclaw',
     ...overrides,
   };
 
@@ -48,7 +49,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', 'hello world'],
+      ['exec', '--full-auto', 'hello world'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
     expect(child.stdin.writableEnded).toBe(true);
