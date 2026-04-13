@@ -44,6 +44,7 @@ describe('JobQueueRepository', () => {
       jobPollIntervalMs: 10,
       jobTimeoutMs: 1000,
       maxOutputChars: 500,
+      notifyMode: 'openclaw',
     };
 
     repository = new JobQueueRepository(config);
