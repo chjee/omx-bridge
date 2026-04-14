@@ -21,6 +21,7 @@ export interface BridgeJob {
   queueOrder: string;
   requestId?: string;
   metadata?: Record<string, unknown>;
+  notifyUrl?: string;
   status: JobStatus;
   createdAt: string;
   startedAt?: string;

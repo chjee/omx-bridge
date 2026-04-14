@@ -21,4 +21,9 @@ export class CreateJobDto {
   @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notifyUrl?: string;
 }

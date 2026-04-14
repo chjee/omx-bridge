@@ -16,6 +16,7 @@ const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "3993", 10);
+const SELF_NOTIFY_URL = `http://127.0.0.1:${WEBHOOK_PORT}/notify`;
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -398,6 +399,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           ...(cwd ? { cwd } : {}),
           ...(requestId ? { requestId } : {}),
           ...(metadata ? { metadata } : {}),
+          notifyUrl: SELF_NOTIFY_URL,
         }),
       });
       return toTextResult(result);
