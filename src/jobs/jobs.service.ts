@@ -25,6 +25,7 @@ export class JobsService {
       queueOrder: this.nextQueueOrder(),
       requestId: input.requestId,
       metadata: input.metadata,
+      notifyUrl: input.notifyUrl,
       status: 'queued',
       createdAt: new Date().toISOString(),
       exitCode: null,

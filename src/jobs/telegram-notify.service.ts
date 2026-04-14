@@ -23,7 +23,8 @@ export class TelegramNotifyService {
    * omx-bridge-mcp 채널 엔드포인트가 수신해서 Claude에 push한다.
    */
   private async _notifyClaudeWebhook(job: BridgeJob): Promise<void> {
-    if (!this.config.claudeNotifyUrl) {
+    const notifyUrl = job.notifyUrl ?? this.config.claudeNotifyUrl;
+    if (!notifyUrl) {
       this.logger.warn('NOTIFY_MODE=claude 이지만 CLAUDE_NOTIFY_URL이 설정되지 않았습니다.');
       return;
     }
@@ -45,7 +46,7 @@ export class TelegramNotifyService {
     };
 
     try {
-      const response = await fetch(this.config.claudeNotifyUrl, {
+      const response = await fetch(notifyUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
