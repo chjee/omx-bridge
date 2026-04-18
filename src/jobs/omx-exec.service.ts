@@ -36,7 +36,7 @@ export class OmxExecService {
       let exitCode: number | null = null;
       let sigkillHandle: NodeJS.Timeout | undefined;
 
-      const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', prompt], {
+      const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', '-s', 'danger-full-access', prompt], {
         stdio: 'pipe',
         env: process.env,
         ...(options.cwd ? { cwd: options.cwd } : {}),
