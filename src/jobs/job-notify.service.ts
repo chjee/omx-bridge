@@ -5,8 +5,8 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob } from './job.types';
 
 @Injectable()
-export class TelegramNotifyService {
-  private readonly logger = new Logger(TelegramNotifyService.name);
+export class JobNotifyService {
+  private readonly logger = new Logger(JobNotifyService.name);
 
   constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
 
@@ -17,15 +17,13 @@ export class TelegramNotifyService {
         this._sendTelegram(job),
       ]);
     } else {
-      await this.notifyOpenClawHooks(job);
-      await this._sendTelegram(job);
+      await Promise.allSettled([
+        this.notifyOpenClawHooks(job),
+        this._sendTelegram(job),
+      ]);
     }
   }
 
-  /**
-   * claude 모드: CLAUDE_NOTIFY_URL로 완료 이벤트 webhook POST.
-   * omx-bridge-mcp 채널 엔드포인트가 수신해서 Claude에 push한다.
-   */
   private async _notifyClaudeWebhook(job: BridgeJob): Promise<void> {
     const notifyUrl = job.notifyUrl ?? this.config.claudeNotifyUrl;
     if (!notifyUrl) {
