@@ -4,6 +4,12 @@ OpenClaw and Claude Code bridge service for running OMX jobs from chat-driven co
 
 The bridge accepts job requests over HTTP, runs `omx exec`, stores job state on disk, and sends completion notifications back to the caller through OpenClaw, Telegram, or a Claude Code MCP webhook.
 
+## When To Use This
+
+If you are already at a terminal and only need to run a coding agent, use `omx` directly.
+
+Use `omx-bridge` when you want Claude Code or Telegram resident sessions to delegate work to OMX and receive completion events back into the conversation. The bridge is not an `omx` CLI replacement; it is a coordination layer for asynchronous Claude/OMX workflows.
+
 ## Architecture
 
 ```text
