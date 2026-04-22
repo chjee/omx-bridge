@@ -5,6 +5,7 @@ import type { CreateJobDto } from './dto/create-job.dto';
 import type { JobCallbackDto } from './dto/job-callback.dto';
 import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
+import { TelegramNotifyService } from './telegram-notify.service';
 import type { BridgeJob, JobStatus } from './job.types';
 
 @Injectable()
@@ -14,6 +15,7 @@ export class JobsService {
   constructor(
     private readonly repository: JobQueueRepository,
     private readonly jobRunnerService: JobRunnerService,
+    private readonly telegramNotify: TelegramNotifyService,
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
   ) {}
 
@@ -77,6 +79,7 @@ export class JobsService {
       },
     });
     await this.jobRunnerService.cancel(id);
+    void this.telegramNotify.notifyJobComplete(savedJob);
     return savedJob;
   }
 
