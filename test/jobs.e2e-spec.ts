@@ -289,7 +289,7 @@ if [ "\${1-}" != "exec" ]; then
   exit 64
 fi
 
-prompt="\${2-}"
+prompt="\${@: -1}"
 printf 'omx:%s\n' "$prompt" >> "$BRIDGE_TRACE_FILE"
 exec node "$FAKE_CODEX_PATH" "$prompt"
 `,
