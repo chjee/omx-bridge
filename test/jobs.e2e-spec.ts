@@ -7,6 +7,7 @@ import { AppModule } from '../src/app.module';
 import { JobRunnerService } from '../src/jobs/job-runner.service';
 import { JobsController } from '../src/jobs/jobs.controller';
 import { OmxExecService } from '../src/jobs/omx-exec.service';
+import { TelegramNotifyService } from '../src/jobs/telegram-notify.service';
 import type { BridgeJob, OmxExecutionResult } from '../src/jobs/job.types';
 import { createTempDir, waitFor } from './helpers';
 
@@ -88,6 +89,7 @@ describe('Jobs API (e2e)', () => {
   let fakeOmxExecService: FakeOmxExecService;
   let runner: JobRunnerService;
   let controller: JobsController;
+  let notifyJobComplete: jest.Mock;
 
   async function getJob(jobId: string): Promise<BridgeJob> {
     return controller.getJob(jobId);
@@ -98,12 +100,15 @@ describe('Jobs API (e2e)', () => {
     process.env.BRIDGE_JOBS_DIR = jobsDirectory;
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     fakeOmxExecService = new FakeOmxExecService();
+    notifyJobComplete = jest.fn().mockResolvedValue(undefined);
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     })
       .overrideProvider(OmxExecService)
       .useValue(fakeOmxExecService)
+      .overrideProvider(TelegramNotifyService)
+      .useValue({ notifyJobComplete })
       .compile();
 
     app = moduleRef.createNestApplication();
@@ -217,6 +222,14 @@ describe('Jobs API (e2e)', () => {
       exitCode: 0,
     });
     expect(fakeOmxExecService.calls).toEqual([]);
+    expect(notifyJobComplete).toHaveBeenCalledTimes(1);
+    expect(notifyJobComplete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: createResponse.jobId,
+        status: 'succeeded',
+        stdout: 'callback result',
+      }),
+    );
   });
 
   it('cancels queued and running jobs', async () => {
