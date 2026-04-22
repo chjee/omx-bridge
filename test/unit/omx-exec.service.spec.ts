@@ -49,7 +49,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', 'hello world'],
+      ['exec', '--full-auto', '-s', 'danger-full-access', 'hello world'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
     expect(child.stdin.writableEnded).toBe(true);
