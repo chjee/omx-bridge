@@ -40,4 +40,34 @@ describe('CreateJobDto', () => {
     expect(errors).toHaveLength(0);
     expect(dto.metadata).toEqual({ source: 'openclaw', chatId: 1234 });
   });
+
+  it('accepts loopback notify URLs', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    dto.notifyUrl = 'http://127.0.0.1:3993/notify';
+
+    const errors = await validate(dto);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects malformed notify URLs', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    dto.notifyUrl = 'not-a-url';
+
+    const errors = await validate(dto);
+
+    expect(errors.some((error) => error.property === 'notifyUrl')).toBe(true);
+  });
+
+  it('rejects non-loopback notify URLs', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    dto.notifyUrl = 'https://example.com/notify';
+
+    const errors = await validate(dto);
+
+    expect(errors.some((error) => error.property === 'notifyUrl')).toBe(true);
+  });
 });
