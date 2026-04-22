@@ -46,7 +46,7 @@ export class TelegramNotifyService {
         headers: {
           'Content-Type': 'application/json',
           ...(this.config.callbackSecret
-            ? { 'X-Callback-Signature': this.buildCallbackSignatureHeader(job.id, payload) }
+            ? { 'X-Callback-Signature': this.buildCallbackSignatureHeader(job.id, body) }
             : {}),
         },
         body,
@@ -59,8 +59,8 @@ export class TelegramNotifyService {
     }
   }
 
-  private buildCallbackSignatureHeader(jobId: string, body: unknown): string {
-    const message = `${jobId}:${JSON.stringify(body)}`;
+  private buildCallbackSignatureHeader(jobId: string, body: string): string {
+    const message = `${jobId}:${body}`;
     const hex = createHmac('sha256', this.config.callbackSecret!).update(message).digest('hex');
     return `sha256=${hex}`;
   }
