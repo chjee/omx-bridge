@@ -6,7 +6,7 @@
  *
  * 서명 방식:
  *   X-Callback-Signature: sha256=<hex>
- *   HMAC 입력: `${jobId}:${JSON.stringify(body)}`
+ *   HMAC 입력: `${jobId}:` + raw HTTP body bytes
  *
  * BRIDGE_CALLBACK_SECRET이 미설정이면 모든 콜백을 허용합니다.
  * (하위 호환성 — 시크릿 미설정 환경에서 기존 동작 유지)
@@ -32,7 +32,7 @@ export class CallbackAuthGuard implements CanActivate {
       return true;
     }
 
-    const req = context.switchToHttp().getRequest<Request>();
+    const req = context.switchToHttp().getRequest<Request & { rawBody?: Buffer }>();
     const jobId = req.params['id'] ?? '';
     const signature = req.headers['x-callback-signature'];
 
@@ -40,12 +40,14 @@ export class CallbackAuthGuard implements CanActivate {
       throw new UnauthorizedException('Missing or invalid X-Callback-Signature header');
     }
 
-    const rawBody: string =
-      typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    if (!Buffer.isBuffer(req.rawBody)) {
+      throw new UnauthorizedException('Missing raw request body for signature verification');
+    }
 
-    const expected = createHmac('sha256', this.config.callbackSecret)
-      .update(`${jobId}:${rawBody}`)
-      .digest('hex');
+    const hmac = createHmac('sha256', this.config.callbackSecret);
+    hmac.update(`${jobId}:`);
+    hmac.update(req.rawBody);
+    const expected = hmac.digest('hex');
 
     const provided = signature.slice('sha256='.length);
 
