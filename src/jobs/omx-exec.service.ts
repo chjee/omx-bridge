@@ -122,7 +122,7 @@ export class OmxExecService {
         });
       });
 
-      // Fix: SIGKILL fallback — SIGTERM 후 5초 뒤에도 프로세스가 젬료되지 않으면 SIGKILL
+      // Fix: SIGKILL fallback — SIGTERM 후 5초 뒤에도 프로세스가 종료되지 않으면 SIGKILL
       const sendSigkillAfterDelay = (): void => {
         sigkillHandle = setTimeout(() => {
           child.kill('SIGKILL');
