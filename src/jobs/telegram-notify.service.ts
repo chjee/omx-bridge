@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob } from './job.types';
@@ -11,7 +12,10 @@ export class TelegramNotifyService {
 
   async notifyJobComplete(job: BridgeJob): Promise<void> {
     if (this.config.notifyMode === 'claude') {
-      await this._notifyClaudeWebhook(job);
+      await Promise.allSettled([
+        this._notifyClaudeWebhook(job),
+        this._sendTelegram(job),
+      ]);
     } else {
       await this.notifyOpenClawHooks(job);
       await this._sendTelegram(job);
@@ -29,27 +33,23 @@ export class TelegramNotifyService {
       return;
     }
 
-    const payload = {
-      jobId: job.id,
-      status: job.status,
-      prompt: job.prompt,
-      cwd: job.cwd,
-      exitCode: job.exitCode,
+    const payload: BridgeJob = {
+      ...job,
       stdout: job.stdout?.slice(0, 2000) || '',
       stderr: job.stderr?.slice(0, 500) || '',
-      metadata: job.metadata,
-      execution: {
-        durationMs: job.execution.durationMs,
-        outputTruncated: job.execution.outputTruncated,
-        timedOut: job.execution.timedOut,
-      },
     };
+    const body = JSON.stringify(payload);
 
     try {
       const response = await fetch(notifyUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.config.callbackSecret
+            ? { 'X-Callback-Signature': this.buildCallbackSignatureHeader(job.id, payload) }
+            : {}),
+        },
+        body,
       });
       if (!response.ok) {
         this.logger.warn(`Claude webhook 응답 오류: ${response.status} ${response.statusText}`);
@@ -57,6 +57,12 @@ export class TelegramNotifyService {
     } catch (err) {
       this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
     }
+  }
+
+  private buildCallbackSignatureHeader(jobId: string, body: unknown): string {
+    const message = `${jobId}:${JSON.stringify(body)}`;
+    const hex = createHmac('sha256', this.config.callbackSecret!).update(message).digest('hex');
+    return `sha256=${hex}`;
   }
 
   private async notifyOpenClawHooks(job: BridgeJob): Promise<void> {
