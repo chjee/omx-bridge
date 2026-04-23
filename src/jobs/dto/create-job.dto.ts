@@ -1,6 +1,41 @@
-import { IsNotEmpty, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUrl,
+  MaxLength,
+  ValidateBy,
+  type ValidationOptions,
+} from 'class-validator';
 
 export const MAX_PROMPT_LENGTH = 4000;
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+function IsLoopbackNotifyUrl(validationOptions?: ValidationOptions) {
+  return ValidateBy(
+    {
+      name: 'isLoopbackNotifyUrl',
+      validator: {
+        validate(value: unknown): boolean {
+          if (typeof value !== 'string') return false;
+
+          try {
+            const url = new URL(value);
+            return LOOPBACK_HOSTS.has(url.hostname);
+          } catch {
+            return false;
+          }
+        },
+        defaultMessage(): string {
+          return 'notifyUrl must target a loopback host';
+        },
+      },
+    },
+    validationOptions,
+  );
+}
 
 export class CreateJobDto {
   @IsString()
@@ -24,6 +59,8 @@ export class CreateJobDto {
 
   @IsOptional()
   @IsString()
+  @IsUrl({ require_protocol: true, require_tld: false, protocols: ['http', 'https'] })
+  @IsLoopbackNotifyUrl()
   @MaxLength(500)
   notifyUrl?: string;
 }

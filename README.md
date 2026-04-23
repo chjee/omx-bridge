@@ -93,6 +93,17 @@ The MCP server submits jobs and injects its own session-local notify URL:
 notifyUrl = http://127.0.0.1:${WEBHOOK_PORT}/notify
 ```
 
+Available tools:
+
+| Tool | Description |
+|------|-------------|
+| `omx_submit_job` | Submit a prompt to the bridge and return the job id |
+| `omx_get_job` | Fetch status and result for a specific job |
+| `omx_list_jobs` | List jobs, optionally filtered by status |
+| `omx_cancel_job` | Cancel a queued or running job |
+| `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
+| `omx_get_notifications` | Drain all pending completion notifications from the local webhook queue |
+
 Important `omx-bridge-mcp/.env` values:
 
 ```env
@@ -100,6 +111,7 @@ BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
 WEBHOOK_PORT=3993
 ENABLE_CLAUDE_CHANNEL=false
+MAX_NOTIFICATION_QUEUE_SIZE=200
 ```
 
 Each concurrent Claude Code session must use a unique `WEBHOOK_PORT`. If a CLI session and a resident Telegram session both use `3993`, completion notifications may be delivered to the wrong MCP process or the second webhook server may fail to bind.
@@ -171,3 +183,8 @@ cd omx-bridge-mcp && npm run build
 - The job queue is file-backed; interrupted `running` jobs are recovered to `queued` on service startup.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
+- `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
+- The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in memory.
+- Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
+- On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
+- When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
