@@ -1,6 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob } from './job.types';
 
@@ -76,20 +75,22 @@ export class JobNotifyService {
       job.cwd ? `Dir: ${job.cwd}` : '',
       job.stdout?.slice(0, 300) || '',
     ].filter(Boolean).join('\n');
+
     try {
-      await new Promise<void>((resolve) => {
-        const body = JSON.stringify({ message, agentId: 'main', sessionKey, deliver: true });
-        const child = spawn('curl', [
-          '-s', '-o', '/dev/null',
-          '-X', 'POST', url,
-          '-H', `Authorization: Bearer ${token}`,
-          '-H', 'Content-Type: application/json',
-          '-d', body,
-        ]);
-        child.once('close', () => resolve());
-        child.once('error', () => resolve());
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message, agentId: 'main', sessionKey, deliver: true }),
       });
-    } catch { /* best-effort */ }
+      if (!response.ok) {
+        this.logger.warn(`OpenClaw notify 응답 오류: ${response.status} ${response.statusText}`);
+      }
+    } catch (err) {
+      this.logger.warn(`OpenClaw notify 전송 실패: ${String(err)}`);
+    }
   }
 
   private async _sendTelegram(job: BridgeJob): Promise<void> {
@@ -108,26 +109,16 @@ export class JobNotifyService {
       .join('\n');
 
     try {
-      await new Promise<void>((resolve) => {
-        const body = JSON.stringify({ chat_id: chatId, text });
-        const child = spawn('curl', [
-          '-s', '-o', '/dev/null',
-          '-X', 'POST',
-          `https://api.telegram.org/bot${botToken}/sendMessage`,
-          '-H', 'Content-Type: application/json',
-          '-d', body,
-        ]);
-        child.once('close', (code) => {
-          if (code !== 0) this.logger.warn(`Telegram notify curl exited: ${code}`);
-          resolve();
-        });
-        child.once('error', (err) => {
-          this.logger.warn(`Telegram notify error: ${String(err)}`);
-          resolve();
-        });
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text }),
       });
+      if (!response.ok) {
+        this.logger.warn(`Telegram notify 응답 오류: ${response.status} ${response.statusText}`);
+      }
     } catch (err) {
-      this.logger.warn(`Telegram notify error: ${String(err)}`);
+      this.logger.warn(`Telegram notify 전송 실패: ${String(err)}`);
     }
   }
 }

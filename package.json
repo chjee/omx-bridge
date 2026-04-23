@@ -4,6 +4,9 @@
   "private": true,
   "description": "OpenClaw to OMX bridge service",
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
