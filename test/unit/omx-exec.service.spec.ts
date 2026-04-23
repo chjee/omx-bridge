@@ -142,6 +142,26 @@ describe('OmxExecService', () => {
     });
   });
 
+  it('preserves stderr chunks arriving after stdout reaches the limit', async () => {
+    const child = new MockChildProcess();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 4 },
+    );
+
+    const pending = service.execute('heavy stdout');
+    child.stdout.write('abcdef'); // fills stdout (4 chars) and sets stdoutTruncated
+    child.stderr.write('ERR');   // must still be captured independently
+    child.emit('close', 1);
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'failed',
+      stdout: 'abcd',
+      stderr: 'ERR',
+      execution: { outputTruncated: true },
+    });
+  });
+
   it('maps abort signals into cancelled results', async () => {
     const child = new MockChildProcess();
     const service = createService(

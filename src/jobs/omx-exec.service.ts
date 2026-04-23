@@ -46,10 +46,12 @@ export class OmxExecService {
 
       const appendOutput = (chunk: string, target: 'stdout' | 'stderr'): void => {
         if (target === 'stdout') {
+          if (stdoutTruncated) return;
           const next = stdout + chunk;
           stdout = next.slice(0, this.config.maxOutputChars);
           if (stdout.length < next.length) stdoutTruncated = true;
         } else {
+          if (stderrTruncated) return;
           const next = stderr + chunk;
           stderr = next.slice(0, this.config.maxOutputChars);
           if (stderr.length < next.length) stderrTruncated = true;
