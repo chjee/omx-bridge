@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { createHmac } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import { computeCallbackSignature } from './callback-signature';
 import type { BridgeJob } from './job.types';
 
 @Injectable()
@@ -44,7 +44,7 @@ export class JobNotifyService {
         headers: {
           'Content-Type': 'application/json',
           ...(this.config.callbackSecret
-            ? { 'X-Callback-Signature': this.buildCallbackSignatureHeader(job.id, body) }
+            ? { 'X-Callback-Signature': computeCallbackSignature(job.id, body, this.config.callbackSecret) }
             : {}),
         },
         body,
@@ -58,12 +58,6 @@ export class JobNotifyService {
       this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
       return false;
     }
-  }
-
-  private buildCallbackSignatureHeader(jobId: string, body: string): string {
-    const message = `${jobId}:${body}`;
-    const hex = createHmac('sha256', this.config.callbackSecret!).update(message).digest('hex');
-    return `sha256=${hex}`;
   }
 
   private async notifyOpenClawHooks(job: BridgeJob): Promise<void> {
