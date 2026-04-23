@@ -24,6 +24,10 @@ const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "3993", 10);
 const SELF_NOTIFY_URL = `http://127.0.0.1:${WEBHOOK_PORT}/notify`;
 const ENABLE_CLAUDE_CHANNEL = parseBoolean(process.env["ENABLE_CLAUDE_CHANNEL"]);
+const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
+  process.env["MAX_NOTIFICATION_QUEUE_SIZE"],
+  200,
+);
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -78,6 +82,8 @@ interface ClaudeChannelNotification extends Notification {
   };
 }
 
+type OmxBridgeMcpServer = Server<Request, ClaudeChannelNotification, Result>;
+
 // ---------------------------------------------------------------------------
 // 알림 큐 (in-memory)
 // ---------------------------------------------------------------------------
@@ -92,6 +98,13 @@ function parseBoolean(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
 }
 
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
@@ -100,15 +113,15 @@ function buildBridgeUrl(path: string): URL {
   return new URL(path, ensureTrailingSlash(BRIDGE_URL));
 }
 
-function buildCallbackSignatureHeader(jobId: string, body: unknown): string {
-  const message = `${jobId}:${JSON.stringify(body)}`;
+function buildCallbackSignatureHeader(jobId: string, body: string): string {
+  const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", BRIDGE_CALLBACK_SECRET).update(message).digest("hex");
   return `sha256=${hex}`;
 }
 
-function verifyWebhookSignature(jobId: string, body: unknown, signature: string): boolean {
+function verifyWebhookSignature(jobId: string, rawBody: string, signature: string): boolean {
   if (!BRIDGE_CALLBACK_SECRET) return true; // secret 미설정 시 검증 생략
-  const expected = buildCallbackSignatureHeader(jobId, body);
+  const expected = buildCallbackSignatureHeader(jobId, rawBody);
   try {
     return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
   } catch {
@@ -223,10 +236,13 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   };
 }
 
-async function sendClaudeChannelNotification(job: BridgeJob): Promise<void> {
-  if (!ENABLE_CLAUDE_CHANNEL || !mcpServer) return;
+async function sendClaudeChannelNotification(
+  server: OmxBridgeMcpServer,
+  job: BridgeJob,
+): Promise<void> {
+  if (!ENABLE_CLAUDE_CHANNEL) return;
 
-  await mcpServer.notification({
+  await server.notification({
     method: "notifications/claude/channel",
     params: {
       content: JSON.stringify({
@@ -244,6 +260,13 @@ async function sendClaudeChannelNotification(job: BridgeJob): Promise<void> {
       },
     },
   });
+}
+
+function enqueueNotification(notification: JobNotification): void {
+  notificationQueue.push(notification);
+  if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
+    notificationQueue.splice(0, notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +291,7 @@ function sendJsonResponse(res: ServerResponse, status: number, body: unknown): v
   res.end(payload);
 }
 
-let mcpServer: Server<Request, ClaudeChannelNotification, Result> | null = null; // MCP 서버 참조 (알림 발송용)
-
-function startWebhookServer(): void {
+function startWebhookServer(server: OmxBridgeMcpServer): void {
   const http = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/notify") {
       let rawBody: string;
@@ -300,7 +321,7 @@ function startWebhookServer(): void {
         sendJsonResponse(res, 401, { error: "Missing X-Callback-Signature header" });
         return;
       }
-      if (signature && !verifyWebhookSignature(jobId, payload, signature)) {
+      if (signature && !verifyWebhookSignature(jobId, rawBody, signature)) {
         sendJsonResponse(res, 403, { error: "Signature verification failed" });
         return;
       }
@@ -315,22 +336,20 @@ function startWebhookServer(): void {
         receivedAt: new Date().toISOString(),
         job,
       };
-      notificationQueue.push(notification);
+      enqueueNotification(notification);
 
       // MCP logging 알림 발송 (Claude Code 로그에 노출)
-      if (mcpServer) {
-        try {
-          await mcpServer.sendLoggingMessage({
-            level: "info",
-            data: `[omx-bridge] Job ${job.id} ${job.status}: ${job.stdout.slice(0, 200)}`,
-          });
-        } catch {
-          // MCP 연결이 끊겼을 경우 무시
-        }
+      try {
+        await server.sendLoggingMessage({
+          level: "info",
+          data: `[omx-bridge] Job ${job.id} ${job.status}: ${job.stdout.slice(0, 200)}`,
+        });
+      } catch {
+        // MCP 연결이 끊겼을 경우 무시
       }
 
       try {
-        await sendClaudeChannelNotification(job);
+        await sendClaudeChannelNotification(server, job);
       } catch {
         // channel preview 기능이 비활성/미지원인 경우 알림 큐와 logging 경로는 유지
       }
@@ -378,8 +397,6 @@ const server = new Server<Request, ClaudeChannelNotification, Result>(
       : undefined,
   },
 );
-
-mcpServer = server;
 
 // ---------------------------------------------------------------------------
 // 도구 목록
@@ -582,12 +599,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         ...(stderr !== undefined ? { stderr } : {}),
         ...(exitCode !== undefined ? { exitCode } : {}),
       };
+      const bodyText = JSON.stringify(body);
       const signatureHeader = BRIDGE_CALLBACK_SECRET
-        ? buildCallbackSignatureHeader(jobId, body)
+        ? buildCallbackSignatureHeader(jobId, bodyText)
         : undefined;
       const result = await requestJson<BridgeJob>(
         `jobs/${encodeURIComponent(jobId)}/callback`,
-        { method: "POST", body: JSON.stringify(body) },
+        { method: "POST", body: bodyText },
         signatureHeader,
       );
       return toTextResult(result);
@@ -607,7 +625,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 // 시작
 // ---------------------------------------------------------------------------
 
-startWebhookServer();
-
 const transport = new StdioServerTransport();
+startWebhookServer(server);
 await server.connect(transport);

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import type { BridgeConfig } from '../../src/config/bridge-config';
-import { TelegramNotifyService } from '../../src/jobs/telegram-notify.service';
+import { JobNotifyService } from '../../src/jobs/job-notify.service';
 import type { BridgeJob } from '../../src/jobs/job.types';
 
 jest.mock('node:child_process', () => ({
@@ -60,7 +60,7 @@ function mockCurlSuccess(): void {
   });
 }
 
-describe('TelegramNotifyService', () => {
+describe('JobNotifyService', () => {
   const originalFetch = global.fetch;
 
   beforeEach(() => {
@@ -78,7 +78,7 @@ describe('TelegramNotifyService', () => {
       callbackSecret: 'secret',
       claudeNotifyUrl: 'http://127.0.0.1:3993/notify',
     });
-    const service = new TelegramNotifyService(config);
+    const service = new JobNotifyService(config);
     const job = createJob({ stdout: 'x'.repeat(2100), stderr: 'e'.repeat(600) });
 
     await service.notifyJobComplete(job);
@@ -104,7 +104,7 @@ describe('TelegramNotifyService', () => {
   });
 
   it('sends telegram fallback in claude mode even when notifyUrl is missing', async () => {
-    const service = new TelegramNotifyService(createConfig({ claudeNotifyUrl: undefined }));
+    const service = new JobNotifyService(createConfig({ claudeNotifyUrl: undefined }));
 
     await service.notifyJobComplete(createJob());
 

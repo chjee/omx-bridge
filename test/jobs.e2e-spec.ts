@@ -7,7 +7,7 @@ import { AppModule } from '../src/app.module';
 import { JobRunnerService } from '../src/jobs/job-runner.service';
 import { JobsController } from '../src/jobs/jobs.controller';
 import { OmxExecService } from '../src/jobs/omx-exec.service';
-import { TelegramNotifyService } from '../src/jobs/telegram-notify.service';
+import { JobNotifyService } from '../src/jobs/job-notify.service';
 import type { BridgeJob, OmxExecutionResult } from '../src/jobs/job.types';
 import { createTempDir, waitFor } from './helpers';
 
@@ -107,7 +107,7 @@ describe('Jobs API (e2e)', () => {
     })
       .overrideProvider(OmxExecService)
       .useValue(fakeOmxExecService)
-      .overrideProvider(TelegramNotifyService)
+      .overrideProvider(JobNotifyService)
       .useValue({ notifyJobComplete })
       .compile();
 
