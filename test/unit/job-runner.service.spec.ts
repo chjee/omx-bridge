@@ -82,10 +82,10 @@ describe('JobRunnerService', () => {
       config,
     );
 
-    await repository.create(
+    await repository.save(
       createJob({ id: '00000000-0000-4000-a000-000000000002', createdAt: '2026-04-02T00:00:02.000Z' }),
     );
-    await repository.create(
+    await repository.save(
       createJob({ id: '00000000-0000-4000-a000-000000000001', createdAt: '2026-04-02T00:00:01.000Z' }),
     );
 
@@ -133,7 +133,7 @@ describe('JobRunnerService', () => {
       config,
     );
 
-    await repository.create(createJob());
+    await repository.save(createJob());
     await runner.runOnce();
 
     await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
@@ -174,7 +174,7 @@ describe('JobRunnerService', () => {
       config,
     );
 
-    await repository.create(createJob());
+    await repository.save(createJob());
 
     const runPromise = runner.runOnce();
     await waitFor(
@@ -209,7 +209,7 @@ describe('JobRunnerService', () => {
   });
 
   it('recovers stranded running jobs by re-queueing them', async () => {
-    await repository.create(
+    await repository.save(
       createJob({
         status: 'running',
         startedAt: '2026-04-02T00:00:03.000Z',
