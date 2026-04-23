@@ -61,7 +61,7 @@ describe('JobQueueRepository', () => {
   it('writes and reads a queued job file', async () => {
     const job = createJob();
 
-    await repository.create(job);
+    await repository.save(job);
 
     const jobPath = path.join(jobsDirectory, `${job.id}.json`);
     await expect(fs.stat(jobPath)).resolves.toBeDefined();
@@ -70,7 +70,7 @@ describe('JobQueueRepository', () => {
 
   it('updates status fields without dropping existing fields', async () => {
     const job = createJob({ metadata: { source: 'openclaw' } });
-    await repository.create(job);
+    await repository.save(job);
 
     const updated = {
       ...job,
@@ -86,13 +86,13 @@ describe('JobQueueRepository', () => {
   });
 
   it('lists queued jobs in deterministic FIFO order', async () => {
-    await repository.create(
+    await repository.save(
       createJob({ id: TEST_ID_2, createdAt: '2026-04-02T00:00:02.000Z' }),
     );
-    await repository.create(
+    await repository.save(
       createJob({ id: TEST_ID_1, createdAt: '2026-04-02T00:00:01.000Z' }),
     );
-    await repository.create(
+    await repository.save(
       createJob({
         id: TEST_ID_3,
         createdAt: '2026-04-02T00:00:03.000Z',

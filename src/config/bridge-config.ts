@@ -58,7 +58,7 @@ export function buildBridgeConfig(
     omxCommand: configService.get<string>('OMX_COMMAND', 'omx'),
     jobPollIntervalMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_POLL_INTERVAL_MS'),
-      100,
+      500,
     ),
     jobTimeoutMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_TIMEOUT_MS'),

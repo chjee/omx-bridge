@@ -184,21 +184,22 @@ describe('Jobs API (e2e)', () => {
   });
 
   it('lists all jobs and supports filtering by status', async () => {
-    const queuedResponse = await controller.createJob({ prompt: 'queued only' });
-    const finishedResponse = await controller.createJob({ prompt: 'run me' });
+    const firstJob = await controller.createJob({ prompt: 'run first' });
+    const secondJob = await controller.createJob({ prompt: 'queued second' });
 
+    // runOnce picks the earliest-queued job (firstJob), leaving secondJob queued
     await runner.runOnce();
 
     const listResponse = await controller.listJobs({});
     expect(listResponse.map((job: BridgeJob) => job.id)).toEqual([
-      queuedResponse.jobId,
-      finishedResponse.jobId,
+      firstJob.jobId,
+      secondJob.jobId,
     ]);
 
-    const succeededResponse = await controller.listJobs({ status: 'succeeded' });
-    expect(succeededResponse).toHaveLength(1);
-    expect(succeededResponse[0]).toMatchObject({
-      id: queuedResponse.jobId,
+    const succeededJobs = await controller.listJobs({ status: 'succeeded' });
+    expect(succeededJobs).toHaveLength(1);
+    expect(succeededJobs[0]).toMatchObject({
+      id: firstJob.jobId,
       status: 'succeeded',
     });
   });

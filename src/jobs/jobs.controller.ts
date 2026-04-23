@@ -40,7 +40,7 @@ export class JobsController {
   }
 
   @Post(':id/callback')
-  @UseGuards(CallbackAuthGuard)  // Fix: 콜백 인증 — HMAC 서명 검증
+  @UseGuards(CallbackAuthGuard)
   async handleJobCallback(@Param('id') id: string, @Body() body: JobCallbackDto) {
     return this.jobsService.completeJobFromCallback(id, body);
   }

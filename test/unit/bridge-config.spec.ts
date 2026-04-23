@@ -16,7 +16,7 @@ describe('buildBridgeConfig', () => {
     expect(config).toEqual({
       jobsDirectory: '/workspace/app/.omx/state/bridge-jobs',
       omxCommand: 'omx',
-      jobPollIntervalMs: 100,
+      jobPollIntervalMs: 500,
       jobTimeoutMs: 900000,
       maxOutputChars: 32000,
       notifyMode: 'openclaw',

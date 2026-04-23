@@ -29,7 +29,8 @@ export class OmxExecService {
     return new Promise<OmxExecutionResult>((resolve) => {
       let stdout = '';
       let stderr = '';
-      let outputTruncated = false;
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
       let settled = false;
       let timedOut = false;
       let cancelled = false;
@@ -44,16 +45,16 @@ export class OmxExecService {
       child.stdin.end();
 
       const appendOutput = (chunk: string, target: 'stdout' | 'stderr'): void => {
-        const nextValue = `${target === 'stdout' ? stdout : stderr}${chunk}`;
-        const trimmed = nextValue.slice(0, this.config.maxOutputChars);
-        if (trimmed.length < nextValue.length) {
-          outputTruncated = true;
-        }
-
         if (target === 'stdout') {
-          stdout = trimmed;
+          if (stdoutTruncated) return;
+          const next = stdout + chunk;
+          stdout = next.slice(0, this.config.maxOutputChars);
+          if (stdout.length < next.length) stdoutTruncated = true;
         } else {
-          stderr = trimmed;
+          if (stderrTruncated) return;
+          const next = stderr + chunk;
+          stderr = next.slice(0, this.config.maxOutputChars);
+          if (stderr.length < next.length) stderrTruncated = true;
         }
       };
 
@@ -66,7 +67,6 @@ export class OmxExecService {
         }
         settled = true;
         clearTimeout(timeoutHandle);
-        // Fix: SIGKILL fallback — 프로세스가 종료되면 SIGKILL 예약 취소
         clearTimeout(sigkillHandle);
         options.signal?.removeEventListener('abort', handleAbort);
 
@@ -80,7 +80,7 @@ export class OmxExecService {
             timeoutMs: this.config.jobTimeoutMs,
             maxOutputChars: this.config.maxOutputChars,
             durationMs: Date.now() - startedAt,
-            outputTruncated,
+            outputTruncated: stdoutTruncated || stderrTruncated,
             timedOut,
             ...overrides,
           },
@@ -122,7 +122,6 @@ export class OmxExecService {
         });
       });
 
-      // Fix: SIGKILL fallback — SIGTERM 후 5초 뒤에도 프로세스가 종료되지 않으면 SIGKILL
       const sendSigkillAfterDelay = (): void => {
         sigkillHandle = setTimeout(() => {
           child.kill('SIGKILL');

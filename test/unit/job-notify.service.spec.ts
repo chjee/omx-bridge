@@ -1,15 +1,7 @@
-import { EventEmitter } from 'node:events';
 import { createHmac } from 'node:crypto';
-import { spawn } from 'node:child_process';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { JobNotifyService } from '../../src/jobs/job-notify.service';
 import type { BridgeJob } from '../../src/jobs/job.types';
-
-jest.mock('node:child_process', () => ({
-  spawn: jest.fn(),
-}));
-
-const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
@@ -52,27 +44,17 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
   };
 }
 
-function mockCurlSuccess(): void {
-  mockSpawn.mockImplementation(() => {
-    const child = new EventEmitter();
-    process.nextTick(() => child.emit('close', 0));
-    return child as ReturnType<typeof spawn>;
-  });
-}
-
-function expectTelegramFallback(): void {
-  expect(mockSpawn).toHaveBeenCalledTimes(1);
-  expect(mockSpawn.mock.calls[0]?.[0]).toBe('curl');
-  expect(mockSpawn.mock.calls[0]?.[1]).toContain('https://api.telegram.org/bottoken/sendMessage');
-}
+const TELEGRAM_URL = 'https://api.telegram.org/bottoken/sendMessage';
+const CLAUDE_URL = 'http://127.0.0.1:3993/notify';
+const OPENCLAW_URL = 'http://openclaw.local/hooks/notify';
 
 describe('JobNotifyService', () => {
   const originalFetch = global.fetch;
+  let fetchMock: jest.Mock;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    mockCurlSuccess();
-    global.fetch = jest.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+    fetchMock = jest.fn().mockResolvedValue({ ok: true });
+    global.fetch = fetchMock as unknown as typeof fetch;
   });
 
   afterEach(() => {
@@ -82,16 +64,16 @@ describe('JobNotifyService', () => {
   it('sends claude webhook payload with id and callback signature without telegram fallback on success', async () => {
     const config = createConfig({
       callbackSecret: 'secret',
-      claudeNotifyUrl: 'http://127.0.0.1:3993/notify',
+      claudeNotifyUrl: CLAUDE_URL,
     });
     const service = new JobNotifyService(config);
     const job = createJob({ stdout: 'x'.repeat(2100), stderr: 'e'.repeat(600) });
 
     await service.notifyJobComplete(job);
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    const [url, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://127.0.0.1:3993/notify');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(CLAUDE_URL);
 
     const body = String(init.body);
     const payload = JSON.parse(body) as BridgeJob;
@@ -107,7 +89,6 @@ describe('JobNotifyService', () => {
       'Content-Type': 'application/json',
       'X-Callback-Signature': expectedSignature,
     });
-    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('sends telegram fallback in claude mode when notifyUrl is missing', async () => {
@@ -115,43 +96,50 @@ describe('JobNotifyService', () => {
 
     await service.notifyJobComplete(createJob());
 
-    expect(global.fetch).not.toHaveBeenCalled();
-    expectTelegramFallback();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toBe(TELEGRAM_URL);
   });
 
   it('sends telegram fallback in claude mode when webhook returns a non-ok response', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: 'Internal Server Error',
-    }) as unknown as typeof fetch;
-    const service = new JobNotifyService(createConfig({
-      claudeNotifyUrl: 'http://127.0.0.1:3993/notify',
-    }));
+    fetchMock.mockImplementation((url: string) => {
+      if (url === CLAUDE_URL) {
+        return Promise.resolve({ ok: false, status: 500, statusText: 'Internal Server Error' });
+      }
+      return Promise.resolve({ ok: true });
+    });
+    const service = new JobNotifyService(createConfig({ claudeNotifyUrl: CLAUDE_URL }));
 
     await service.notifyJobComplete(createJob());
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expectTelegramFallback();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const urls = fetchMock.mock.calls.map(([url]) => url as string);
+    expect(urls[0]).toBe(CLAUDE_URL);
+    expect(urls[1]).toBe(TELEGRAM_URL);
   });
 
   it('sends telegram fallback in claude mode when webhook fetch throws', async () => {
-    global.fetch = jest.fn().mockRejectedValue(new Error('connection refused')) as unknown as typeof fetch;
-    const service = new JobNotifyService(createConfig({
-      claudeNotifyUrl: 'http://127.0.0.1:3993/notify',
-    }));
+    fetchMock.mockImplementation((url: string) => {
+      if (url === CLAUDE_URL) {
+        return Promise.reject(new Error('connection refused'));
+      }
+      return Promise.resolve({ ok: true });
+    });
+    const service = new JobNotifyService(createConfig({ claudeNotifyUrl: CLAUDE_URL }));
 
     await service.notifyJobComplete(createJob());
 
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-    expectTelegramFallback();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const urls = fetchMock.mock.calls.map(([url]) => url as string);
+    expect(urls[0]).toBe(CLAUDE_URL);
+    expect(urls[1]).toBe(TELEGRAM_URL);
   });
 
   it('sends both OpenClaw hooks and Telegram notifications in openclaw mode', async () => {
     const service = new JobNotifyService(createConfig({
       notifyMode: 'openclaw',
       openclawHooks: {
-        url: 'http://openclaw.local/hooks/notify',
+        url: OPENCLAW_URL,
         token: 'openclaw-token',
         sessionKey: 'session-key',
       },
@@ -159,10 +147,9 @@ describe('JobNotifyService', () => {
 
     await service.notifyJobComplete(createJob());
 
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(mockSpawn).toHaveBeenCalledTimes(2);
-    const spawnedArgLists = mockSpawn.mock.calls.map(([, args]) => args ?? []);
-    expect(spawnedArgLists.some((args) => args.includes('http://openclaw.local/hooks/notify'))).toBe(true);
-    expect(spawnedArgLists.some((args) => args.includes('https://api.telegram.org/bottoken/sendMessage'))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const urls = fetchMock.mock.calls.map(([url]) => url as string);
+    expect(urls).toContain(OPENCLAW_URL);
+    expect(urls).toContain(TELEGRAM_URL);
   });
 });
