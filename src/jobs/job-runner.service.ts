@@ -135,7 +135,6 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         exitCode: result.exitCode,
         execution: result.execution,
       });
-      // best-effort 텔레그램 알림
       void this.jobNotify.notifyJobComplete(savedJob);
     } finally {
       this.abortControllers.delete(job.id);

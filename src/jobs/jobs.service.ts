@@ -6,7 +6,7 @@ import type { JobCallbackDto } from './dto/job-callback.dto';
 import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
 import { JobNotifyService } from './job-notify.service';
-import type { BridgeJob, JobStatus } from './job.types';
+import type { BridgeJob, JobExecutionMetadata, JobStatus } from './job.types';
 
 @Injectable()
 export class JobsService {
@@ -75,7 +75,7 @@ export class JobsService {
       stderr: input.stderr ?? job.stderr,
       execution: {
         ...job.execution,
-        ...(input.execution ?? {}),
+        ...this.projectCallbackExecution(input.execution),
       },
     });
     await this.jobRunnerService.cancel(id);
@@ -106,6 +106,18 @@ export class JobsService {
     });
     await this.jobRunnerService.cancel(id);
     return savedJob;
+  }
+
+  private projectCallbackExecution(
+    execution: JobCallbackDto['execution'],
+  ): Partial<Pick<JobExecutionMetadata, 'durationMs' | 'timedOut' | 'outputTruncated' | 'errorType'>> {
+    if (!execution) return {};
+    const patch: Partial<Pick<JobExecutionMetadata, 'durationMs' | 'timedOut' | 'outputTruncated' | 'errorType'>> = {};
+    if (execution.durationMs !== undefined) patch.durationMs = execution.durationMs;
+    if (execution.timedOut !== undefined) patch.timedOut = execution.timedOut;
+    if (execution.outputTruncated !== undefined) patch.outputTruncated = execution.outputTruncated;
+    if (execution.errorType !== undefined) patch.errorType = execution.errorType;
+    return patch;
   }
 
   private isTerminal(status: JobStatus): boolean {

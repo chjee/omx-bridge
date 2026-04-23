@@ -66,7 +66,6 @@ export class OmxExecService {
         }
         settled = true;
         clearTimeout(timeoutHandle);
-        // Fix: SIGKILL fallback — 프로세스가 종료되면 SIGKILL 예약 취소
         clearTimeout(sigkillHandle);
         options.signal?.removeEventListener('abort', handleAbort);
 
@@ -122,7 +121,6 @@ export class OmxExecService {
         });
       });
 
-      // Fix: SIGKILL fallback — SIGTERM 후 5초 뒤에도 프로세스가 종료되지 않으면 SIGKILL
       const sendSigkillAfterDelay = (): void => {
         sigkillHandle = setTimeout(() => {
           child.kill('SIGKILL');
