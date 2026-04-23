@@ -17,11 +17,6 @@ export class JobQueueRepository {
     await fs.mkdir(this.config.jobsDirectory, { recursive: true });
   }
 
-  async create(job: BridgeJob): Promise<BridgeJob> {
-    await this.writeJob(job);
-    return job;
-  }
-
   async save(job: BridgeJob): Promise<BridgeJob> {
     await this.writeJob(job);
     return job;

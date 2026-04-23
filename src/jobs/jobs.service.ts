@@ -40,7 +40,7 @@ export class JobsService {
       },
     };
 
-    return this.repository.create(job);
+    return this.repository.save(job);
   }
 
   async listJobs(status?: JobStatus): Promise<BridgeJob[]> {
