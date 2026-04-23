@@ -12,23 +12,24 @@ export class JobNotifyService {
 
   async notifyJobComplete(job: BridgeJob): Promise<void> {
     if (this.config.notifyMode === 'claude') {
-      await Promise.allSettled([
-        this._notifyClaudeWebhook(job),
-        this._sendTelegram(job),
-      ]);
-    } else {
-      await Promise.allSettled([
-        this.notifyOpenClawHooks(job),
-        this._sendTelegram(job),
-      ]);
+      const delivered = await this._notifyClaudeWebhook(job);
+      if (!delivered) {
+        await this._sendTelegram(job);
+      }
+      return;
     }
+
+    await Promise.allSettled([
+      this.notifyOpenClawHooks(job),
+      this._sendTelegram(job),
+    ]);
   }
 
-  private async _notifyClaudeWebhook(job: BridgeJob): Promise<void> {
+  private async _notifyClaudeWebhook(job: BridgeJob): Promise<boolean> {
     const notifyUrl = job.notifyUrl ?? this.config.claudeNotifyUrl;
     if (!notifyUrl) {
       this.logger.warn('NOTIFY_MODE=claude 이지만 CLAUDE_NOTIFY_URL이 설정되지 않았습니다.');
-      return;
+      return false;
     }
 
     const payload: BridgeJob = {
@@ -51,9 +52,12 @@ export class JobNotifyService {
       });
       if (!response.ok) {
         this.logger.warn(`Claude webhook 응답 오류: ${response.status} ${response.statusText}`);
+        return false;
       }
+      return true;
     } catch (err) {
       this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
+      return false;
     }
   }
 

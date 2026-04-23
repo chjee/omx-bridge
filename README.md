@@ -71,7 +71,9 @@ NOTIFY_MODE=openclaw
 Notification modes:
 
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.
-- `claude`: POST job completion to `CLAUDE_NOTIFY_URL`; if Telegram settings are present, also send Telegram fallback push.
+- `claude`: POST job completion to `CLAUDE_NOTIFY_URL`; Telegram settings provide fallback push.
+
+In claude notify mode, Telegram is used only when the Claude webhook cannot be delivered.
 
 For Claude mode:
 
