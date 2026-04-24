@@ -54,6 +54,11 @@ export class CreateJobDto {
   requestId?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  originRoutingKey?: string;
+
+  @IsOptional()
   @IsObject()
   metadata?: Record<string, unknown>;
 
