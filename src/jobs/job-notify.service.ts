@@ -12,7 +12,8 @@ export class JobNotifyService {
   async notifyJobComplete(job: BridgeJob): Promise<void> {
     if (this.config.notifyMode === 'claude') {
       const delivered = await this._notifyClaudeWebhook(job);
-      if (!delivered) {
+      if (!delivered && !job.notifyUrl) {
+        // notifyUrl이 지정된 경우 고정 Telegram fallback 생략 — routing 일관성 유지
         await this._sendTelegram(job);
       }
       return;

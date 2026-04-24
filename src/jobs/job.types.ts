@@ -20,6 +20,7 @@ export interface BridgeJob {
   cwd?: string;
   queueOrder: string;
   requestId?: string;
+  originRoutingKey?: string;
   metadata?: Record<string, unknown>;
   notifyUrl?: string;
   status: JobStatus;
