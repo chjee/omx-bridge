@@ -73,7 +73,10 @@ Notification modes:
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.
 - `claude`: POST job completion to `CLAUDE_NOTIFY_URL`; Telegram settings provide fallback push.
 
-In claude notify mode, Telegram is used only when the Claude webhook cannot be delivered.
+In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
+
+- **`notifyUrl` absent**: Telegram is used as a fallback when the configured `CLAUDE_NOTIFY_URL` webhook cannot be delivered.
+- **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers.
 
 For Claude mode:
 
@@ -99,7 +102,7 @@ Available tools:
 
 | Tool | Description |
 |------|-------------|
-| `omx_submit_job` | Submit a prompt to the bridge and return the job id |
+| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey` and `notifyUrl` for callback routing. |
 | `omx_get_job` | Fetch status and result for a specific job |
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |
@@ -190,3 +193,4 @@ cd omx-bridge-mcp && npm run build
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
 - On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
 - When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
+- `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Brokers such as `claude-synapse` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; synapse accepts both with `originRoutingKey` taking precedence.

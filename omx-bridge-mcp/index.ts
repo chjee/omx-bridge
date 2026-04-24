@@ -53,6 +53,7 @@ interface BridgeJob {
   cwd?: string;
   queueOrder: string;
   requestId?: string;
+  originRoutingKey?: string;
   metadata?: Record<string, unknown>;
   status: JobStatus;
   createdAt: string;
@@ -431,6 +432,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Optional metadata passed through to the bridge (e.g. chat_id, source).",
             additionalProperties: true,
           },
+          originRoutingKey: {
+            type: "string",
+            maxLength: 200,
+            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Used by synapse to route the callback result back to the correct chat.",
+          },
+          notifyUrl: {
+            type: "string",
+            description: "Webhook URL to receive job completion callback. Defaults to the MCP server's local webhook. Pass the caller's own notify endpoint when the callback must be routed to a different process (e.g. synapse routing).",
+          },
         },
         required: ["prompt"],
         additionalProperties: false,
@@ -539,11 +549,13 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   switch (name) {
     case "omx_submit_job": {
-      const { prompt, cwd, requestId, metadata } = args as {
+      const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl } = args as {
         prompt: string;
         cwd?: string;
         requestId?: string;
+        originRoutingKey?: string;
         metadata?: Record<string, unknown>;
+        notifyUrl?: string;
       };
       const result = await requestJson<CreateJobResponse>("jobs", {
         method: "POST",
@@ -551,8 +563,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           prompt,
           ...(cwd ? { cwd } : {}),
           ...(requestId ? { requestId } : {}),
+          ...(originRoutingKey ? { originRoutingKey } : {}),
           ...(metadata ? { metadata } : {}),
-          notifyUrl: SELF_NOTIFY_URL,
+          notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
         }),
       });
       return toTextResult(result);

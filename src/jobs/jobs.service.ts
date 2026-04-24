@@ -26,6 +26,7 @@ export class JobsService {
       cwd: input.cwd,
       queueOrder: this.nextQueueOrder(),
       requestId: input.requestId,
+      originRoutingKey: input.originRoutingKey,
       metadata: input.metadata,
       notifyUrl: input.notifyUrl,
       status: 'queued',
