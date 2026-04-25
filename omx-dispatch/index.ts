@@ -21,8 +21,10 @@ import type {
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
-const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "3993", 10);
-const SELF_NOTIFY_URL = `http://127.0.0.1:${WEBHOOK_PORT}/notify`;
+const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "0", 10); // 0 = dynamic range
+const WEBHOOK_PORT_MIN = 12000;
+const WEBHOOK_PORT_MAX = 12999;
+let SELF_NOTIFY_URL = "";
 const ENABLE_CLAUDE_CHANNEL = parseBoolean(process.env["ENABLE_CLAUDE_CHANNEL"]);
 const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
   process.env["MAX_NOTIFICATION_QUEUE_SIZE"],
@@ -292,7 +294,8 @@ function sendJsonResponse(res: ServerResponse, status: number, body: unknown): v
   res.end(payload);
 }
 
-function startWebhookServer(server: OmxBridgeMcpServer): void {
+function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
+  return new Promise((resolve, reject) => {
   const http = createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/notify") {
       let rawBody: string;
@@ -367,16 +370,33 @@ function startWebhookServer(server: OmxBridgeMcpServer): void {
     sendJsonResponse(res, 404, { error: "Not found" });
   });
 
-  http.listen(WEBHOOK_PORT, "127.0.0.1", () => {
-    process.stderr.write(
-      `[omx-bridge-mcp] Webhook server listening on http://127.0.0.1:${WEBHOOK_PORT}\n`,
-    );
+  let currentPort = WEBHOOK_PORT > 0
+    ? WEBHOOK_PORT
+    : WEBHOOK_PORT_MIN + Math.floor(Math.random() * (WEBHOOK_PORT_MAX - WEBHOOK_PORT_MIN + 1));
+
+  const tryListen = () => http.listen(currentPort, "127.0.0.1");
+
+  http.on("listening", () => {
+    const addr = http.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : currentPort;
+    SELF_NOTIFY_URL = `http://127.0.0.1:${port}/notify`;
+    process.stderr.write(`[omx-dispatch] Webhook server listening on ${SELF_NOTIFY_URL}\n`);
+    resolve();
   });
 
-  http.on("error", (err) => {
-    process.stderr.write(`[omx-bridge-mcp] Webhook server error: ${err.message}\n`);
-    process.exit(1);
+  http.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE" && WEBHOOK_PORT === 0 && currentPort < WEBHOOK_PORT_MAX) {
+      currentPort++;
+      tryListen();
+    } else {
+      process.stderr.write(`[omx-dispatch] Webhook server error: ${err.message}\n`);
+      reject(err);
+      process.exit(1);
+    }
   });
+
+  tryListen();
+});
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +410,7 @@ const serverCapabilities: ServerCapabilities = {
 };
 
 const server = new Server<Request, ClaudeChannelNotification, Result>(
-  { name: "omx-bridge-mcp", version: "0.2.0" },
+  { name: "omx-dispatch", version: "0.2.0" },
   {
     capabilities: serverCapabilities,
     instructions: ENABLE_CLAUDE_CHANNEL
@@ -639,5 +659,5 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 // ---------------------------------------------------------------------------
 
 const transport = new StdioServerTransport();
-startWebhookServer(server);
+await startWebhookServer(server);
 await server.connect(transport);
