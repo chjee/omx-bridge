@@ -14,6 +14,8 @@ export interface JobExecutionMetadata {
   recoveredFromRestart?: boolean;
 }
 
+export type JobSource = 'dispatch' | 'synapse' | 'openclaw';
+
 export interface BridgeJob {
   id: string;
   prompt: string;
@@ -21,6 +23,7 @@ export interface BridgeJob {
   queueOrder: string;
   requestId?: string;
   originRoutingKey?: string;
+  source?: JobSource;
   metadata?: Record<string, unknown>;
   notifyUrl?: string;
   status: JobStatus;
