@@ -34,7 +34,7 @@ Install dependencies:
 
 ```bash
 npm install
-cd omx-bridge-mcp && npm install
+cd omx-dispatch && npm install
 ```
 
 Create local env files from the examples:
@@ -54,7 +54,7 @@ Build both packages:
 
 ```bash
 npm run build
-cd omx-bridge-mcp && npm run build
+cd omx-dispatch && npm run build
 ```
 
 ## Bridge Service Configuration
@@ -180,7 +180,7 @@ Build checks:
 
 ```bash
 npm run build
-cd omx-bridge-mcp && npm run build
+cd omx-dispatch && npm run build
 ```
 
 ## Notes
