@@ -461,6 +461,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Webhook URL to receive job completion callback. Defaults to the MCP server's local webhook. Pass the caller's own notify endpoint when the callback must be routed to a different process (e.g. synapse routing).",
           },
+          source: {
+            type: "string",
+            enum: ["dispatch", "synapse", "openclaw"],
+            description: "Caller identity. Use 'dispatch' for Claude Code CLI sessions.",
+          },
         },
         required: ["prompt"],
         additionalProperties: false,
@@ -569,13 +574,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   switch (name) {
     case "omx_submit_job": {
-      const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl } = args as {
+      const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source } = args as {
         prompt: string;
         cwd?: string;
         requestId?: string;
         originRoutingKey?: string;
         metadata?: Record<string, unknown>;
         notifyUrl?: string;
+        source?: 'dispatch' | 'synapse' | 'openclaw';
       };
       const result = await requestJson<CreateJobResponse>("jobs", {
         method: "POST",
@@ -585,6 +591,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           ...(requestId ? { requestId } : {}),
           ...(originRoutingKey ? { originRoutingKey } : {}),
           ...(metadata ? { metadata } : {}),
+          ...(source ? { source } : {}),
           notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
         }),
       });
