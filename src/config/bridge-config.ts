@@ -17,7 +17,7 @@ export interface BridgeConfig {
    * - claude: claudeNotifyUrl로 webhook POST, Telegram 설정이 있으면 fallback push 병행
    */
   notifyMode: NotifyMode;
-  /** claude 모드 전용: 완료 이벤트를 수신할 webhook URL (omx-bridge-mcp 채널 엔드포인트) */
+  /** claude 모드 전용: 완료 이벤트를 수신할 webhook URL (omx-dispatch 채널 엔드포인트) */
   claudeNotifyUrl?: string;
   /** 텔레그램 알림 설정 (openclaw 직접 알림 또는 claude 모드 fallback push) */
   telegram?: {
