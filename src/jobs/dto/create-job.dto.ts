@@ -1,4 +1,5 @@
 import {
+  IsIn,
   IsNotEmpty,
   IsObject,
   IsOptional,
@@ -57,6 +58,11 @@ export class CreateJobDto {
   @IsString()
   @MaxLength(200)
   originRoutingKey?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['dispatch', 'synapse', 'openclaw'])
+  source?: 'dispatch' | 'synapse' | 'openclaw';
 
   @IsOptional()
   @IsObject()
