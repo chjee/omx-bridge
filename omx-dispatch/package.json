@@ -1,5 +1,5 @@
 {
-  "name": "omx-bridge-mcp",
+  "name": "omx-dispatch",
   "version": "0.1.0",
   "private": true,
   "description": "Claude Code MCP server for the local omx-bridge service",

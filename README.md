@@ -15,7 +15,7 @@ Use `omx-bridge` when you want Claude Code or Telegram resident sessions to dele
 ```text
 Telegram / Claude Code CLI
   -> Claude Code session
-  -> omx-bridge-mcp tool server
+  -> omx-dispatch tool server
   -> omx-bridge HTTP service
   -> omx exec
   -> completion webhook / fallback notification
@@ -24,7 +24,7 @@ Telegram / Claude Code CLI
 Main components:
 
 - `src/`: NestJS bridge service and file-backed job queue.
-- `omx-bridge-mcp/`: Claude Code MCP server exposing `omx_submit_job`, job status tools, and a local `/notify` webhook.
+- `omx-dispatch/`: Claude Code MCP server exposing `omx_submit_job`, job status tools, and a local `/notify` webhook.
 - `omx-bridge-plugin/`: OpenClaw plugin entry point.
 - `.omx/state/bridge-jobs`: default job state directory.
 
@@ -41,7 +41,7 @@ Create local env files from the examples:
 
 ```bash
 cp .env.example .env
-cp omx-bridge-mcp/.env.example omx-bridge-mcp/.env
+cp omx-dispatch/.env.example omx-dispatch/.env
 ```
 
 Run the bridge service in development:
@@ -82,7 +82,7 @@ For Claude mode:
 
 ```env
 NOTIFY_MODE=claude
-CLAUDE_NOTIFY_URL=http://127.0.0.1:3993/notify
+CLAUDE_NOTIFY_URL=http://127.0.0.1:<port>/notify  # omx-dispatch auto-assigns port in 12000-12999
 BRIDGE_CALLBACK_SECRET=shared-secret
 TELEGRAM_BOT_TOKEN=optional-fallback-token
 TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
@@ -109,21 +109,21 @@ Available tools:
 | `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
 | `omx_get_notifications` | Drain all pending completion notifications from the local webhook queue |
 
-Important `omx-bridge-mcp/.env` values:
+Important `omx-dispatch/.env` values:
 
 ```env
 BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
-WEBHOOK_PORT=3993
+# WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
 ENABLE_CLAUDE_CHANNEL=false
 MAX_NOTIFICATION_QUEUE_SIZE=200
 ```
 
-Each concurrent Claude Code session must use a unique `WEBHOOK_PORT`. If a CLI session and a resident Telegram session both use `3993`, completion notifications may be delivered to the wrong MCP process or the second webhook server may fail to bind.
+`WEBHOOK_PORT` is optional. When omitted, the MCP server picks a free port in the 12000–12999 range at startup, so concurrent Claude Code sessions do not conflict.
 
 ## Claude Code Channels Preview
 
-`omx-bridge-mcp` can emit Claude Code channel events for OMX completion notifications when enabled:
+`omx-dispatch` can emit Claude Code channel events for OMX completion notifications when enabled:
 
 ```env
 ENABLE_CLAUDE_CHANNEL=true
@@ -137,7 +137,7 @@ claude --dangerously-load-development-channels ...
 
 Operational requirements:
 
-- Use a unique `WEBHOOK_PORT` per Claude Code session.
+- Leave `WEBHOOK_PORT` unset (default) so each session auto-binds a unique port in 12000–12999.
 - Set `ENABLE_CLAUDE_CHANNEL=true` in the MCP server environment.
 - Keep `BRIDGE_CALLBACK_SECRET` consistent between bridge service and MCP server.
 - Keep Telegram fallback configured until channel wake-up is verified in both CLI and resident sessions.
@@ -149,8 +149,8 @@ Expected channel flow:
 Claude Code -> omx_submit_job
 omx-bridge -> OMX job complete
 omx-bridge -> POST job.notifyUrl
-omx-bridge-mcp /notify
-omx-bridge-mcp -> notifications/claude/channel
+omx-dispatch /notify
+omx-dispatch -> notifications/claude/channel
 Claude Code -> summarize result / continue workflow
 ```
 
