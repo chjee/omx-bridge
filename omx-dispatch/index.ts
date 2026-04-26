@@ -21,6 +21,10 @@ import type {
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
+// Bearer token for non-callback bridge routes. Empty string disables the
+// header (matches bridge default-allow). Must match BRIDGE_API_TOKEN on
+// the server when set.
+const BRIDGE_API_TOKEN = process.env["BRIDGE_API_TOKEN"] ?? "";
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "0", 10); // 0 = dynamic range
 const WEBHOOK_PORT_MIN = 12000;
 const WEBHOOK_PORT_MAX = 12999;
@@ -174,6 +178,7 @@ async function requestJson<T>(
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(BRIDGE_API_TOKEN ? { Authorization: `Bearer ${BRIDGE_API_TOKEN}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
