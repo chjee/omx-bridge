@@ -15,7 +15,9 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  await app.listen(configService.get<number>('PORT', 3992));
+  const port = configService.get<number>('PORT', 3992);
+  const host = configService.get<string>('BRIDGE_HOST', '127.0.0.1');
+  await app.listen(port, host);
 }
 
 void bootstrap();

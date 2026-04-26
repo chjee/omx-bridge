@@ -49,6 +49,8 @@ interface BridgeJobExecution {
   recoveredFromRestart?: boolean;
 }
 
+type JobSource = "dispatch" | "synapse" | "openclaw";
+
 interface BridgeJob {
   id: string;
   prompt: string;
@@ -56,6 +58,8 @@ interface BridgeJob {
   queueOrder: string;
   requestId?: string;
   originRoutingKey?: string;
+  source?: JobSource;
+  notifyUrl?: string;
   metadata?: Record<string, unknown>;
   status: JobStatus;
   createdAt: string;
@@ -193,6 +197,10 @@ function isJobStatus(value: unknown): value is JobStatus {
   return typeof value === "string" && JOB_STATUS_VALUES.includes(value as JobStatus);
 }
 
+function isJobSource(value: unknown): value is JobSource {
+  return value === "dispatch" || value === "synapse" || value === "openclaw";
+}
+
 function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   if (!isRecord(payload)) return null;
 
@@ -202,6 +210,7 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   }
 
   const execution = isRecord(payload["execution"]) ? payload["execution"] : {};
+  const rawSource = payload["source"];
 
   return {
     id,
@@ -209,6 +218,9 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
     cwd: getStringField(payload, "cwd"),
     queueOrder: getStringField(payload, "queueOrder") ?? "",
     requestId: getStringField(payload, "requestId"),
+    originRoutingKey: getStringField(payload, "originRoutingKey"),
+    source: isJobSource(rawSource) ? rawSource : undefined,
+    notifyUrl: getStringField(payload, "notifyUrl"),
     metadata: isRecord(payload["metadata"]) ? payload["metadata"] : undefined,
     status: payload["status"],
     createdAt: getStringField(payload, "createdAt") ?? "",

@@ -71,7 +71,14 @@ NOTIFY_MODE=openclaw
 Notification modes:
 
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.
-- `claude`: POST job completion to `CLAUDE_NOTIFY_URL`; Telegram settings provide fallback push.
+- `claude`: POST job completion to a Claude webhook; Telegram settings provide fallback push.
+
+Claude webhook URL resolution order (highest priority first):
+
+1. **per-job `notifyUrl`** (sent by the caller in the job payload, e.g. `omx-dispatch` always supplies its own session-local webhook URL).
+2. **`CLAUDE_NOTIFY_URL`** (configured fallback for callers that did not supply `notifyUrl`).
+
+When a request comes from `omx-dispatch`, `CLAUDE_NOTIFY_URL` is effectively unused because `notifyUrl` is always present.
 
 In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
 
