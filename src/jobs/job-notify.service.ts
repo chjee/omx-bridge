@@ -65,10 +65,13 @@ export class JobNotifyService {
     if (!this.config.openclawHooks) return;
     const { url, token, sessionKey } = this.config.openclawHooks;
     const icon = job.status === 'succeeded' ? '✅' : '❌';
+    const detail = job.status === 'failed'
+      ? job.stderr?.slice(0, 300) || job.stdout?.slice(0, 300) || ''
+      : job.stdout?.slice(0, 300) || '';
     const message = [
       `${icon} omx job ${job.status} (${job.id.slice(0, 8)})`,
       job.cwd ? `Dir: ${job.cwd}` : '',
-      job.stdout?.slice(0, 300) || '',
+      detail,
     ].filter(Boolean).join('\n');
 
     try {

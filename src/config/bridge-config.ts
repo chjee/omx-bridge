@@ -9,6 +9,8 @@ export interface BridgeConfig {
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
+  /** SIGTERM 후 SIGKILL을 보내기까지 대기 시간 (ms) */
+  sigkillGraceMs: number;
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
   /**
@@ -67,6 +69,10 @@ export function buildBridgeConfig(
     maxOutputChars: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_OUTPUT_CHARS'),
       32_000,
+    ),
+    sigkillGraceMs: parsePositiveInt(
+      configService.get<string>('BRIDGE_SIGKILL_GRACE_MS'),
+      5_000,
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
     notifyMode,

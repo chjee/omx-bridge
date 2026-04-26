@@ -59,6 +59,7 @@ describe('JobRunnerService', () => {
       jobPollIntervalMs: 10,
       jobTimeoutMs: 1000,
       maxOutputChars: 1000,
+      sigkillGraceMs: 5000,
       notifyMode: 'openclaw',
     };
     repository = new JobQueueRepository(config);

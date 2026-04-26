@@ -19,6 +19,7 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 500,
       jobTimeoutMs: 900000,
       maxOutputChars: 32000,
+      sigkillGraceMs: 5000,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       claudeNotifyUrl: undefined,
@@ -32,6 +33,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
       BRIDGE_JOB_TIMEOUT_MS: '1234',
       BRIDGE_MAX_OUTPUT_CHARS: '999',
+      BRIDGE_SIGKILL_GRACE_MS: '7500',
     };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
@@ -42,6 +44,7 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 250,
       jobTimeoutMs: 1234,
       maxOutputChars: 999,
+      sigkillGraceMs: 7500,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       claudeNotifyUrl: undefined,
