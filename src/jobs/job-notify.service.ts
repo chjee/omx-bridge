@@ -1,35 +1,59 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { computeCallbackSignature } from './callback-signature';
-import type { BridgeJob } from './job.types';
+import { JobQueueRepository } from './job-queue.repository';
+import type {
+  BridgeJob,
+  NotifyChannelResult,
+  NotifyOutcome,
+} from './job.types';
 
 @Injectable()
 export class JobNotifyService {
   private readonly logger = new Logger(JobNotifyService.name);
 
-  constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
+  constructor(
+    @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
+    private readonly repository: JobQueueRepository,
+  ) {}
 
-  async notifyJobComplete(job: BridgeJob): Promise<void> {
+  async notifyJobComplete(job: BridgeJob): Promise<NotifyOutcome> {
+    const outcome: NotifyOutcome = {
+      attemptedAt: new Date().toISOString(),
+      mode: this.config.notifyMode,
+    };
+
     if (this.config.notifyMode === 'claude') {
-      const delivered = await this._notifyClaudeWebhook(job);
-      const isSynapseBroker = job.source === 'synapse' || (!job.source && !!job.originRoutingKey);
-      if (!delivered && !isSynapseBroker) {
-        await this._sendTelegram(job);
-      }
-      return;
+      outcome.claudeWebhook = await this._notifyClaudeWebhook(job);
+      outcome.telegram = await this._maybeSendTelegramFallback(job, outcome.claudeWebhook);
+    } else {
+      const [openclaw, telegram] = await Promise.all([
+        this._notifyOpenClawHooks(job),
+        this._sendTelegram(job),
+      ]);
+      outcome.openclaw = openclaw;
+      outcome.telegram = telegram;
     }
 
-    await Promise.allSettled([
-      this.notifyOpenClawHooks(job),
-      this._sendTelegram(job),
-    ]);
+    await this.persistOutcome(job.id, outcome);
+    return outcome;
   }
 
-  private async _notifyClaudeWebhook(job: BridgeJob): Promise<boolean> {
+  private async persistOutcome(jobId: string, outcome: NotifyOutcome): Promise<void> {
+    const latest = await this.repository.getById(jobId);
+    if (!latest) return;
+    try {
+      await this.repository.save({ ...latest, notifyOutcome: outcome });
+    } catch (err) {
+      this.logger.warn(`Failed to persist notifyOutcome for ${jobId}: ${String(err)}`);
+    }
+  }
+
+  private async _notifyClaudeWebhook(job: BridgeJob): Promise<NotifyChannelResult> {
     const notifyUrl = job.notifyUrl ?? this.config.claudeNotifyUrl;
     if (!notifyUrl) {
       this.logger.warn('NOTIFY_MODE=claude 이지만 CLAUDE_NOTIFY_URL이 설정되지 않았습니다.');
-      return false;
+      return { status: 'skipped', skippedReason: 'no_notify_url' };
     }
 
     const payload: BridgeJob = {
@@ -52,17 +76,33 @@ export class JobNotifyService {
       });
       if (!response.ok) {
         this.logger.warn(`Claude webhook 응답 오류: ${response.status} ${response.statusText}`);
-        return false;
+        return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
       }
-      return true;
+      return { status: 'ok' };
     } catch (err) {
       this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
-      return false;
+      return { status: 'failed', error: 'fetch_error' };
     }
   }
 
-  private async notifyOpenClawHooks(job: BridgeJob): Promise<void> {
-    if (!this.config.openclawHooks) return;
+  private async _maybeSendTelegramFallback(
+    job: BridgeJob,
+    webhookResult: NotifyChannelResult,
+  ): Promise<NotifyChannelResult> {
+    if (webhookResult.status === 'ok') {
+      return { status: 'skipped', skippedReason: 'webhook_ok' };
+    }
+    const isSynapseBroker = job.source === 'synapse' || (!job.source && !!job.originRoutingKey);
+    if (isSynapseBroker) {
+      return { status: 'skipped', skippedReason: 'synapse_fallback' };
+    }
+    return this._sendTelegram(job);
+  }
+
+  private async _notifyOpenClawHooks(job: BridgeJob): Promise<NotifyChannelResult> {
+    if (!this.config.openclawHooks) {
+      return { status: 'skipped', skippedReason: 'not_configured' };
+    }
     const { url, token, sessionKey } = this.config.openclawHooks;
     const icon = job.status === 'succeeded' ? '✅' : '❌';
     const detail = job.status === 'failed'
@@ -85,14 +125,19 @@ export class JobNotifyService {
       });
       if (!response.ok) {
         this.logger.warn(`OpenClaw notify 응답 오류: ${response.status} ${response.statusText}`);
+        return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
       }
+      return { status: 'ok' };
     } catch (err) {
       this.logger.warn(`OpenClaw notify 전송 실패: ${String(err)}`);
+      return { status: 'failed', error: 'fetch_error' };
     }
   }
 
-  private async _sendTelegram(job: BridgeJob): Promise<void> {
-    if (!this.config.telegram) return;
+  private async _sendTelegram(job: BridgeJob): Promise<NotifyChannelResult> {
+    if (!this.config.telegram) {
+      return { status: 'skipped', skippedReason: 'not_configured' };
+    }
 
     const { botToken, chatId } = this.config.telegram;
     const icon = job.status === 'succeeded' ? '✅' : '❌';
@@ -114,9 +159,12 @@ export class JobNotifyService {
       });
       if (!response.ok) {
         this.logger.warn(`Telegram notify 응답 오류: ${response.status} ${response.statusText}`);
+        return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
       }
+      return { status: 'ok' };
     } catch (err) {
       this.logger.warn(`Telegram notify 전송 실패: ${String(err)}`);
+      return { status: 'failed', error: 'fetch_error' };
     }
   }
 }
