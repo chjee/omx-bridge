@@ -142,17 +142,30 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
 }
 
 /**
- * 콜백 요청에 붙일 HMAC-SHA256 서명 헤더를 생성합니다.
- * 서버의 CallbackAuthGuard와 동일한 방식:
- *   HMAC-SHA256(key=callbackSecret, message=`${jobId}:${JSON.stringify(body)}`)
- *   헤더: X-Callback-Signature: sha256=<hex>
+ * Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
+ *
+ * All three implementations must stay byte-for-byte equivalent:
+ *   - src/jobs/callback-signature.ts        (server, source of truth)
+ *   - omx-dispatch/index.ts
+ *   - omx-bridge-plugin/index.ts            (this file)
+ *
+ * Protocol contract:
+ *   header  = X-Callback-Signature
+ *   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+ *
+ * Note: this plugin is sender-only. The body is JSON.stringify()-ed at the
+ * call site and that exact string is both signed here AND sent as the HTTP
+ * body. The receiver verifies against raw bytes, so don't re-stringify.
+ *
+ * If you change anything here, update the other two and the vectors in
+ * test/unit/callback-signature.spec.ts in the same change.
  */
 function buildCallbackSignatureHeader(
   secret: string,
   jobId: string,
-  body: unknown,
+  body: string,
 ): string {
-  const message = `${jobId}:${JSON.stringify(body)}`;
+  const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", secret).update(message).digest("hex");
   return `sha256=${hex}`;
 }
@@ -310,11 +323,13 @@ export default definePluginEntry({
           ...(params.stderr !== undefined ? { stderr: params.stderr } : {}),
           ...(params.exitCode !== undefined ? { exitCode: params.exitCode } : {}),
         };
+        // Stringify once; sign and send the SAME bytes so the receiver's
+        // raw-body HMAC verification cannot drift on key reordering.
+        const bodyText = JSON.stringify(body);
 
-        // 콜백시크릿이 설정된 경우 HMAC 서명 헤더 생성
         const config = getPluginConfig(api);
         const signatureHeader = config.callbackSecret
-          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, body)
+          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, bodyText)
           : undefined;
 
         const result = await requestJson<BridgeJob>(
@@ -322,7 +337,7 @@ export default definePluginEntry({
           `jobs/${encodeURIComponent(params.jobId)}/callback`,
           {
             method: "POST",
-            body: JSON.stringify(body),
+            body: bodyText,
           },
           signatureHeader,
         );

@@ -121,6 +121,21 @@ function buildBridgeUrl(path: string): URL {
   return new URL(path, ensureTrailingSlash(BRIDGE_URL));
 }
 
+// ---------------------------------------------------------------------------
+// Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
+//
+// All three implementations must stay byte-for-byte equivalent:
+//   - src/jobs/callback-signature.ts        (server, source of truth)
+//   - omx-dispatch/index.ts                 (this file)
+//   - omx-bridge-plugin/index.ts
+//
+// Protocol contract:
+//   header  = X-Callback-Signature
+//   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+//
+// If you change anything here, update the other two and the vectors in
+// test/unit/callback-signature.spec.ts in the same change.
+// ---------------------------------------------------------------------------
 function buildCallbackSignatureHeader(jobId: string, body: string): string {
   const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", BRIDGE_CALLBACK_SECRET).update(message).digest("hex");
