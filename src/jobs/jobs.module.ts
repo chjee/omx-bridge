@@ -6,6 +6,7 @@ import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
 import { JobsService } from './jobs.service';
 import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
+import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
 import { JobNotifyService } from './job-notify.service';
 
@@ -25,6 +26,7 @@ import { JobNotifyService } from './job-notify.service';
     JobsService,
     OmxExecService,
     JobRunnerService,
+    ApiTokenGuard,
     CallbackAuthGuard,
     JobNotifyService,
   ],

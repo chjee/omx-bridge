@@ -97,6 +97,25 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 `BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
 
+### API token guard (optional)
+
+`BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. When unset, the guard is disabled and these routes accept all requests — appropriate for the default `BRIDGE_HOST=127.0.0.1` localhost-only deployment.
+
+Set `BRIDGE_API_TOKEN` whenever the bridge is exposed beyond loopback or when multiple unprivileged users share the host:
+
+```env
+BRIDGE_HOST=0.0.0.0
+BRIDGE_API_TOKEN=replace-with-random-token
+```
+
+All callers must propagate the same token:
+
+- `omx-dispatch`: read from `BRIDGE_API_TOKEN` env (auto-applied to every bridge request).
+- `omx-bridge-plugin`: set `apiToken` in the plugin's OpenClaw config.
+- `claude-synapse` / `claude-resident`: workers inherit env from the parent process, so set `BRIDGE_API_TOKEN` in the synapse / resident systemd unit or shell that spawns Claude Code.
+
+`/callback` is intentionally excluded from this guard — it carries its own HMAC signature via `BRIDGE_CALLBACK_SECRET` (a different concern: bind-to-body, not just identity).
+
 ## Claude Code MCP Server
 
 The MCP server submits jobs and injects its own session-local notify URL:

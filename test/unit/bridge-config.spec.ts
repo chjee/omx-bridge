@@ -22,6 +22,7 @@ describe('buildBridgeConfig', () => {
       sigkillGraceMs: 5000,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
+      apiToken: undefined,
       claudeNotifyUrl: undefined,
     });
   });
@@ -34,6 +35,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_JOB_TIMEOUT_MS: '1234',
       BRIDGE_MAX_OUTPUT_CHARS: '999',
       BRIDGE_SIGKILL_GRACE_MS: '7500',
+      BRIDGE_API_TOKEN: 'token-xyz',
     };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
@@ -47,6 +49,7 @@ describe('buildBridgeConfig', () => {
       sigkillGraceMs: 7500,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
+      apiToken: 'token-xyz',
       claudeNotifyUrl: undefined,
     });
   });

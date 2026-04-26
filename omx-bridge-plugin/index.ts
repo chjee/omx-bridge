@@ -22,6 +22,11 @@ const pluginConfigSchema = Type.Object(
         description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server.",
       }),
     ),
+    apiToken: Type.Optional(
+      Type.String({
+        description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN on the server when set.",
+      }),
+    ),
   },
   {
     additionalProperties: false,
@@ -138,6 +143,10 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
       typeof pluginConfig.callbackSecret === "string" && pluginConfig.callbackSecret.length > 0
         ? pluginConfig.callbackSecret
         : undefined,
+    apiToken:
+      typeof pluginConfig.apiToken === "string" && pluginConfig.apiToken.length > 0
+        ? pluginConfig.apiToken
+        : undefined,
   };
 }
 
@@ -185,11 +194,13 @@ async function requestJson<T>(
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
+  const apiToken = getPluginConfig(api).apiToken;
   const response = await fetch(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },

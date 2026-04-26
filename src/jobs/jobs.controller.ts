@@ -13,6 +13,7 @@ import { CreateJobDto } from './dto/create-job.dto';
 import { JobCallbackDto } from './dto/job-callback.dto';
 import { ListJobsDto } from './dto/list-jobs.dto';
 import { JobsService } from './jobs.service';
+import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
 
 @Controller('jobs')
@@ -21,6 +22,7 @@ export class JobsController {
 
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
+  @UseGuards(ApiTokenGuard)
   async createJob(@Body() body: CreateJobDto): Promise<{ jobId: string; status: string }> {
     const job = await this.jobsService.createJob(body);
     return {
@@ -30,11 +32,13 @@ export class JobsController {
   }
 
   @Get()
+  @UseGuards(ApiTokenGuard)
   async listJobs(@Query() query: ListJobsDto) {
     return this.jobsService.listJobs(query.status);
   }
 
   @Get(':id')
+  @UseGuards(ApiTokenGuard)
   async getJob(@Param('id') id: string) {
     return this.jobsService.getJobOrThrow(id);
   }
@@ -46,6 +50,7 @@ export class JobsController {
   }
 
   @Post(':id/cancel')
+  @UseGuards(ApiTokenGuard)
   async cancelJob(@Param('id') id: string) {
     return this.jobsService.cancelJob(id);
   }
