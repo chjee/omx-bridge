@@ -228,6 +228,7 @@ export default definePluginEntry({
           method: "POST",
           body: JSON.stringify({
             prompt: params.prompt,
+            source: "openclaw",
             ...(params.requestId ? { requestId: params.requestId } : {}),
             ...(params.metadata ? { metadata: params.metadata } : {}),
           }),
