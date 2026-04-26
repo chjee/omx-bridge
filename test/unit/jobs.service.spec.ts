@@ -35,6 +35,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     jobPollIntervalMs: 100,
     jobTimeoutMs: 900_000,
     maxOutputChars: 32_000,
+    sigkillGraceMs: 5000,
     notifyMode: 'claude',
     ...overrides,
   };
@@ -127,14 +128,19 @@ describe('JobsService.completeJobFromCallback', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it('throws ConflictException when job is already terminal', async () => {
-    const job = createJob({ status: 'succeeded' });
+  it('returns the existing terminal job idempotently without modification', async () => {
+    const job = createJob({ status: 'succeeded', stdout: 'original' });
     const jobs = new Map([[job.id, job]]);
-    const { service } = createService(jobs);
+    const { service, jobNotify } = createService(jobs);
 
-    await expect(
-      service.completeJobFromCallback(job.id, { status: 'failed' }),
-    ).rejects.toThrow(ConflictException);
+    const result = await service.completeJobFromCallback(job.id, {
+      status: 'failed',
+      stdout: 'should-not-overwrite',
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.stdout).toBe('original');
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 
   it('fires notifyJobComplete after saving', async () => {

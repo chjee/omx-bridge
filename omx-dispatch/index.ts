@@ -96,6 +96,7 @@ type OmxBridgeMcpServer = Server<Request, ClaudeChannelNotification, Result>;
 // ---------------------------------------------------------------------------
 
 const notificationQueue: JobNotification[] = [];
+let notificationDropCount = 0;
 
 // ---------------------------------------------------------------------------
 // HTTP 헬퍼
@@ -128,9 +129,13 @@ function buildCallbackSignatureHeader(jobId: string, body: string): string {
 
 function verifyWebhookSignature(jobId: string, rawBody: string, signature: string): boolean {
   if (!BRIDGE_CALLBACK_SECRET) return true; // secret 미설정 시 검증 생략
+  if (!signature.startsWith("sha256=")) return false;
   const expected = buildCallbackSignatureHeader(jobId, rawBody);
   try {
-    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    return timingSafeEqual(
+      Buffer.from(expected.slice("sha256=".length), "hex"),
+      Buffer.from(signature.slice("sha256=".length), "hex"),
+    );
   } catch {
     return false;
   }
@@ -280,7 +285,12 @@ async function sendClaudeChannelNotification(
 function enqueueNotification(notification: JobNotification): void {
   notificationQueue.push(notification);
   if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
-    notificationQueue.splice(0, notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE);
+    const dropped = notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE;
+    notificationQueue.splice(0, dropped);
+    notificationDropCount += dropped;
+    process.stderr.write(
+      `[omx-dispatch] notification queue overflow: dropped ${dropped} oldest entr${dropped === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
+    );
   }
 }
 
@@ -375,7 +385,11 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
     }
 
     if (req.method === "GET" && req.url === "/health") {
-      sendJsonResponse(res, 200, { ok: true, pending: notificationQueue.length });
+      sendJsonResponse(res, 200, {
+        ok: true,
+        pending: notificationQueue.length,
+        dropped: notificationDropCount,
+      });
       return;
     }
 
