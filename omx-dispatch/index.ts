@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -34,6 +36,8 @@ const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
   process.env["MAX_NOTIFICATION_QUEUE_SIZE"],
   200,
 );
+const NOTIFICATION_STORE_PATH = process.env["OMX_DISPATCH_NOTIFICATION_STORE_PATH"]
+  ?? path.join(process.cwd(), ".omx", "state", "omx-dispatch-notifications.jsonl");
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -101,6 +105,7 @@ type OmxBridgeMcpServer = Server<Request, ClaudeChannelNotification, Result>;
 
 const notificationQueue: JobNotification[] = [];
 let notificationDropCount = 0;
+let notificationStoreMutex: Promise<void> = Promise.resolve();
 
 // ---------------------------------------------------------------------------
 // HTTP 헬퍼
@@ -226,6 +231,15 @@ function isJobSource(value: unknown): value is JobSource {
   return value === "dispatch" || value === "synapse" || value === "openclaw";
 }
 
+function isMissingFile(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   if (!isRecord(payload)) return null;
 
@@ -276,6 +290,17 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   };
 }
 
+function normalizeNotification(payload: unknown): JobNotification | null {
+  if (!isRecord(payload)) return null;
+  const receivedAt = getStringField(payload, "receivedAt");
+  const job = normalizeWebhookJob(payload["job"]);
+  if (!receivedAt || !job) {
+    return null;
+  }
+
+  return { receivedAt, job };
+}
+
 async function sendClaudeChannelNotification(
   server: OmxBridgeMcpServer,
   job: BridgeJob,
@@ -302,16 +327,146 @@ async function sendClaudeChannelNotification(
   });
 }
 
-function enqueueNotification(notification: JobNotification): void {
-  notificationQueue.push(notification);
-  if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
-    const dropped = notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE;
-    notificationQueue.splice(0, dropped);
-    notificationDropCount += dropped;
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function withNotificationStoreLock<T>(operation: () => Promise<T>): Promise<T> {
+  const next = notificationStoreMutex.then(operation, operation);
+  notificationStoreMutex = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+async function ensureNotificationStoreDirectory(): Promise<void> {
+  await fs.mkdir(path.dirname(NOTIFICATION_STORE_PATH), { recursive: true });
+}
+
+async function appendPersistedNotification(notification: JobNotification): Promise<void> {
+  await ensureNotificationStoreDirectory();
+  await fs.appendFile(NOTIFICATION_STORE_PATH, `${JSON.stringify(notification)}\n`, "utf8");
+}
+
+async function rewritePersistedNotifications(notifications: JobNotification[]): Promise<void> {
+  if (notifications.length === 0) {
+    await clearPersistedNotifications();
+    return;
+  }
+
+  await ensureNotificationStoreDirectory();
+  const tempPath = `${NOTIFICATION_STORE_PATH}.${randomUUID()}.tmp`;
+  const payload = notifications.map((notification) => JSON.stringify(notification)).join("\n");
+  await fs.writeFile(tempPath, `${payload}\n`, "utf8");
+  await fs.rename(tempPath, NOTIFICATION_STORE_PATH);
+}
+
+async function clearPersistedNotifications(): Promise<void> {
+  await fs.rm(NOTIFICATION_STORE_PATH, { force: true });
+}
+
+async function loadPersistedNotifications(): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(NOTIFICATION_STORE_PATH, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return;
+    }
     process.stderr.write(
-      `[omx-dispatch] notification queue overflow: dropped ${dropped} oldest entr${dropped === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
+      `[omx-dispatch] failed to read persisted notifications: ${describeError(error)}\n`,
+    );
+    return;
+  }
+
+  const restored: JobNotification[] = [];
+  let malformed = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    try {
+      const notification = normalizeNotification(JSON.parse(trimmed));
+      if (notification) {
+        restored.push(notification);
+      } else {
+        malformed += 1;
+      }
+    } catch {
+      malformed += 1;
+    }
+  }
+
+  const overflow = Math.max(0, restored.length - MAX_NOTIFICATION_QUEUE_SIZE);
+  const retained = overflow > 0 ? restored.slice(overflow) : restored;
+  notificationQueue.splice(0, notificationQueue.length, ...retained);
+  notificationDropCount += overflow;
+
+  if (malformed > 0) {
+    process.stderr.write(
+      `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"}\n`,
     );
   }
+  if (overflow > 0) {
+    process.stderr.write(
+      `[omx-dispatch] persisted notification queue overflow on startup: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE})\n`,
+    );
+  }
+  if (retained.length > 0 || malformed > 0 || overflow > 0) {
+    try {
+      await rewritePersistedNotifications(retained);
+    } catch (error) {
+      process.stderr.write(
+        `[omx-dispatch] failed to compact persisted notifications: ${describeError(error)}\n`,
+      );
+    }
+  }
+}
+
+async function enqueueNotification(notification: JobNotification): Promise<void> {
+  await withNotificationStoreLock(async () => {
+    notificationQueue.push(notification);
+    if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
+      const dropped = notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE;
+      notificationQueue.splice(0, dropped);
+      notificationDropCount += dropped;
+      process.stderr.write(
+        `[omx-dispatch] notification queue overflow: dropped ${dropped} oldest entr${dropped === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
+      );
+
+      try {
+        await rewritePersistedNotifications(notificationQueue);
+      } catch (error) {
+        process.stderr.write(
+          `[omx-dispatch] failed to rewrite persisted notifications after overflow: ${describeError(error)}\n`,
+        );
+      }
+      return;
+    }
+
+    try {
+      await appendPersistedNotification(notification);
+    } catch (error) {
+      process.stderr.write(
+        `[omx-dispatch] failed to persist notification ${notification.job.id}: ${describeError(error)}\n`,
+      );
+    }
+  });
+}
+
+async function drainNotifications(): Promise<JobNotification[]> {
+  return withNotificationStoreLock(async () => {
+    const pending = notificationQueue.splice(0);
+    try {
+      await clearPersistedNotifications();
+    } catch (error) {
+      process.stderr.write(
+        `[omx-dispatch] failed to clear persisted notifications: ${describeError(error)}\n`,
+      );
+    }
+    return pending;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +537,7 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
         receivedAt: new Date().toISOString(),
         job,
       };
-      enqueueNotification(notification);
+      await enqueueNotification(notification);
 
       // MCP logging 알림 발송 (Claude Code 로그에 노출)
       try {
@@ -698,7 +853,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "omx_get_notifications": {
-      const pending = notificationQueue.splice(0);
+      const pending = await drainNotifications();
       return toTextResult({ count: pending.length, notifications: pending });
     }
 
@@ -712,5 +867,6 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 // ---------------------------------------------------------------------------
 
 const transport = new StdioServerTransport();
+await loadPersistedNotifications();
 await startWebhookServer(server);
 await server.connect(transport);
