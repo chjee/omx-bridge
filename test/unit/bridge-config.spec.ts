@@ -26,6 +26,7 @@ describe('buildBridgeConfig', () => {
       maxTerminalJobs: 1000,
       jobCleanupIntervalMs: 3600000,
       notifyRetryDelaysMs: [500, 1000, 2000],
+      notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: undefined,
@@ -47,6 +48,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_MAX_TERMINAL_JOBS: '250',
       BRIDGE_JOB_CLEANUP_INTERVAL_MS: '60000',
       BRIDGE_NOTIFY_RETRY_DELAYS_MS: '10,20,40',
+      BRIDGE_NOTIFY_TIMEOUT_MS: '3000',
       BRIDGE_API_TOKEN: 'token-xyz',
     };
 
@@ -65,6 +67,7 @@ describe('buildBridgeConfig', () => {
       maxTerminalJobs: 250,
       jobCleanupIntervalMs: 60000,
       notifyRetryDelaysMs: [10, 20, 40],
+      notifyTimeoutMs: 3000,
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: 'token-xyz',
