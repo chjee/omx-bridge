@@ -54,6 +54,7 @@ describe('JobRunnerService', () => {
 
   beforeEach(async () => {
     config = {
+      host: '127.0.0.1',
       jobsDirectory: await createTempDir('runner-jobs'),
       omxCommand: 'omx',
       jobPollIntervalMs: 10,
@@ -67,6 +68,7 @@ describe('JobRunnerService', () => {
       jobCleanupIntervalMs: 3600000,
       notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
+      allowedCwdPrefixes: ['/workspace'],
     };
     repository = new JobQueueRepository(config);
   });
@@ -235,6 +237,56 @@ describe('JobRunnerService', () => {
     await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
       status: 'cancelled',
       stderr: 'Cancelled by API request',
+    });
+  });
+
+  it('waits for aborted running jobs to settle during module destroy', async () => {
+    let abortSignal: AbortSignal | undefined;
+    const runner = new JobRunnerService(
+      repository,
+      {
+        execute: jest.fn().mockImplementation(
+          (_prompt: string, options?: { signal?: AbortSignal }) =>
+            new Promise<OmxExecutionResult>((resolve) => {
+              abortSignal = options?.signal;
+              options?.signal?.addEventListener('abort', () => {
+                resolve(
+                  createExecutionResult({
+                    status: 'cancelled',
+                    stderr: 'Command cancelled',
+                    exitCode: null,
+                    execution: {
+                      command: 'omx',
+                      timeoutMs: 1000,
+                      maxOutputChars: 1000,
+                      errorType: 'cancelled',
+                    },
+                  }),
+                );
+              }, { once: true });
+            }),
+        ),
+      } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await repository.save(createJob());
+
+    const runPromise = runner.runOnce();
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
+      (job) => job?.status === 'running',
+    );
+
+    await runner.onModuleDestroy();
+    await runPromise;
+
+    expect(abortSignal?.aborted).toBe(true);
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
+      status: 'cancelled',
+      stderr: 'Command cancelled',
+      execution: { errorType: 'cancelled' },
     });
   });
 

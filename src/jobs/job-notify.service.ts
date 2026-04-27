@@ -222,9 +222,14 @@ export class JobNotifyService {
       }
       return { status: 'ok' };
     } catch (err) {
-      this.logger.warn(`Telegram notify 전송 실패: ${String(err)}`);
+      this.logger.warn(`Telegram notify 전송 실패: ${this.describeTelegramError(err, botToken)}`);
       return { status: 'failed', error: this.isAbortError(err) ? 'timeout' : 'fetch_error' };
     }
+  }
+
+  private describeTelegramError(error: unknown, botToken: string): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.split(botToken).join('<redacted>');
   }
 
   private isAbortError(error: unknown): boolean {

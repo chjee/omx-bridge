@@ -16,6 +16,7 @@ function createService(
   overrides: Partial<BridgeConfig> = {},
 ): OmxExecService {
   const config: BridgeConfig = {
+    host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
     jobPollIntervalMs: 10,
@@ -29,6 +30,7 @@ function createService(
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
+    allowedCwdPrefixes: ['/workspace'],
     ...overrides,
   };
 

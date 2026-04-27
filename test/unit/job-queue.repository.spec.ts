@@ -39,6 +39,7 @@ describe('JobQueueRepository', () => {
   beforeEach(async () => {
     jobsDirectory = await createTempDir('bridge-jobs');
     const config: BridgeConfig = {
+      host: '127.0.0.1',
       jobsDirectory,
       omxCommand: 'omx',
       jobPollIntervalMs: 10,
@@ -52,6 +53,7 @@ describe('JobQueueRepository', () => {
       jobCleanupIntervalMs: 3600000,
       notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
+      allowedCwdPrefixes: ['/workspace'],
     };
 
     repository = new JobQueueRepository(config);

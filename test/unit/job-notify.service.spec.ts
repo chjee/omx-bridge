@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { JobNotifyService } from '../../src/jobs/job-notify.service';
 import type { JobQueueRepository } from '../../src/jobs/job-queue.repository';
@@ -33,6 +34,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
 
 function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
   return {
+    host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
     jobPollIntervalMs: 100,
@@ -47,6 +49,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     notifyRetryDelaysMs: [],
     notifyTimeoutMs: 5000,
     notifyMode: 'claude',
+    allowedCwdPrefixes: ['/workspace'],
     telegram: {
       botToken: 'token',
       chatId: 'chat',
@@ -277,6 +280,30 @@ describe('JobNotifyService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(outcome.claudeWebhook).toEqual({ status: 'failed', error: 'timeout', attempts: 1 });
     expect(outcome.telegram).toEqual({ status: 'ok' });
+  });
+
+  it('does not log Telegram bot tokens when sendMessage throws', async () => {
+    const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const botToken = '123456:super-secret-token';
+    fetchMock.mockImplementation((url: string) => {
+      if (url.includes(botToken)) {
+        return Promise.reject(new Error(`request failed for ${url}`));
+      }
+      return Promise.resolve({ ok: true });
+    });
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({ claudeNotifyUrl: undefined, telegram: { botToken, chatId: 'chat' } }),
+      repoMock.repo,
+    );
+
+    await service.notifyJobComplete(job);
+
+    const logged = warnSpy.mock.calls.flat().join('\n');
+    expect(logged).not.toContain(botToken);
+    expect(logged).toContain('<redacted>');
+    warnSpy.mockRestore();
   });
 
   it('skips telegram fallback for per-job notifyUrl callers in claude mode', async () => {
