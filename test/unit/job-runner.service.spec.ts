@@ -60,6 +60,7 @@ describe('JobRunnerService', () => {
       jobTimeoutMs: 1000,
       maxOutputChars: 1000,
       sigkillGraceMs: 5000,
+      maxConcurrency: 1,
       notifyMode: 'openclaw',
     };
     repository = new JobQueueRepository(config);
@@ -207,6 +208,80 @@ describe('JobRunnerService', () => {
       status: 'cancelled',
       stderr: 'Cancelled by API request',
     });
+  });
+
+  it('runs up to maxConcurrency jobs in parallel and respects the cap', async () => {
+    config.maxConcurrency = 2;
+
+    const releasers: Array<() => void> = [];
+    const execute = jest.fn().mockImplementation(
+      () =>
+        new Promise<OmxExecutionResult>((resolve) => {
+          releasers.push(() => resolve(createExecutionResult()));
+        }),
+    );
+    const runner = new JobRunnerService(
+      repository,
+      { execute } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await repository.save(
+      createJob({
+        id: '00000000-0000-4000-a000-000000000001',
+        queueOrder: '0000000000001-000001',
+        createdAt: '2026-04-02T00:00:01.000Z',
+      }),
+    );
+    await repository.save(
+      createJob({
+        id: '00000000-0000-4000-a000-000000000002',
+        queueOrder: '0000000000002-000002',
+        createdAt: '2026-04-02T00:00:02.000Z',
+      }),
+    );
+    await repository.save(
+      createJob({
+        id: '00000000-0000-4000-a000-000000000003',
+        queueOrder: '0000000000003-000003',
+        createdAt: '2026-04-02T00:00:03.000Z',
+      }),
+    );
+
+    const firstRun = runner.runOnce();
+    const secondRun = runner.runOnce();
+    const thirdRun = runner.runOnce();
+
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000002'),
+      (job) => job?.status === 'running',
+    );
+
+    const job1 = await repository.getById('00000000-0000-4000-a000-000000000001');
+    const job2 = await repository.getById('00000000-0000-4000-a000-000000000002');
+    const job3 = await repository.getById('00000000-0000-4000-a000-000000000003');
+    expect(job1?.status).toBe('running');
+    expect(job2?.status).toBe('running');
+    expect(job3?.status).toBe('queued');
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    expect(await thirdRun).toBe(false);
+
+    releasers[0]?.();
+    expect(await firstRun).toBe(true);
+
+    const fourthRun = runner.runOnce();
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000003'),
+      (job) => job?.status === 'running',
+    );
+    expect(execute).toHaveBeenCalledTimes(3);
+
+    releasers[1]?.();
+    releasers[2]?.();
+    await secondRun;
+    await fourthRun;
   });
 
   it('recovers stranded running jobs by re-queueing them', async () => {

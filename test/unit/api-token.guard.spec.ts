@@ -10,6 +10,7 @@ function createConfig(apiToken: string | undefined): BridgeConfig {
     jobTimeoutMs: 1000,
     maxOutputChars: 1000,
     sigkillGraceMs: 5000,
+    maxConcurrency: 1,
     notifyMode: 'openclaw',
     apiToken,
   };

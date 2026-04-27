@@ -11,6 +11,8 @@ export interface BridgeConfig {
   maxOutputChars: number;
   /** SIGTERM 후 SIGKILL을 보내기까지 대기 시간 (ms) */
   sigkillGraceMs: number;
+  /** 동시에 실행할 수 있는 최대 잡 수 (기본 2). CLI/Telegram 동시 제출 시 한쪽이 다른 쪽을 막지 않게 함. */
+  maxConcurrency: number;
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
   /**
@@ -79,6 +81,10 @@ export function buildBridgeConfig(
     sigkillGraceMs: parsePositiveInt(
       configService.get<string>('BRIDGE_SIGKILL_GRACE_MS'),
       5_000,
+    ),
+    maxConcurrency: parsePositiveInt(
+      configService.get<string>('BRIDGE_MAX_CONCURRENCY'),
+      2,
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
     apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,

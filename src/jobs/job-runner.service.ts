@@ -10,7 +10,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobRunnerService.name);
   private intervalHandle?: NodeJS.Timeout;
   private readonly abortControllers = new Map<string, AbortController>();
-  private running = false;
+  private readonly inFlight = new Set<string>();
+  private claimMutex: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly repository: JobQueueRepository,
@@ -22,10 +23,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     await this.repository.ensureReady();
     await this.recoverInterruptedJobs();
-    this.intervalHandle = setInterval(() => {
-      void this.runOnce();
-    }, this.config.jobPollIntervalMs);
-    void this.runOnce();
+    this.intervalHandle = setInterval(() => this.tick(), this.config.jobPollIntervalMs);
+    this.tick();
   }
 
   onModuleDestroy(): void {
@@ -62,21 +61,16 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runOnce(): Promise<boolean> {
-    if (this.running) {
+    const claimed = await this.claimNext();
+    if (!claimed) {
       return false;
     }
 
-    this.running = true;
     try {
-      const nextJob = await this.getNextQueuedJob();
-      if (!nextJob) {
-        return false;
-      }
-
-      await this.executeJob(nextJob);
+      await this.executeJob(claimed);
       return true;
     } finally {
-      this.running = false;
+      this.inFlight.delete(claimed.id);
     }
   }
 
@@ -90,9 +84,37 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  private async getNextQueuedJob(): Promise<BridgeJob | null> {
-    const queuedJobs = await this.repository.listByStatus('queued');
-    return queuedJobs[0] ?? null;
+  private tick(): void {
+    const slots = this.config.maxConcurrency - this.inFlight.size;
+    for (let i = 0; i < slots; i++) {
+      void this.runOnce();
+    }
+  }
+
+  // 클레임 단계는 직렬화: size 체크와 listByStatus + inFlight.add가 한 임계영역에서 일어나야
+  // 동시 호출 시 같은 잡이 중복 클레임되지 않는다.
+  private async claimNext(): Promise<BridgeJob | null> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prev = this.claimMutex;
+    this.claimMutex = next;
+    await prev;
+    try {
+      if (this.inFlight.size >= this.config.maxConcurrency) {
+        return null;
+      }
+      const queuedJobs = await this.repository.listByStatus('queued');
+      const candidate = queuedJobs.find((job) => !this.inFlight.has(job.id));
+      if (!candidate) {
+        return null;
+      }
+      this.inFlight.add(candidate.id);
+      return candidate;
+    } finally {
+      release();
+    }
   }
 
   private async executeJob(job: BridgeJob): Promise<void> {
