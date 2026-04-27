@@ -12,6 +12,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
   private claimMutex: Promise<void> = Promise.resolve();
+  private shuttingDown = false;
 
   constructor(
     private readonly repository: JobQueueRepository,
@@ -21,6 +22,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    this.shuttingDown = false;
     await this.repository.ensureReady();
     await this.recoverInterruptedJobs();
     this.intervalHandle = setInterval(() => this.tick(), this.config.jobPollIntervalMs);
@@ -28,6 +30,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
+    this.shuttingDown = true;
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = undefined;
@@ -71,6 +74,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return true;
     } finally {
       this.inFlight.delete(claimed.id);
+      this.tick();
     }
   }
 
@@ -84,7 +88,14 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  trigger(): void {
+    this.tick();
+  }
+
   private tick(): void {
+    if (this.shuttingDown) {
+      return;
+    }
     const slots = this.config.maxConcurrency - this.inFlight.size;
     for (let i = 0; i < slots; i++) {
       void this.runOnce();

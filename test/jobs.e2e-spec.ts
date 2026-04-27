@@ -99,6 +99,7 @@ describe('Jobs API (e2e)', () => {
     jobsDirectory = await createTempDir('bridge-e2e');
     process.env.BRIDGE_JOBS_DIR = jobsDirectory;
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
+    process.env.BRIDGE_MAX_CONCURRENCY = '1';
     fakeOmxExecService = new FakeOmxExecService();
     notifyJobComplete = jest.fn().mockResolvedValue(undefined);
 
@@ -121,6 +122,7 @@ describe('Jobs API (e2e)', () => {
     await app.close();
     delete process.env.BRIDGE_JOBS_DIR;
     delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
+    delete process.env.BRIDGE_MAX_CONCURRENCY;
   });
 
   it('submits, persists, executes, and returns a successful job', async () => {
@@ -187,8 +189,11 @@ describe('Jobs API (e2e)', () => {
     const firstJob = await controller.createJob({ prompt: 'run first' });
     const secondJob = await controller.createJob({ prompt: 'queued second' });
 
-    // runOnce picks the earliest-queued job (firstJob), leaving secondJob queued
-    await runner.runOnce();
+    await waitFor(
+      async () => Promise.all([getJob(firstJob.jobId), getJob(secondJob.jobId)]),
+      (jobs) => jobs.every((job) => job.status === 'succeeded'),
+      5_000,
+    );
 
     const listResponse = await controller.listJobs({});
     expect(listResponse.map((job: BridgeJob) => job.id)).toEqual([
@@ -197,7 +202,7 @@ describe('Jobs API (e2e)', () => {
     ]);
 
     const succeededJobs = await controller.listJobs({ status: 'succeeded' });
-    expect(succeededJobs).toHaveLength(1);
+    expect(succeededJobs).toHaveLength(2);
     expect(succeededJobs[0]).toMatchObject({
       id: firstJob.jobId,
       status: 'succeeded',
@@ -314,6 +319,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     process.env.BRIDGE_JOBS_DIR = jobsDirectory;
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     process.env.BRIDGE_JOB_TIMEOUT_MS = '5000';
+    process.env.BRIDGE_MAX_CONCURRENCY = '1';
     process.env.OMX_COMMAND = fakeOmxPath;
     process.env.BRIDGE_TRACE_FILE = traceFile;
     process.env.FAKE_CODEX_PATH = fakeCodexPath;
@@ -333,6 +339,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     delete process.env.BRIDGE_JOBS_DIR;
     delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
     delete process.env.BRIDGE_JOB_TIMEOUT_MS;
+    delete process.env.BRIDGE_MAX_CONCURRENCY;
     delete process.env.OMX_COMMAND;
     delete process.env.BRIDGE_TRACE_FILE;
     delete process.env.FAKE_CODEX_PATH;
