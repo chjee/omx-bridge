@@ -41,6 +41,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     jobRetentionDays: 7,
     maxTerminalJobs: 1000,
     jobCleanupIntervalMs: 3600000,
+    notifyTimeoutMs: 5000,
     notifyMode: 'claude',
     ...overrides,
   };

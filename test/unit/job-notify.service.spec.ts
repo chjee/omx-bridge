@@ -45,6 +45,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     maxTerminalJobs: 1000,
     jobCleanupIntervalMs: 3600000,
     notifyRetryDelaysMs: [],
+    notifyTimeoutMs: 5000,
     notifyMode: 'claude',
     telegram: {
       botToken: 'token',
@@ -212,6 +213,37 @@ describe('JobNotifyService', () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([CLAUDE_URL, CLAUDE_URL, CLAUDE_URL]);
     expect(outcome.claudeWebhook).toEqual({ status: 'ok', attempts: 3 });
     expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'webhook_ok' });
+  });
+
+  it('records timeout errors when claude webhook exceeds notify timeout', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url !== CLAUDE_URL) {
+        return Promise.resolve({ ok: true });
+      }
+
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        }, { once: true });
+      });
+    });
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({
+        claudeNotifyUrl: CLAUDE_URL,
+        notifyRetryDelaysMs: [],
+        notifyTimeoutMs: 1,
+      }),
+      repoMock.repo,
+    );
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome.claudeWebhook).toEqual({ status: 'failed', error: 'timeout', attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'ok' });
   });
 
   it('skips telegram fallback for per-job notifyUrl callers in claude mode', async () => {
