@@ -70,7 +70,7 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled";
+  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error";
   recoveredFromRestart?: boolean;
 }
 
@@ -355,7 +355,7 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
         ? execution["outputTruncated"]
         : undefined,
       errorType: typeof execution["errorType"] === "string"
-        && ["spawn_error", "timeout", "non_zero_exit", "cancelled"].includes(execution["errorType"])
+        && ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error"].includes(execution["errorType"])
         ? execution["errorType"] as BridgeJobExecution["errorType"]
         : undefined,
       recoveredFromRestart: typeof execution["recoveredFromRestart"] === "boolean"

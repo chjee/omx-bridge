@@ -83,6 +83,12 @@ export function buildBridgeConfig(
 ): BridgeConfig {
   const rawNotifyMode = configService.get<string>('NOTIFY_MODE', 'openclaw');
   const notifyMode: NotifyMode = rawNotifyMode === 'claude' ? 'claude' : 'openclaw';
+  const openclawHooksUrl = configService.get<string>('OPENCLAW_HOOKS_URL') || undefined;
+  const openclawHooksToken = configService.get<string>('OPENCLAW_HOOKS_TOKEN') || undefined;
+
+  if (openclawHooksUrl && !openclawHooksToken) {
+    throw new Error('OPENCLAW_HOOKS_TOKEN is required when OPENCLAW_HOOKS_URL is set');
+  }
 
   return {
     jobsDirectory: configService.get<string>(
@@ -138,11 +144,11 @@ export function buildBridgeConfig(
     apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,
     notifyMode,
     claudeNotifyUrl: configService.get<string>('CLAUDE_NOTIFY_URL') || undefined,
-    ...(configService.get<string>('OPENCLAW_HOOKS_URL')
+    ...(openclawHooksUrl
       ? {
           openclawHooks: {
-            url: configService.get<string>('OPENCLAW_HOOKS_URL')!,
-            token: configService.get<string>('OPENCLAW_HOOKS_TOKEN')!,
+            url: openclawHooksUrl,
+            token: openclawHooksToken!,
             sessionKey: configService.get<string>('OPENCLAW_HOOKS_SESSION_KEY') || 'agent:main:telegram:direct',
           },
         }

@@ -187,4 +187,28 @@ describe('JobQueueRepository', () => {
     await expect(repository.getById(brokenId)).resolves.toBeNull();
     await expect(repository.listAll()).resolves.toEqual([]);
   });
+
+  it('skips structurally invalid job files without breaking cleanup', async () => {
+    await fs.writeFile(
+      path.join(jobsDirectory, `${TEST_ID_1}.json`),
+      `${JSON.stringify({
+        ...createJob({
+          id: 'not-a-job-id',
+          status: 'succeeded',
+          finishedAt: '2026-04-01T00:00:00.000Z',
+        }),
+      })}\n`,
+      'utf8',
+    );
+
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+    await expect(repository.listAll()).resolves.toEqual([]);
+    await expect(
+      repository.cleanupTerminalJobs({
+        retentionDays: 1,
+        maxTerminalJobs: 1,
+        now: new Date('2026-04-27T00:00:00.000Z'),
+      }),
+    ).resolves.toEqual({ deleted: 0, retained: 0 });
+  });
 });

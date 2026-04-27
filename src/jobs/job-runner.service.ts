@@ -191,8 +191,32 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         execution: result.execution,
       });
       void this.jobNotify.notifyJobComplete(savedJob);
+    } catch (error) {
+      await this.markRunningJobFailed(job.id, error);
     } finally {
       this.abortControllers.delete(job.id);
     }
+  }
+
+  private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {
+    const latestJob = await this.repository.getById(jobId);
+    if (!latestJob || latestJob.status !== 'running') {
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    const savedJob = await this.repository.save({
+      ...latestJob,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      exitCode: latestJob.exitCode ?? null,
+      stderr: latestJob.stderr || `Unexpected OMX execution error: ${message}`,
+      execution: {
+        ...latestJob.execution,
+        errorType: 'execution_error',
+      },
+    });
+    this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
+    void this.jobNotify.notifyJobComplete(savedJob);
   }
 }

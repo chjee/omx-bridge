@@ -3,6 +3,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import {
   definePluginEntry,
   type OpenClawPluginApi,
+  type OpenClawPluginConfigSchema,
 } from "openclaw/plugin-sdk/plugin-entry";
 
 const PLUGIN_ID = "omx-bridge-plugin";
@@ -32,6 +33,10 @@ const pluginConfigSchema = Type.Object(
     additionalProperties: false,
   },
 );
+
+const openClawConfigSchema: OpenClawPluginConfigSchema = {
+  jsonSchema: pluginConfigSchema as OpenClawPluginConfigSchema["jsonSchema"],
+};
 
 const submitJobParameters = Type.Object(
   {
@@ -98,7 +103,7 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled";
+  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error";
   recoveredFromRestart?: boolean;
 }
 
@@ -234,6 +239,7 @@ function toTextResult(payload: unknown) {
         text: JSON.stringify(payload, null, 2),
       },
     ],
+    details: payload,
   };
 }
 
@@ -241,20 +247,22 @@ export default definePluginEntry({
   id: PLUGIN_ID,
   name: "OMX Bridge Plugin",
   description: "Agent tools for submitting, inspecting, listing, and cancelling jobs on omx-bridge.",
-  configSchema: pluginConfigSchema,
+  configSchema: openClawConfigSchema,
   register(api: OpenClawPluginApi) {
     api.registerTool({
       name: "omx_submit_job",
+      label: "Submit OMX Job",
       description: "Submit a new prompt to the local omx-bridge service and return the assigned job id.",
       parameters: submitJobParameters,
-      async execute(_id: string, params: SubmitJobParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as SubmitJobParameters;
         const result = await requestJson<CreateJobResponse>(api, "jobs", {
           method: "POST",
           body: JSON.stringify({
-            prompt: params.prompt,
+            prompt: input.prompt,
             source: "openclaw",
-            ...(params.requestId ? { requestId: params.requestId } : {}),
-            ...(params.metadata ? { metadata: params.metadata } : {}),
+            ...(input.requestId ? { requestId: input.requestId } : {}),
+            ...(input.metadata ? { metadata: input.metadata } : {}),
           }),
         });
 
@@ -264,10 +272,12 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_get_job",
+      label: "Get OMX Job",
       description: "Fetch the full status and result payload for a specific omx-bridge job.",
       parameters: jobIdParameters,
-      async execute(_id: string, params: JobIdParameters) {
-        const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(params.jobId)}`, {
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
+        const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(input.jobId)}`, {
           method: "GET",
         });
 
@@ -277,12 +287,14 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_list_jobs",
+      label: "List OMX Jobs",
       description: "List omx-bridge jobs, optionally filtered by job status.",
       parameters: listJobsParameters,
-      async execute(_id: string, params: ListJobsParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as ListJobsParameters;
         const search = new URLSearchParams();
-        if (params.status) {
-          search.set("status", params.status);
+        if (input.status) {
+          search.set("status", input.status);
         }
 
         const suffix = search.size > 0 ? `?${search.toString()}` : "";
@@ -296,12 +308,14 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_cancel_job",
+      label: "Cancel OMX Job",
       description: "Cancel a queued or running omx-bridge job and return the updated job record.",
       parameters: jobIdParameters,
-      async execute(_id: string, params: JobIdParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
         const result = await requestJson<BridgeJob>(
           api,
-          `jobs/${encodeURIComponent(params.jobId)}/cancel`,
+          `jobs/${encodeURIComponent(input.jobId)}/cancel`,
           {
             method: "POST",
           },
@@ -313,6 +327,7 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_callback_job",
+      label: "Callback OMX Job",
       description: "Send a callback to mark an omx-bridge job as completed (used by external processes). Automatically signs the request with X-Callback-Signature when callbackSecret is configured.",
       parameters: Type.Object(
         {
@@ -327,12 +342,13 @@ export default definePluginEntry({
         },
         { additionalProperties: false },
       ),
-      async execute(_id: string, params: { jobId: string; status: string; stdout?: string; stderr?: string; exitCode?: number | null }) {
+      async execute(_id: string, params: unknown) {
+        const input = params as { jobId: string; status: string; stdout?: string; stderr?: string; exitCode?: number | null };
         const body = {
-          status: params.status,
-          ...(params.stdout !== undefined ? { stdout: params.stdout } : {}),
-          ...(params.stderr !== undefined ? { stderr: params.stderr } : {}),
-          ...(params.exitCode !== undefined ? { exitCode: params.exitCode } : {}),
+          status: input.status,
+          ...(input.stdout !== undefined ? { stdout: input.stdout } : {}),
+          ...(input.stderr !== undefined ? { stderr: input.stderr } : {}),
+          ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
         };
         // Stringify once; sign and send the SAME bytes so the receiver's
         // raw-body HMAC verification cannot drift on key reordering.
@@ -340,12 +356,12 @@ export default definePluginEntry({
 
         const config = getPluginConfig(api);
         const signatureHeader = config.callbackSecret
-          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, bodyText)
+          ? buildCallbackSignatureHeader(config.callbackSecret, input.jobId, bodyText)
           : undefined;
 
         const result = await requestJson<BridgeJob>(
           api,
-          `jobs/${encodeURIComponent(params.jobId)}/callback`,
+          `jobs/${encodeURIComponent(input.jobId)}/callback`,
           {
             method: "POST",
             body: bodyText,
