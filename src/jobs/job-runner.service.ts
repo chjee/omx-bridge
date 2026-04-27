@@ -11,6 +11,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private intervalHandle?: NodeJS.Timeout;
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
+  private readonly inFlightRuns = new Map<string, Promise<void>>();
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
   private shuttingDown = false;
@@ -35,7 +36,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.tick();
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
     this.shuttingDown = true;
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
@@ -49,6 +50,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
+    await this.waitForInFlightRuns();
     this.abortControllers.clear();
   }
 
@@ -92,9 +94,12 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await this.executeJob(claimed);
+      const run = this.executeJob(claimed);
+      this.inFlightRuns.set(claimed.id, run);
+      await run;
       return true;
     } finally {
+      this.inFlightRuns.delete(claimed.id);
       this.inFlight.delete(claimed.id);
       this.tick();
     }
@@ -218,5 +223,22 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     });
     this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
     void this.jobNotify.notifyJobComplete(savedJob);
+  }
+
+  private async waitForInFlightRuns(): Promise<void> {
+    const runs = [...this.inFlightRuns.values()];
+    if (runs.length === 0) {
+      return;
+    }
+
+    const timeoutMs = this.config.sigkillGraceMs + 2_000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(runs),
+      new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    clearTimeout(timeoutHandle);
   }
 }

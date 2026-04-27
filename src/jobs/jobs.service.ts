@@ -7,6 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { CreateJobDto } from './dto/create-job.dto';
 import type { JobCallbackDto } from './dto/job-callback.dto';
@@ -39,6 +40,7 @@ export class JobsService {
 
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
+      this.assertAllowedCwd(input.cwd);
       const activeCount = await this.repository.countActive();
       if (activeCount >= this.config.maxActiveJobs) {
         throw new HttpException(
@@ -195,6 +197,26 @@ export class JobsService {
     // 동일 (ms,seq) 충돌을 안정적으로 풀어준다.
     this.queueSequence += 1;
     return `${Date.now()}-${this.queueSequence.toString().padStart(6, '0')}`;
+  }
+
+  private assertAllowedCwd(cwd: string | undefined): void {
+    if (!cwd) {
+      return;
+    }
+
+    const resolvedCwd = path.resolve(cwd);
+    const allowed = this.config.allowedCwdPrefixes.some((prefix) => {
+      const resolvedPrefix = path.resolve(prefix);
+      const relative = path.relative(resolvedPrefix, resolvedCwd);
+      return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+    });
+
+    if (!allowed) {
+      throw new HttpException(
+        `cwd is outside allowed prefixes: ${cwd}`,
+        HttpStatus.BAD_REQUEST,
+      );
+    }
   }
 
   private async withCreateLock<T>(operation: () => Promise<T>): Promise<T> {

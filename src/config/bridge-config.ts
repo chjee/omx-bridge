@@ -1,9 +1,11 @@
 import { ConfigService } from '@nestjs/config';
+import os from 'node:os';
 import path from 'node:path';
 
 export type NotifyMode = 'openclaw' | 'claude';
 
 export interface BridgeConfig {
+  host: string;
   jobsDirectory: string;
   omxCommand: string;
   jobPollIntervalMs: number;
@@ -33,6 +35,8 @@ export interface BridgeConfig {
    * /callback은 callbackSecret 기반 HMAC을 별도 사용하므로 영향 없음.
    */
   apiToken?: string;
+  /** Job cwd가 지정될 때 허용할 절대 경로 prefix 목록. 기본값은 현재 사용자 HOME. */
+  allowedCwdPrefixes: string[];
   /**
    * 완료 알림 모드
    * - openclaw: OpenClaw hooks + 텔레그램 직접 전송 (기본값, 현재 운영 중)
@@ -77,20 +81,56 @@ function parsePositiveIntList(value: string | undefined, fallback: number[]): nu
   return parsed.length > 0 ? parsed : fallback;
 }
 
+function parseAllowedCwdPrefixes(
+  value: string | undefined,
+  cwd: string,
+  homeDir: string,
+): string[] {
+  const rawParts = value
+    ? value.split(',').map((part) => part.trim()).filter(Boolean)
+    : [homeDir];
+
+  const prefixes = rawParts.map((part) => {
+    const expanded = part === '~' ? homeDir : part.startsWith('~/') ? path.join(homeDir, part.slice(2)) : part;
+    return path.resolve(cwd, expanded);
+  });
+
+  return [...new Set(prefixes)];
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return normalized === '127.0.0.1' ||
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    normalized === '[::1]';
+}
+
 export function buildBridgeConfig(
   configService: ConfigService,
   cwd: string = process.cwd(),
+  homeDir: string = os.homedir(),
 ): BridgeConfig {
+  const host = configService.get<string>('BRIDGE_HOST', '127.0.0.1');
   const rawNotifyMode = configService.get<string>('NOTIFY_MODE', 'openclaw');
   const notifyMode: NotifyMode = rawNotifyMode === 'claude' ? 'claude' : 'openclaw';
   const openclawHooksUrl = configService.get<string>('OPENCLAW_HOOKS_URL') || undefined;
   const openclawHooksToken = configService.get<string>('OPENCLAW_HOOKS_TOKEN') || undefined;
+  const callbackSecret = configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined;
+  const apiToken = configService.get<string>('BRIDGE_API_TOKEN') || undefined;
 
   if (openclawHooksUrl && !openclawHooksToken) {
     throw new Error('OPENCLAW_HOOKS_TOKEN is required when OPENCLAW_HOOKS_URL is set');
   }
+  if (!isLoopbackHost(host) && !apiToken) {
+    throw new Error('BRIDGE_API_TOKEN is required when BRIDGE_HOST is not loopback');
+  }
+  if (!isLoopbackHost(host) && !callbackSecret) {
+    throw new Error('BRIDGE_CALLBACK_SECRET is required when BRIDGE_HOST is not loopback');
+  }
 
   return {
+    host,
     jobsDirectory: configService.get<string>(
       'BRIDGE_JOBS_DIR',
       path.join(cwd, '.omx', 'state', 'bridge-jobs'),
@@ -140,8 +180,13 @@ export function buildBridgeConfig(
       configService.get<string>('BRIDGE_NOTIFY_TIMEOUT_MS'),
       5_000,
     ),
-    callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
-    apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,
+    callbackSecret,
+    apiToken,
+    allowedCwdPrefixes: parseAllowedCwdPrefixes(
+      configService.get<string>('BRIDGE_ALLOWED_CWD_PREFIXES'),
+      cwd,
+      homeDir,
+    ),
     notifyMode,
     claudeNotifyUrl: configService.get<string>('CLAUDE_NOTIFY_URL') || undefined,
     ...(openclawHooksUrl

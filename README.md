@@ -63,6 +63,7 @@ Important root `.env` values:
 
 ```env
 PORT=3992
+BRIDGE_HOST=127.0.0.1
 BRIDGE_JOBS_DIR=.omx/state/bridge-jobs
 OMX_COMMAND=omx
 NOTIFY_MODE=openclaw
@@ -103,6 +104,29 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 ```
 
 `BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
+
+### Execution boundaries
+
+The bridge runs requested work through `omx exec --full-auto -s danger-full-access`,
+so bind and working-directory settings are part of the safety boundary.
+
+`BRIDGE_HOST` defaults to `127.0.0.1`. If it is set to a non-loopback host
+such as `0.0.0.0`, startup requires both:
+
+```env
+BRIDGE_API_TOKEN=<generated>
+BRIDGE_CALLBACK_SECRET=<shared-secret>
+```
+
+`BRIDGE_ALLOWED_CWD_PREFIXES` restricts per-job `cwd` values. It is a
+comma-separated list; `~` expands to the service user's home directory. When
+unset, the bridge allows cwd values under the service user's home directory.
+Jobs that omit `cwd` keep the existing behavior and run from the service
+working directory.
+
+```env
+BRIDGE_ALLOWED_CWD_PREFIXES=~/workspace,/srv/projects
+```
 
 ### Queue capacity and retention
 

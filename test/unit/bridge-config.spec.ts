@@ -11,9 +11,10 @@ describe('buildBridgeConfig', () => {
   it('uses documented defaults when env vars are unset', () => {
     process.env = {};
 
-    const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
     expect(config).toEqual({
+      host: '127.0.0.1',
       jobsDirectory: '/workspace/app/.omx/state/bridge-jobs',
       omxCommand: 'omx',
       jobPollIntervalMs: 500,
@@ -30,6 +31,7 @@ describe('buildBridgeConfig', () => {
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: undefined,
+      allowedCwdPrefixes: ['/home/tester'],
       claudeNotifyUrl: undefined,
     });
   });
@@ -37,6 +39,7 @@ describe('buildBridgeConfig', () => {
   it('uses env overrides when present', () => {
     process.env = {
       BRIDGE_JOBS_DIR: '/tmp/custom-jobs',
+      BRIDGE_HOST: 'localhost',
       OMX_COMMAND: 'omx-custom',
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
       BRIDGE_JOB_TIMEOUT_MS: '1234',
@@ -50,11 +53,13 @@ describe('buildBridgeConfig', () => {
       BRIDGE_NOTIFY_RETRY_DELAYS_MS: '10,20,40',
       BRIDGE_NOTIFY_TIMEOUT_MS: '3000',
       BRIDGE_API_TOKEN: 'token-xyz',
+      BRIDGE_ALLOWED_CWD_PREFIXES: '~/workspace,/srv/projects',
     };
 
-    const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
     expect(config).toEqual({
+      host: 'localhost',
       jobsDirectory: '/tmp/custom-jobs',
       omxCommand: 'omx-custom',
       jobPollIntervalMs: 250,
@@ -71,8 +76,45 @@ describe('buildBridgeConfig', () => {
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: 'token-xyz',
+      allowedCwdPrefixes: ['/home/tester/workspace', '/srv/projects'],
       claudeNotifyUrl: undefined,
     });
+  });
+
+  it('rejects non-loopback hosts without API token', () => {
+    process.env = {
+      BRIDGE_HOST: '0.0.0.0',
+      BRIDGE_CALLBACK_SECRET: 'secret',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      'BRIDGE_API_TOKEN is required when BRIDGE_HOST is not loopback',
+    );
+  });
+
+  it('rejects non-loopback hosts without callback secret', () => {
+    process.env = {
+      BRIDGE_HOST: '0.0.0.0',
+      BRIDGE_API_TOKEN: 'token',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      'BRIDGE_CALLBACK_SECRET is required when BRIDGE_HOST is not loopback',
+    );
+  });
+
+  it('accepts non-loopback hosts with API token and callback secret', () => {
+    process.env = {
+      BRIDGE_HOST: '0.0.0.0',
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
+    };
+
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
+
+    expect(config.host).toBe('0.0.0.0');
+    expect(config.apiToken).toBe('token');
+    expect(config.callbackSecret).toBe('secret');
   });
 
   it('rejects partial OpenClaw hook configuration', () => {
@@ -92,7 +134,7 @@ describe('buildBridgeConfig', () => {
       OPENCLAW_HOOKS_SESSION_KEY: 'agent:main:telegram:direct',
     };
 
-    const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
     expect(config.openclawHooks).toEqual({
       url: 'http://127.0.0.1:3994/hooks',

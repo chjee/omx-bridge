@@ -5,6 +5,7 @@ import { CallbackAuthGuard } from '../../src/jobs/callback-auth.guard';
 
 function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConfig {
   return {
+    host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
     jobPollIntervalMs: 100,
@@ -18,6 +19,7 @@ function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConf
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
+    allowedCwdPrefixes: ['/workspace'],
     callbackSecret,
   };
 }
