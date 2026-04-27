@@ -84,7 +84,7 @@ When a request comes from `omx-dispatch`, `CLAUDE_NOTIFY_URL` is effectively unu
 In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
 
 - **`notifyUrl` absent**: Telegram is used as a fallback when the configured `CLAUDE_NOTIFY_URL` webhook cannot be delivered.
-- **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers.
+- **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers. For `omx-dispatch`, a 2xx response from the session-local `/notify` endpoint means the bridge treats delivery as complete; if `ENABLE_CLAUDE_CHANNEL` is not enabled in the Claude Code MCP server environment, the completion is only queued for `omx_get_notifications` and will not wake the active CLI conversation.
 
 Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAYS_MS`
 (default: `500,1000,2000`, which means four total attempts). Each notification
@@ -187,7 +187,8 @@ BRIDGE_API_TOKEN=<generated>
     "env": {
       "BRIDGE_URL": "http://localhost:3992",
       "BRIDGE_CALLBACK_SECRET": "<same as bridge .env>",
-      "BRIDGE_API_TOKEN": "<same generated token>"
+      "BRIDGE_API_TOKEN": "<same generated token>",
+      "ENABLE_CLAUDE_CHANNEL": "true"
     }
   }
   ```
@@ -281,7 +282,7 @@ Important `omx-dispatch/.env` values:
 BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
 # WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
-ENABLE_CLAUDE_CHANNEL=false
+ENABLE_CLAUDE_CHANNEL=true  # required for callback-to-CLI continuation; false only queues for polling
 MAX_NOTIFICATION_QUEUE_SIZE=200
 OMX_DISPATCH_WAIT_TIMEOUT_MS=300000
 OMX_DISPATCH_WAIT_POLL_INTERVAL_MS=1000
