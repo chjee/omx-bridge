@@ -43,6 +43,18 @@ const NOTIFICATION_LOCK_STALE_MS = 30_000;
 const NOTIFICATION_LOCK_TIMEOUT_MS = 5_000;
 const NOTIFICATION_PREVIEW_MAX = 20;
 const NOTIFICATION_PREVIEW_TEXT_MAX = 200;
+const DEFAULT_WAIT_TIMEOUT_MS = parsePositiveInt(
+  process.env["OMX_DISPATCH_WAIT_TIMEOUT_MS"],
+  300_000,
+);
+const DEFAULT_WAIT_POLL_INTERVAL_MS = parsePositiveInt(
+  process.env["OMX_DISPATCH_WAIT_POLL_INTERVAL_MS"],
+  1_000,
+);
+const MAX_WAIT_TIMEOUT_MS = 3_600_000;
+const MIN_WAIT_POLL_INTERVAL_MS = 250;
+const MAX_WAIT_POLL_INTERVAL_MS = 10_000;
+const TERMINAL_NOTIFICATION_GRACE_MS = 2_000;
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -89,6 +101,21 @@ interface CreateJobResponse {
   status: JobStatus;
 }
 
+interface SubmitJobInput {
+  prompt: string;
+  cwd?: string;
+  requestId?: string;
+  originRoutingKey?: string;
+  metadata?: Record<string, unknown>;
+  notifyUrl?: string;
+  source?: JobSource;
+}
+
+interface WaitForJobOptions {
+  waitTimeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
 interface JobNotification {
   receivedAt: string;
   job: BridgeJob;
@@ -114,6 +141,16 @@ interface NotificationStats {
     stdoutPreview: string;
     stderrPreview: string;
   }>;
+}
+
+interface WaitForJobResult {
+  jobId: string;
+  status: JobStatus;
+  completed: boolean;
+  timedOut: boolean;
+  notification: JobNotification | null;
+  job: BridgeJob;
+  notificationMissing?: boolean;
 }
 
 interface ClaudeChannelNotification extends Notification {
@@ -147,6 +184,13 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function clampNumber(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return Math.max(min, Math.min(max, fallback));
+  }
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
 function ensureTrailingSlash(value: string): string {
@@ -252,6 +296,10 @@ function extractWebhookJobId(payload: unknown): string | undefined {
 
 function isJobStatus(value: unknown): value is JobStatus {
   return typeof value === "string" && JOB_STATUS_VALUES.includes(value as JobStatus);
+}
+
+function isTerminalJobStatus(value: JobStatus): boolean {
+  return value === "succeeded" || value === "failed" || value === "cancelled";
 }
 
 function isJobSource(value: unknown): value is JobSource {
@@ -665,6 +713,46 @@ async function getNotificationStats(previewCount = 0): Promise<NotificationStats
   }));
 }
 
+async function drainNotificationForJob(jobId: string): Promise<JobNotification | null> {
+  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
+    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
+    if (readFailed) {
+      throw new Error("Failed to read persisted notifications before job-specific drain");
+    }
+
+    const deduped = dedupeNotifications(notifications);
+    const target = deduped.find((notification) => notification.job.id === jobId) ?? null;
+    if (!target && malformed === 0) {
+      return null;
+    }
+
+    const remaining = deduped.filter((notification) => notification.job.id !== jobId);
+    notificationQueue.splice(
+      0,
+      notificationQueue.length,
+      ...dedupeNotifications(notificationQueue)
+        .filter((notification) => notification.job.id !== jobId),
+    );
+
+    try {
+      await rewritePersistedNotificationsUnsafe(remaining);
+    } catch (error) {
+      process.stderr.write(
+        `[omx-dispatch] failed to rewrite persisted notifications after job-specific drain: ${describeError(error)}\n`,
+      );
+      throw error;
+    }
+
+    if (malformed > 0) {
+      process.stderr.write(
+        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while draining job ${jobId}\n`,
+      );
+    }
+
+    return target;
+  }));
+}
+
 async function drainNotifications(): Promise<JobNotification[]> {
   return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
     const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
@@ -687,6 +775,109 @@ async function drainNotifications(): Promise<JobNotification[]> {
     }
     return pending;
   }));
+}
+
+async function submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse> {
+  const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source } = input;
+  return requestJson<CreateJobResponse>("jobs", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt,
+      ...(cwd ? { cwd } : {}),
+      ...(requestId ? { requestId } : {}),
+      ...(originRoutingKey ? { originRoutingKey } : {}),
+      ...(metadata ? { metadata } : {}),
+      ...(source ? { source } : {}),
+      notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
+    }),
+  });
+}
+
+async function getBridgeJob(jobId: string): Promise<BridgeJob> {
+  return requestJson<BridgeJob>(
+    `jobs/${encodeURIComponent(jobId)}`,
+    { method: "GET" },
+  );
+}
+
+function resolveWaitOptions(options: WaitForJobOptions): {
+  waitTimeoutMs: number;
+  pollIntervalMs: number;
+} {
+  return {
+    waitTimeoutMs: clampNumber(
+      options.waitTimeoutMs,
+      DEFAULT_WAIT_TIMEOUT_MS,
+      1,
+      MAX_WAIT_TIMEOUT_MS,
+    ),
+    pollIntervalMs: clampNumber(
+      options.pollIntervalMs,
+      DEFAULT_WAIT_POLL_INTERVAL_MS,
+      MIN_WAIT_POLL_INTERVAL_MS,
+      MAX_WAIT_POLL_INTERVAL_MS,
+    ),
+  };
+}
+
+async function waitForJobCompletion(
+  jobId: string,
+  options: WaitForJobOptions = {},
+): Promise<WaitForJobResult> {
+  const { waitTimeoutMs, pollIntervalMs } = resolveWaitOptions(options);
+  const deadline = Date.now() + waitTimeoutMs;
+  let latestJob = await getBridgeJob(jobId);
+  let terminalObservedAt: number | undefined;
+
+  while (true) {
+    const notification = await drainNotificationForJob(jobId);
+    if (notification) {
+      return {
+        jobId,
+        status: notification.job.status,
+        completed: isTerminalJobStatus(notification.job.status),
+        timedOut: false,
+        notification,
+        job: notification.job,
+      };
+    }
+
+    latestJob = await getBridgeJob(jobId);
+    if (isTerminalJobStatus(latestJob.status)) {
+      terminalObservedAt ??= Date.now();
+      if (Date.now() - terminalObservedAt >= TERMINAL_NOTIFICATION_GRACE_MS) {
+        return {
+          jobId,
+          status: latestJob.status,
+          completed: true,
+          timedOut: false,
+          notification: null,
+          job: latestJob,
+          notificationMissing: true,
+        };
+      }
+    } else {
+      terminalObservedAt = undefined;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      return {
+        jobId,
+        status: latestJob.status,
+        completed: isTerminalJobStatus(latestJob.status),
+        timedOut: !isTerminalJobStatus(latestJob.status),
+        notification: null,
+        job: latestJob,
+        ...(isTerminalJobStatus(latestJob.status) ? { notificationMissing: true } : {}),
+      };
+    }
+
+    const nextDelay = terminalObservedAt
+      ? Math.min(remainingMs, MIN_WAIT_POLL_INTERVAL_MS)
+      : Math.min(remainingMs, pollIntervalMs);
+    await sleep(nextDelay);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +1106,64 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "omx_submit_job_and_wait",
+      description:
+        "Submit a new prompt to the local omx-bridge service, then wait for that specific job to complete. Use this in interactive CLI sessions when the user expects the completion result in the same flow.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            minLength: 1,
+            maxLength: 4000,
+            description: "Prompt to submit to the omx-bridge service.",
+          },
+          cwd: {
+            type: "string",
+            description: "Working directory for the job (absolute path).",
+          },
+          requestId: {
+            type: "string",
+            maxLength: 200,
+            description: "Optional request correlation identifier.",
+          },
+          metadata: {
+            type: "object",
+            description: "Optional metadata passed through to the bridge (e.g. chat_id, source).",
+            additionalProperties: true,
+          },
+          originRoutingKey: {
+            type: "string",
+            maxLength: 200,
+            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Used by synapse to route the callback result back to the correct chat.",
+          },
+          notifyUrl: {
+            type: "string",
+            description: "Webhook URL to receive job completion callback. Defaults to the MCP server's local webhook.",
+          },
+          source: {
+            type: "string",
+            enum: ["dispatch", "synapse", "openclaw"],
+            description: "Caller identity. Use 'dispatch' for Claude Code CLI sessions.",
+          },
+          waitTimeoutMs: {
+            type: "number",
+            minimum: 1,
+            maximum: MAX_WAIT_TIMEOUT_MS,
+            description: "Maximum time to wait for this job to complete. Defaults to OMX_DISPATCH_WAIT_TIMEOUT_MS or 300000.",
+          },
+          pollIntervalMs: {
+            type: "number",
+            minimum: MIN_WAIT_POLL_INTERVAL_MS,
+            maximum: MAX_WAIT_POLL_INTERVAL_MS,
+            description: "Polling interval while waiting. Defaults to OMX_DISPATCH_WAIT_POLL_INTERVAL_MS or 1000.",
+          },
+        },
+        required: ["prompt"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "omx_get_job",
       description: "Fetch the full status and result payload for a specific omx-bridge job.",
       inputSchema: {
@@ -924,6 +1173,35 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             minLength: 1,
             description: "Bridge job identifier.",
+          },
+        },
+        required: ["jobId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "omx_wait_for_job",
+      description:
+        "Wait for an existing omx-bridge job to complete. Drains only that job's notification from the shared notification store and leaves other pending notifications untouched.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          jobId: {
+            type: "string",
+            minLength: 1,
+            description: "Bridge job identifier.",
+          },
+          waitTimeoutMs: {
+            type: "number",
+            minimum: 1,
+            maximum: MAX_WAIT_TIMEOUT_MS,
+            description: "Maximum time to wait for this job to complete. Defaults to OMX_DISPATCH_WAIT_TIMEOUT_MS or 300000.",
+          },
+          pollIntervalMs: {
+            type: "number",
+            minimum: MIN_WAIT_POLL_INTERVAL_MS,
+            maximum: MAX_WAIT_POLL_INTERVAL_MS,
+            description: "Polling interval while waiting. Defaults to OMX_DISPATCH_WAIT_POLL_INTERVAL_MS or 1000.",
           },
         },
         required: ["jobId"],
@@ -1043,27 +1321,62 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         notifyUrl?: string;
         source?: 'dispatch' | 'synapse' | 'openclaw';
       };
-      const result = await requestJson<CreateJobResponse>("jobs", {
-        method: "POST",
-        body: JSON.stringify({
-          prompt,
-          ...(cwd ? { cwd } : {}),
-          ...(requestId ? { requestId } : {}),
-          ...(originRoutingKey ? { originRoutingKey } : {}),
-          ...(metadata ? { metadata } : {}),
-          ...(source ? { source } : {}),
-          notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
-        }),
+      const result = await submitBridgeJob({
+        prompt,
+        cwd,
+        requestId,
+        originRoutingKey,
+        metadata,
+        notifyUrl,
+        source,
       });
       return toTextResult(result);
     }
 
+    case "omx_submit_job_and_wait": {
+      const {
+        prompt,
+        cwd,
+        requestId,
+        originRoutingKey,
+        metadata,
+        notifyUrl,
+        source,
+        waitTimeoutMs,
+        pollIntervalMs,
+      } = args as unknown as SubmitJobInput & WaitForJobOptions;
+      const submitted = await submitBridgeJob({
+        prompt,
+        cwd,
+        requestId,
+        originRoutingKey,
+        metadata,
+        notifyUrl,
+        source,
+      });
+      const waited = await waitForJobCompletion(submitted.jobId, {
+        waitTimeoutMs,
+        pollIntervalMs,
+      });
+      return toTextResult(waited);
+    }
+
     case "omx_get_job": {
       const { jobId } = args as { jobId: string };
-      const result = await requestJson<BridgeJob>(
-        `jobs/${encodeURIComponent(jobId)}`,
-        { method: "GET" },
-      );
+      const result = await getBridgeJob(jobId);
+      return toTextResult(result);
+    }
+
+    case "omx_wait_for_job": {
+      const { jobId, waitTimeoutMs, pollIntervalMs } = args as {
+        jobId: string;
+        waitTimeoutMs?: number;
+        pollIntervalMs?: number;
+      };
+      const result = await waitForJobCompletion(jobId, {
+        waitTimeoutMs,
+        pollIntervalMs,
+      });
       return toTextResult(result);
     }
 

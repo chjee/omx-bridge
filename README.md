@@ -242,7 +242,9 @@ Available tools:
 | Tool | Description |
 |------|-------------|
 | `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey` and `notifyUrl` for callback routing. |
+| `omx_submit_job_and_wait` | Submit a prompt, then wait for that specific job to complete in the same tool call |
 | `omx_get_job` | Fetch status and result for a specific job |
+| `omx_wait_for_job` | Wait for an existing job to complete without draining other pending notifications |
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |
 | `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
@@ -257,6 +259,8 @@ BRIDGE_CALLBACK_SECRET=shared-secret
 # WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
 ENABLE_CLAUDE_CHANNEL=false
 MAX_NOTIFICATION_QUEUE_SIZE=200
+OMX_DISPATCH_WAIT_TIMEOUT_MS=300000
+OMX_DISPATCH_WAIT_POLL_INTERVAL_MS=1000
 # Optional JSONL store for pending completion notifications.
 # Defaults to .omx/state/omx-dispatch-notifications.jsonl under the MCP process cwd.
 # OMX_DISPATCH_NOTIFICATION_STORE_PATH=/path/to/omx-bridge/.omx/state/omx-dispatch-notifications.jsonl
@@ -269,6 +273,8 @@ Completion notifications are appended to the JSONL store and mirrored in memory 
 When multiple `omx-dispatch` processes run from the same working directory, they intentionally share the persisted notification file. `omx_get_notifications` reads that shared JSONL store under a lock, deduplicates notifications by job id, clears the store, and returns each pending completion once. Use `omx_notification_stats` to inspect the shared pending count, store path, store size, and a bounded preview without draining.
 
 Configure a distinct `OMX_DISPATCH_NOTIFICATION_STORE_PATH` only when sessions must be isolated from each other.
+
+For interactive CLI sessions that should continue when a job finishes, prefer `omx_submit_job_and_wait`. It submits the job and long-polls that job until completion, draining only that job's notification from the shared store. Other pending job notifications stay queued for `omx_get_notifications` or their own `omx_wait_for_job` calls. The default wait timeout is 5 minutes and can be overridden per tool call or with `OMX_DISPATCH_WAIT_TIMEOUT_MS`.
 
 ## Claude Code Channels Preview
 
