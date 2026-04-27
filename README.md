@@ -246,7 +246,8 @@ Available tools:
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |
 | `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
-| `omx_get_notifications` | Drain all pending completion notifications from the local webhook queue |
+| `omx_get_notifications` | Atomically drain all pending completion notifications from the shared webhook notification store |
+| `omx_notification_stats` | Inspect pending notification count/store metadata without draining |
 
 Important `omx-dispatch/.env` values:
 
@@ -263,9 +264,11 @@ MAX_NOTIFICATION_QUEUE_SIZE=200
 
 `WEBHOOK_PORT` is optional. When omitted, the MCP server picks a free port in the 12000–12999 range at startup, so concurrent Claude Code sessions do not conflict.
 
-Completion notifications are kept in memory and appended to the JSONL store. On `omx-dispatch` startup, pending notifications are restored from that file. `omx_get_notifications` drains both the in-memory queue and the persisted file.
+Completion notifications are appended to the JSONL store and mirrored in memory for local health/logging. On `omx-dispatch` startup, pending notifications are restored from that file. `omx_get_notifications` uses the persisted store as the source of truth so a different dispatch process can drain completions received by another webhook port.
 
-When running multiple `omx-dispatch` processes from the same working directory, configure a distinct `OMX_DISPATCH_NOTIFICATION_STORE_PATH` for each process. Otherwise those processes will share the same persisted pending-notification file.
+When multiple `omx-dispatch` processes run from the same working directory, they intentionally share the persisted notification file. `omx_get_notifications` reads that shared JSONL store under a lock, deduplicates notifications by job id, clears the store, and returns each pending completion once. Use `omx_notification_stats` to inspect the shared pending count, store path, store size, and a bounded preview without draining.
+
+Configure a distinct `OMX_DISPATCH_NOTIFICATION_STORE_PATH` only when sessions must be isolated from each other.
 
 ## Claude Code Channels Preview
 
@@ -337,7 +340,7 @@ cd omx-dispatch && npm run build
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
-- The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in memory and persists them to a JSONL store for restart recovery.
+- The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in the shared JSONL store, uses a file lock for cross-process drain, and deduplicates by job id before returning notifications.
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
 - On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
 - When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
