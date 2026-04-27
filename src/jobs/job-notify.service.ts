@@ -14,6 +14,23 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 @Injectable()
 export class JobNotifyService {
   private readonly logger = new Logger(JobNotifyService.name);
@@ -73,7 +90,7 @@ export class JobNotifyService {
     let lastResult: NotifyChannelResult = { status: 'failed', error: 'unknown_error', attempts: 0 };
     for (let attempt = 1; attempt <= retryDelays.length + 1; attempt += 1) {
       try {
-        const response = await fetch(notifyUrl, {
+        const response = await fetchWithTimeout(notifyUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -82,7 +99,7 @@ export class JobNotifyService {
               : {}),
           },
           body,
-        });
+        }, this.config.notifyTimeoutMs);
         if (!response.ok) {
           lastResult = {
             status: 'failed',
@@ -93,8 +110,12 @@ export class JobNotifyService {
         } else {
           return { status: 'ok', attempts: attempt };
         }
-      } catch {
-        lastResult = { status: 'failed', error: 'fetch_error', attempts: attempt };
+      } catch (err) {
+        lastResult = {
+          status: 'failed',
+          error: this.isAbortError(err) ? 'timeout' : 'fetch_error',
+          attempts: attempt,
+        };
       }
 
       const nextDelay = retryDelays[attempt - 1];
@@ -141,14 +162,14 @@ export class JobNotifyService {
     ].filter(Boolean).join('\n');
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ message, agentId: 'main', sessionKey, deliver: true }),
-      });
+      }, this.config.notifyTimeoutMs);
       if (!response.ok) {
         this.logger.warn(`OpenClaw notify 응답 오류: ${response.status} ${response.statusText}`);
         return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
@@ -156,7 +177,7 @@ export class JobNotifyService {
       return { status: 'ok' };
     } catch (err) {
       this.logger.warn(`OpenClaw notify 전송 실패: ${String(err)}`);
-      return { status: 'failed', error: 'fetch_error' };
+      return { status: 'failed', error: this.isAbortError(err) ? 'timeout' : 'fetch_error' };
     }
   }
 
@@ -178,11 +199,11 @@ export class JobNotifyService {
       .join('\n');
 
     try {
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const response = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text }),
-      });
+      }, this.config.notifyTimeoutMs);
       if (!response.ok) {
         this.logger.warn(`Telegram notify 응답 오류: ${response.status} ${response.statusText}`);
         return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
@@ -190,7 +211,16 @@ export class JobNotifyService {
       return { status: 'ok' };
     } catch (err) {
       this.logger.warn(`Telegram notify 전송 실패: ${String(err)}`);
-      return { status: 'failed', error: 'fetch_error' };
+      return { status: 'failed', error: this.isAbortError(err) ? 'timeout' : 'fetch_error' };
     }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'AbortError'
+    );
   }
 }

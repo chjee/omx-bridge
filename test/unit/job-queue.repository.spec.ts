@@ -46,6 +46,11 @@ describe('JobQueueRepository', () => {
       maxOutputChars: 500,
       sigkillGraceMs: 5000,
       maxConcurrency: 1,
+      maxActiveJobs: 50,
+      jobRetentionDays: 7,
+      maxTerminalJobs: 1000,
+      jobCleanupIntervalMs: 3600000,
+      notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
     };
 
@@ -105,6 +110,72 @@ describe('JobQueueRepository', () => {
     const queuedJobs = await repository.listByStatus('queued');
 
     expect(queuedJobs.map((job) => job.id)).toEqual([TEST_ID_1, TEST_ID_2]);
+  });
+
+  it('counts only queued and running jobs as active', async () => {
+    await repository.save(createJob({ id: TEST_ID_1, status: 'queued' }));
+    await repository.save(createJob({ id: TEST_ID_2, status: 'running' }));
+    await repository.save(createJob({
+      id: TEST_ID_3,
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:00:03.000Z',
+    }));
+
+    await expect(repository.countActive()).resolves.toBe(2);
+  });
+
+  it('cleans up old terminal jobs without deleting active jobs', async () => {
+    await repository.save(createJob({
+      id: TEST_ID_1,
+      status: 'succeeded',
+      finishedAt: '2026-04-01T00:00:00.000Z',
+    }));
+    await repository.save(createJob({
+      id: TEST_ID_2,
+      status: 'failed',
+      finishedAt: '2026-04-26T00:00:00.000Z',
+    }));
+    await repository.save(createJob({ id: TEST_ID_3, status: 'queued' }));
+
+    const result = await repository.cleanupTerminalJobs({
+      retentionDays: 7,
+      maxTerminalJobs: 1000,
+      now: new Date('2026-04-27T00:00:00.000Z'),
+    });
+
+    expect(result).toEqual({ deleted: 1, retained: 1 });
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+    await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
+    await expect(repository.getById(TEST_ID_3)).resolves.toMatchObject({ status: 'queued' });
+  });
+
+  it('enforces max terminal job retention by deleting oldest terminal files', async () => {
+    await repository.save(createJob({
+      id: TEST_ID_1,
+      status: 'succeeded',
+      finishedAt: '2026-04-25T00:00:00.000Z',
+    }));
+    await repository.save(createJob({
+      id: TEST_ID_2,
+      status: 'failed',
+      finishedAt: '2026-04-26T00:00:00.000Z',
+    }));
+    await repository.save(createJob({
+      id: TEST_ID_3,
+      status: 'cancelled',
+      finishedAt: '2026-04-27T00:00:00.000Z',
+    }));
+
+    const result = await repository.cleanupTerminalJobs({
+      retentionDays: 30,
+      maxTerminalJobs: 2,
+      now: new Date('2026-04-27T00:00:00.000Z'),
+    });
+
+    expect(result).toEqual({ deleted: 1, retained: 2 });
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+    await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
+    await expect(repository.getById(TEST_ID_3)).resolves.toMatchObject({ status: 'cancelled' });
   });
 
   it('handles malformed job files predictably', async () => {

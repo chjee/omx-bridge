@@ -86,7 +86,9 @@ In claude notify mode, Telegram fallback behaviour depends on whether a per-job 
 - **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers.
 
 Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAYS_MS`
-(default: `500,1000,2000`, which means four total attempts).
+(default: `500,1000,2000`, which means four total attempts). Each notification
+fetch attempt is bounded by `BRIDGE_NOTIFY_TIMEOUT_MS` (default: `5000`); this is
+separate from `BRIDGE_JOB_TIMEOUT_MS`.
 
 For Claude mode:
 
@@ -94,12 +96,33 @@ For Claude mode:
 NOTIFY_MODE=claude
 CLAUDE_NOTIFY_URL=http://127.0.0.1:<port>/notify  # omx-dispatch auto-assigns port in 12000-12999
 BRIDGE_NOTIFY_RETRY_DELAYS_MS=500,1000,2000
+BRIDGE_NOTIFY_TIMEOUT_MS=5000
 BRIDGE_CALLBACK_SECRET=shared-secret
 TELEGRAM_BOT_TOKEN=optional-fallback-token
 TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 ```
 
 `BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
+
+### Queue capacity and retention
+
+The bridge rejects new job submissions once active jobs (`queued` + `running`) reach
+`BRIDGE_MAX_ACTIVE_JOBS`. Existing jobs are never dropped to make room for new ones.
+
+```env
+BRIDGE_MAX_CONCURRENCY=4
+BRIDGE_MAX_ACTIVE_JOBS=50
+```
+
+Completed job files are cleaned up on service startup and then periodically. Only
+terminal jobs (`succeeded`, `failed`, `cancelled`) are eligible for deletion;
+`queued` and `running` jobs are always retained.
+
+```env
+BRIDGE_JOB_RETENTION_DAYS=7
+BRIDGE_MAX_TERMINAL_JOBS=1000
+BRIDGE_JOB_CLEANUP_INTERVAL_MS=3600000
+```
 
 ### API token guard
 
@@ -233,9 +256,16 @@ BRIDGE_CALLBACK_SECRET=shared-secret
 # WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
 ENABLE_CLAUDE_CHANNEL=false
 MAX_NOTIFICATION_QUEUE_SIZE=200
+# Optional JSONL store for pending completion notifications.
+# Defaults to .omx/state/omx-dispatch-notifications.jsonl under the MCP process cwd.
+# OMX_DISPATCH_NOTIFICATION_STORE_PATH=/path/to/omx-bridge/.omx/state/omx-dispatch-notifications.jsonl
 ```
 
 `WEBHOOK_PORT` is optional. When omitted, the MCP server picks a free port in the 12000–12999 range at startup, so concurrent Claude Code sessions do not conflict.
+
+Completion notifications are kept in memory and appended to the JSONL store. On `omx-dispatch` startup, pending notifications are restored from that file. `omx_get_notifications` drains both the in-memory queue and the persisted file.
+
+When running multiple `omx-dispatch` processes from the same working directory, configure a distinct `OMX_DISPATCH_NOTIFICATION_STORE_PATH` for each process. Otherwise those processes will share the same persisted pending-notification file.
 
 ## Claude Code Channels Preview
 
@@ -270,7 +300,7 @@ omx-dispatch -> notifications/claude/channel
 Claude Code -> summarize result / continue workflow
 ```
 
-If `ENABLE_CLAUDE_CHANNEL=false`, the MCP server still keeps the notification queue and logging path for `omx_get_notifications`.
+If `ENABLE_CLAUDE_CHANNEL=false`, the MCP server still keeps the persisted notification queue and logging path for `omx_get_notifications`.
 
 ## Testing
 
@@ -302,10 +332,12 @@ cd omx-dispatch && npm run build
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are recovered to `queued` on service startup.
+- New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
+- Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
-- The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in memory.
+- The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in memory and persists them to a JSONL store for restart recovery.
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
 - On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
 - When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.

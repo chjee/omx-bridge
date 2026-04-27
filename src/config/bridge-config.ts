@@ -13,8 +13,18 @@ export interface BridgeConfig {
   sigkillGraceMs: number;
   /** 동시에 실행할 수 있는 최대 잡 수 (기본 2). CLI/Telegram 동시 제출 시 한쪽이 다른 쪽을 막지 않게 함. */
   maxConcurrency: number;
+  /** queued + running 잡 허용 상한. 초과 시 POST /jobs를 429로 거절한다. */
+  maxActiveJobs: number;
+  /** terminal 잡 파일 보존 기간 (일). succeeded/failed/cancelled만 대상. */
+  jobRetentionDays: number;
+  /** 보존할 terminal 잡 파일 최대 개수. 초과분은 오래된 것부터 삭제. */
+  maxTerminalJobs: number;
+  /** terminal 잡 파일 정리 주기 (ms). */
+  jobCleanupIntervalMs: number;
   /** 완료 webhook 재시도 간격 (ms). 배열 길이 + 1 만큼 시도. */
   notifyRetryDelaysMs?: number[];
+  /** 완료 알림 fetch 1회 시도 timeout (ms). 작업 실행 timeout과 별개. */
+  notifyTimeoutMs: number;
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
   /**
@@ -100,9 +110,29 @@ export function buildBridgeConfig(
       configService.get<string>('BRIDGE_MAX_CONCURRENCY'),
       2,
     ),
+    maxActiveJobs: parsePositiveInt(
+      configService.get<string>('BRIDGE_MAX_ACTIVE_JOBS'),
+      50,
+    ),
+    jobRetentionDays: parsePositiveInt(
+      configService.get<string>('BRIDGE_JOB_RETENTION_DAYS'),
+      7,
+    ),
+    maxTerminalJobs: parsePositiveInt(
+      configService.get<string>('BRIDGE_MAX_TERMINAL_JOBS'),
+      1_000,
+    ),
+    jobCleanupIntervalMs: parsePositiveInt(
+      configService.get<string>('BRIDGE_JOB_CLEANUP_INTERVAL_MS'),
+      60 * 60 * 1000,
+    ),
     notifyRetryDelaysMs: parsePositiveIntList(
       configService.get<string>('BRIDGE_NOTIFY_RETRY_DELAYS_MS'),
       [500, 1_000, 2_000],
+    ),
+    notifyTimeoutMs: parsePositiveInt(
+      configService.get<string>('BRIDGE_NOTIFY_TIMEOUT_MS'),
+      5_000,
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
     apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,

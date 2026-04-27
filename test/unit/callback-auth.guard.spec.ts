@@ -12,6 +12,11 @@ function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConf
     maxOutputChars: 1000,
     sigkillGraceMs: 5000,
     maxConcurrency: 1,
+    maxActiveJobs: 50,
+    jobRetentionDays: 7,
+    maxTerminalJobs: 1000,
+    jobCleanupIntervalMs: 3600000,
+    notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
     callbackSecret,
   };
