@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
-import type { BridgeJob, JobStatus } from './job.types';
+import { JOB_STATUSES, type BridgeJob, type JobStatus } from './job.types';
 
 const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
 
@@ -144,7 +144,12 @@ export class JobQueueRepository {
 
   private parseJob(raw: string, jobId: string): BridgeJob | null {
     try {
-      return JSON.parse(raw) as BridgeJob;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!this.isBridgeJob(parsed, jobId)) {
+        this.logger.warn(`Skipping invalid job file for ${jobId}`);
+        return null;
+      }
+      return parsed;
     } catch (error) {
       this.logger.warn(
         `Skipping malformed job file for ${jobId}: ${this.describeError(error)}`,
@@ -168,5 +173,31 @@ export class JobQueueRepository {
 
   private terminalSortKey(job: BridgeJob): string {
     return `${job.finishedAt ?? job.createdAt}:${job.queueOrder ?? ''}:${job.id}`;
+  }
+
+  private isBridgeJob(value: unknown, jobId: string): value is BridgeJob {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    const execution = value.execution;
+    return (
+      value.id === jobId &&
+      typeof value.prompt === 'string' &&
+      (value.queueOrder === undefined || typeof value.queueOrder === 'string') &&
+      typeof value.createdAt === 'string' &&
+      typeof value.stdout === 'string' &&
+      typeof value.stderr === 'string' &&
+      typeof value.status === 'string' &&
+      JOB_STATUSES.includes(value.status as JobStatus) &&
+      this.isRecord(execution) &&
+      typeof execution.command === 'string' &&
+      typeof execution.timeoutMs === 'number' &&
+      typeof execution.maxOutputChars === 'number'
+    );
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 }

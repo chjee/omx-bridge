@@ -7,7 +7,7 @@ const TERMINAL_JOB_STATUSES = JOB_STATUSES.filter(
 );
 
 const EXECUTION_ERROR_TYPES: JobExecutionMetadata['errorType'][] = [
-  'spawn_error', 'timeout', 'non_zero_exit', 'cancelled',
+  'spawn_error', 'timeout', 'non_zero_exit', 'cancelled', 'execution_error',
 ];
 
 export class JobCallbackExecutionDto {

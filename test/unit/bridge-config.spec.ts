@@ -74,4 +74,30 @@ describe('buildBridgeConfig', () => {
       claudeNotifyUrl: undefined,
     });
   });
+
+  it('rejects partial OpenClaw hook configuration', () => {
+    process.env = {
+      OPENCLAW_HOOKS_URL: 'http://127.0.0.1:3994/hooks',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app')).toThrow(
+      'OPENCLAW_HOOKS_TOKEN is required when OPENCLAW_HOOKS_URL is set',
+    );
+  });
+
+  it('accepts complete OpenClaw hook configuration', () => {
+    process.env = {
+      OPENCLAW_HOOKS_URL: 'http://127.0.0.1:3994/hooks',
+      OPENCLAW_HOOKS_TOKEN: 'token',
+      OPENCLAW_HOOKS_SESSION_KEY: 'agent:main:telegram:direct',
+    };
+
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app');
+
+    expect(config.openclawHooks).toEqual({
+      url: 'http://127.0.0.1:3994/hooks',
+      token: 'token',
+      sessionKey: 'agent:main:telegram:direct',
+    });
+  });
 });
