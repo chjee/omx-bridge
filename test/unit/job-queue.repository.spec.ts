@@ -45,6 +45,7 @@ describe('JobQueueRepository', () => {
       jobTimeoutMs: 1000,
       maxOutputChars: 500,
       sigkillGraceMs: 5000,
+      maxConcurrency: 1,
       notifyMode: 'openclaw',
     };
 

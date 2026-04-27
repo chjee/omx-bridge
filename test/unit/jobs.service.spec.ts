@@ -36,6 +36,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     jobTimeoutMs: 900_000,
     maxOutputChars: 32_000,
     sigkillGraceMs: 5000,
+    maxConcurrency: 1,
     notifyMode: 'claude',
     ...overrides,
   };

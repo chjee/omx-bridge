@@ -22,6 +22,7 @@ function createService(
     jobTimeoutMs: 100,
     maxOutputChars: 10,
     sigkillGraceMs: 50,
+    maxConcurrency: 1,
     notifyMode: 'openclaw',
     ...overrides,
   };
