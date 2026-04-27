@@ -4,6 +4,7 @@ import { ApiTokenGuard } from '../../src/jobs/api-token.guard';
 
 function createConfig(apiToken: string | undefined): BridgeConfig {
   return {
+    host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
     jobPollIntervalMs: 100,
@@ -17,6 +18,7 @@ function createConfig(apiToken: string | undefined): BridgeConfig {
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
+    allowedCwdPrefixes: ['/workspace'],
     apiToken,
   };
 }

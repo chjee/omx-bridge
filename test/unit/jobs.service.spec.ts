@@ -1,4 +1,5 @@
 import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import path from 'node:path';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import type { JobCallbackDto } from '../../src/jobs/dto/job-callback.dto';
 import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
@@ -30,6 +31,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
 
 function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
   return {
+    host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
     jobPollIntervalMs: 100,
@@ -43,6 +45,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'claude',
+    allowedCwdPrefixes: ['/workspace', '/home/tester'],
     ...overrides,
   };
 }
@@ -95,6 +98,29 @@ describe('JobsService.createJob', () => {
     const { service, repository, jobRunnerService } = createService(jobs, { maxActiveJobs: 1 });
 
     await expect(service.createJob({ prompt: 'overflow' })).rejects.toThrow(HttpException);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('accepts cwd values inside an allowed prefix', async () => {
+    const { service, repository } = createService(new Map(), {
+      allowedCwdPrefixes: [path.resolve('/workspace')],
+    });
+
+    const job = await service.createJob({ prompt: 'inside', cwd: '/workspace/project' });
+
+    expect(job.cwd).toBe('/workspace/project');
+    expect(repository.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects cwd values outside allowed prefixes', async () => {
+    const { service, repository, jobRunnerService } = createService(new Map(), {
+      allowedCwdPrefixes: [path.resolve('/workspace')],
+    });
+
+    await expect(service.createJob({ prompt: 'outside', cwd: '/etc' })).rejects.toThrow(
+      HttpException,
+    );
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
   });
