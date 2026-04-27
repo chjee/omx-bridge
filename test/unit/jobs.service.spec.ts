@@ -53,6 +53,7 @@ function createService(jobs: Map<string, BridgeJob> = new Map()) {
 
   const jobRunnerService = {
     cancel: jest.fn().mockResolvedValue(true),
+    trigger: jest.fn(),
   } as unknown as JobRunnerService;
 
   const jobNotify = {
@@ -62,6 +63,21 @@ function createService(jobs: Map<string, BridgeJob> = new Map()) {
   const service = new JobsService(repository, jobRunnerService, jobNotify, createConfig());
   return { service, repository, jobRunnerService, jobNotify };
 }
+
+describe('JobsService.createJob', () => {
+  it('triggers the runner after a queued job is persisted', async () => {
+    const { service, repository, jobRunnerService } = createService();
+
+    const job = await service.createJob({ prompt: 'run soon' });
+
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      id: job.id,
+      prompt: 'run soon',
+      status: 'queued',
+    }));
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('JobsService.completeJobFromCallback', () => {
   it('applies allowed execution fields from callback', async () => {

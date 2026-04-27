@@ -13,6 +13,8 @@ export interface BridgeConfig {
   sigkillGraceMs: number;
   /** 동시에 실행할 수 있는 최대 잡 수 (기본 2). CLI/Telegram 동시 제출 시 한쪽이 다른 쪽을 막지 않게 함. */
   maxConcurrency: number;
+  /** 완료 webhook 재시도 간격 (ms). 배열 길이 + 1 만큼 시도. */
+  notifyRetryDelaysMs?: number[];
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
   /**
@@ -53,6 +55,18 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parsePositiveIntList(value: string | undefined, fallback: number[]): number[] {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = value
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((part) => Number.isFinite(part) && part > 0);
+  return parsed.length > 0 ? parsed : fallback;
+}
+
 export function buildBridgeConfig(
   configService: ConfigService,
   cwd: string = process.cwd(),
@@ -85,6 +99,10 @@ export function buildBridgeConfig(
     maxConcurrency: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_CONCURRENCY'),
       2,
+    ),
+    notifyRetryDelaysMs: parsePositiveIntList(
+      configService.get<string>('BRIDGE_NOTIFY_RETRY_DELAYS_MS'),
+      [500, 1_000, 2_000],
     ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
     apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,

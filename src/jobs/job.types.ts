@@ -24,6 +24,8 @@ export interface NotifyChannelResult {
   error?: string;
   /** 'failed' 시 마지막 HTTP 응답 상태 코드(존재 시) */
   httpStatus?: number;
+  /** 전송 시도 횟수. retry가 있는 채널에서 기록된다. */
+  attempts?: number;
   /** 'skipped' 시 사유(예: 'not_configured', 'synapse_fallback', 'webhook_ok') */
   skippedReason?: string;
 }

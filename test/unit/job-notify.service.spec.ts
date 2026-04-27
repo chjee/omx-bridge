@@ -40,6 +40,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     maxOutputChars: 1000,
     sigkillGraceMs: 5000,
     maxConcurrency: 1,
+    notifyRetryDelaysMs: [],
     notifyMode: 'claude',
     telegram: {
       botToken: 'token',
@@ -121,7 +122,7 @@ describe('JobNotifyService', () => {
     });
 
     expect(outcome.mode).toBe('claude');
-    expect(outcome.claudeWebhook).toEqual({ status: 'ok' });
+    expect(outcome.claudeWebhook).toEqual({ status: 'ok', attempts: 1 });
     expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'webhook_ok' });
     expect(repoMock.save).toHaveBeenCalledTimes(1);
     expect(repoMock.current.notifyOutcome).toEqual(outcome);
@@ -158,7 +159,12 @@ describe('JobNotifyService', () => {
     const urls = fetchMock.mock.calls.map(([url]) => url as string);
     expect(urls[0]).toBe(CLAUDE_URL);
     expect(urls[1]).toBe(TELEGRAM_URL);
-    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', error: 'http_500', httpStatus: 500 });
+    expect(outcome.claudeWebhook).toMatchObject({
+      status: 'failed',
+      error: 'http_500',
+      httpStatus: 500,
+      attempts: 1,
+    });
     expect(outcome.telegram).toEqual({ status: 'ok' });
     expect(repoMock.current.notifyOutcome).toEqual(outcome);
   });
@@ -180,8 +186,42 @@ describe('JobNotifyService', () => {
     const urls = fetchMock.mock.calls.map(([url]) => url as string);
     expect(urls[0]).toBe(CLAUDE_URL);
     expect(urls[1]).toBe(TELEGRAM_URL);
-    expect(outcome.claudeWebhook).toEqual({ status: 'failed', error: 'fetch_error' });
+    expect(outcome.claudeWebhook).toEqual({ status: 'failed', error: 'fetch_error', attempts: 1 });
     expect(outcome.telegram).toEqual({ status: 'ok' });
+  });
+
+  it('retries claude webhook before falling back', async () => {
+    fetchMock
+      .mockResolvedValueOnce({ ok: false, status: 503, statusText: 'Service Unavailable' })
+      .mockResolvedValueOnce({ ok: false, status: 503, statusText: 'Service Unavailable' })
+      .mockResolvedValueOnce({ ok: true });
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({ claudeNotifyUrl: CLAUDE_URL, notifyRetryDelaysMs: [1, 1] }),
+      repoMock.repo,
+    );
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([CLAUDE_URL, CLAUDE_URL, CLAUDE_URL]);
+    expect(outcome.claudeWebhook).toEqual({ status: 'ok', attempts: 3 });
+    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'webhook_ok' });
+  });
+
+  it('skips telegram fallback for per-job notifyUrl callers in claude mode', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 502, statusText: 'Bad Gateway' });
+    const job = createJob({ source: 'dispatch', notifyUrl: CLAUDE_URL });
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(createConfig(), repoMock.repo);
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(CLAUDE_URL);
+    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502, attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'per_job_webhook_failed' });
   });
 
   it('skips telegram fallback for synapse-broker callers in claude mode', async () => {
@@ -199,8 +239,8 @@ describe('JobNotifyService', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(CLAUDE_URL);
-    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502 });
-    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'synapse_fallback' });
+    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502, attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'broker_fallback' });
   });
 
   it('sends both OpenClaw hooks and Telegram notifications in openclaw mode', async () => {
