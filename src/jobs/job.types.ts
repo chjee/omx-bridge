@@ -33,6 +33,8 @@ export interface NotifyChannelResult {
 export interface NotifyOutcome {
   attemptedAt: string;
   mode: 'openclaw' | 'claude';
+  trigger?: 'auto' | 'manual';
+  attemptIndex?: number;
   claudeWebhook?: NotifyChannelResult;
   openclaw?: NotifyChannelResult;
   telegram?: NotifyChannelResult;
@@ -57,6 +59,8 @@ export interface BridgeJob {
   stderr: string;
   execution: JobExecutionMetadata;
   notifyOutcome?: NotifyOutcome;
+  /** 최근 10개 완료 알림 시도 이력 */
+  notifyHistory?: NotifyOutcome[];
 }
 
 export interface OmxExecutionResult {

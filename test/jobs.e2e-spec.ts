@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { ConflictException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -8,6 +8,7 @@ import { JobRunnerService } from '../src/jobs/job-runner.service';
 import { JobsController } from '../src/jobs/jobs.controller';
 import { OmxExecService } from '../src/jobs/omx-exec.service';
 import { JobNotifyService } from '../src/jobs/job-notify.service';
+import { JobQueueRepository } from '../src/jobs/job-queue.repository';
 import type { BridgeJob, OmxExecutionResult } from '../src/jobs/job.types';
 import { createTempDir, waitFor } from './helpers';
 
@@ -83,12 +84,41 @@ class FakeOmxExecService {
   }
 }
 
+function createBridgeJobFixture(overrides: Partial<BridgeJob> = {}): BridgeJob {
+  return {
+    id: overrides.id ?? '00000000-0000-4000-a000-000000000001',
+    prompt: overrides.prompt ?? 'fixture job',
+    cwd: overrides.cwd,
+    queueOrder: overrides.queueOrder ?? '0000000000001-000001',
+    requestId: overrides.requestId,
+    originRoutingKey: overrides.originRoutingKey,
+    source: overrides.source,
+    metadata: overrides.metadata,
+    notifyUrl: overrides.notifyUrl,
+    status: overrides.status ?? 'queued',
+    createdAt: overrides.createdAt ?? new Date().toISOString(),
+    startedAt: overrides.startedAt,
+    finishedAt: overrides.finishedAt,
+    exitCode: overrides.exitCode ?? null,
+    stdout: overrides.stdout ?? '',
+    stderr: overrides.stderr ?? '',
+    execution: overrides.execution ?? {
+      command: 'fake-omx',
+      timeoutMs: 50,
+      maxOutputChars: 500,
+    },
+    notifyOutcome: overrides.notifyOutcome,
+    notifyHistory: overrides.notifyHistory,
+  };
+}
+
 describe('Jobs API (e2e)', () => {
   let app: INestApplication;
   let jobsDirectory: string;
   let fakeOmxExecService: FakeOmxExecService;
   let runner: JobRunnerService;
   let controller: JobsController;
+  let repository: JobQueueRepository;
   let notifyJobComplete: jest.Mock;
 
   async function getJob(jobId: string): Promise<BridgeJob> {
@@ -100,6 +130,7 @@ describe('Jobs API (e2e)', () => {
     process.env.BRIDGE_JOBS_DIR = jobsDirectory;
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
+    process.env.BRIDGE_API_TOKEN = '';
     fakeOmxExecService = new FakeOmxExecService();
     notifyJobComplete = jest.fn().mockResolvedValue(undefined);
 
@@ -116,6 +147,27 @@ describe('Jobs API (e2e)', () => {
     await app.init();
     runner = app.get(JobRunnerService);
     controller = app.get(JobsController);
+    repository = app.get(JobQueueRepository);
+    notifyJobComplete.mockImplementation(
+      async (job: BridgeJob, options?: { trigger?: 'auto' | 'manual' }) => {
+        const latest = await repository.getById(job.id);
+        if (!latest) return undefined;
+        const outcome = {
+          attemptedAt: new Date().toISOString(),
+          mode: 'openclaw' as const,
+          trigger: options?.trigger ?? 'auto',
+          attemptIndex: latest.notifyHistory?.length ?? 0,
+          openclaw: { status: 'skipped' as const, skippedReason: 'not_configured' },
+          telegram: { status: 'skipped' as const, skippedReason: 'not_configured' },
+        };
+        await repository.save({
+          ...latest,
+          notifyOutcome: outcome,
+          notifyHistory: [...(latest.notifyHistory ?? []), outcome].slice(-10),
+        });
+        return outcome;
+      },
+    );
   });
 
   afterEach(async () => {
@@ -123,6 +175,7 @@ describe('Jobs API (e2e)', () => {
     delete process.env.BRIDGE_JOBS_DIR;
     delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
     delete process.env.BRIDGE_MAX_CONCURRENCY;
+    delete process.env.BRIDGE_API_TOKEN;
   });
 
   it('submits, persists, executes, and returns a successful job', async () => {
@@ -207,6 +260,64 @@ describe('Jobs API (e2e)', () => {
       id: firstJob.jobId,
       status: 'succeeded',
     });
+  });
+
+  it('returns job stats from the stats route handler', async () => {
+    await repository.save(createBridgeJobFixture({
+      id: '00000000-0000-4000-a000-000000000103',
+      status: 'queued',
+      createdAt: new Date(Date.now() - 1_000).toISOString(),
+    }));
+
+    const response = await controller.getStats();
+
+    expect(response).toMatchObject({
+      queuedCount: 1,
+      runningCount: 0,
+      activeCount: 1,
+      terminalCount: 0,
+      maxConcurrency: 1,
+    });
+    expect(response).toHaveProperty('maxActiveJobs');
+    expect(response.oldestQueuedAgeMs).not.toBeNull();
+  });
+
+  it('manually retries notification for terminal jobs from the retry route handler', async () => {
+    const terminalJob = createBridgeJobFixture({
+      id: '00000000-0000-4000-a000-000000000101',
+      status: 'succeeded',
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+      stdout: 'done',
+    });
+    await repository.save(terminalJob);
+
+    const response = await controller.retryNotify(terminalJob.id);
+
+    expect(response).toMatchObject({
+      id: terminalJob.id,
+      prompt: terminalJob.prompt,
+      status: 'succeeded',
+    });
+    expect(response.notifyHistory).toHaveLength(1);
+    expect(response.notifyHistory?.[0]).toMatchObject({
+      trigger: 'manual',
+      attemptIndex: 0,
+    });
+    expect(notifyJobComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ id: terminalJob.id }),
+      { trigger: 'manual' },
+    );
+  });
+
+  it('rejects manual notification retry for queued jobs from the retry route handler', async () => {
+    const queuedJob = createBridgeJobFixture({
+      id: '00000000-0000-4000-a000-000000000102',
+      status: 'queued',
+    });
+    await repository.save(queuedJob);
+
+    await expect(controller.retryNotify(queuedJob.id)).rejects.toThrow(ConflictException);
   });
 
   it('accepts webhook callbacks and finalizes queued jobs without executing OMX', async () => {
@@ -320,6 +431,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     process.env.BRIDGE_JOB_TIMEOUT_MS = '5000';
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
+    process.env.BRIDGE_API_TOKEN = '';
     process.env.OMX_COMMAND = fakeOmxPath;
     process.env.BRIDGE_TRACE_FILE = traceFile;
     process.env.FAKE_CODEX_PATH = fakeCodexPath;
@@ -340,6 +452,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
     delete process.env.BRIDGE_JOB_TIMEOUT_MS;
     delete process.env.BRIDGE_MAX_CONCURRENCY;
+    delete process.env.BRIDGE_API_TOKEN;
     delete process.env.OMX_COMMAND;
     delete process.env.BRIDGE_TRACE_FILE;
     delete process.env.FAKE_CODEX_PATH;
