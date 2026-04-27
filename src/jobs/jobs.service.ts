@@ -15,6 +15,16 @@ import { JobRunnerService } from './job-runner.service';
 import { JobNotifyService } from './job-notify.service';
 import type { BridgeJob, JobExecutionMetadata, JobStatus } from './job.types';
 
+export interface JobStats {
+  queuedCount: number;
+  runningCount: number;
+  activeCount: number;
+  terminalCount: number;
+  maxActiveJobs: number;
+  maxConcurrency: number;
+  oldestQueuedAgeMs: number | null;
+}
+
 @Injectable()
 export class JobsService {
   private queueSequence = 0;
@@ -73,6 +83,27 @@ export class JobsService {
     return this.repository.listAll();
   }
 
+  async getStats(): Promise<JobStats> {
+    const jobs = await this.repository.listAll();
+    const queuedJobs = jobs.filter((job) => job.status === 'queued');
+    const runningCount = jobs.filter((job) => job.status === 'running').length;
+    const terminalCount = jobs.filter((job) => this.isTerminal(job.status)).length;
+    const oldestQueued = queuedJobs.reduce<BridgeJob | null>((oldest, job) => {
+      if (!oldest) return job;
+      return Date.parse(job.createdAt) < Date.parse(oldest.createdAt) ? job : oldest;
+    }, null);
+
+    return {
+      queuedCount: queuedJobs.length,
+      runningCount,
+      activeCount: queuedJobs.length + runningCount,
+      terminalCount,
+      maxActiveJobs: this.config.maxActiveJobs,
+      maxConcurrency: this.config.maxConcurrency,
+      oldestQueuedAgeMs: oldestQueued ? Date.now() - Date.parse(oldestQueued.createdAt) : null,
+    };
+  }
+
   async getJobOrThrow(id: string): Promise<BridgeJob> {
     const job = await this.repository.getById(id);
     if (!job) {
@@ -105,6 +136,16 @@ export class JobsService {
     await this.jobRunnerService.cancel(id);
     void this.jobNotify.notifyJobComplete(savedJob);
     return savedJob;
+  }
+
+  async triggerNotifyRetry(id: string): Promise<BridgeJob> {
+    const job = await this.getJobOrThrow(id);
+    if (!this.isTerminal(job.status)) {
+      throw new ConflictException(`Job ${id} is not terminal`);
+    }
+
+    await this.jobNotify.notifyJobComplete(job, { trigger: 'manual' });
+    return this.getJobOrThrow(id);
   }
 
   async cancelJob(id: string): Promise<BridgeJob> {

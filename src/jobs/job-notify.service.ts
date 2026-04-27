@@ -10,6 +10,10 @@ import type {
 
 const DEFAULT_NOTIFY_RETRY_DELAYS_MS = [500, 1_000, 2_000];
 
+interface NotifyOptions {
+  trigger?: 'auto' | 'manual';
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -40,10 +44,11 @@ export class JobNotifyService {
     private readonly repository: JobQueueRepository,
   ) {}
 
-  async notifyJobComplete(job: BridgeJob): Promise<NotifyOutcome> {
+  async notifyJobComplete(job: BridgeJob, options?: NotifyOptions): Promise<NotifyOutcome> {
     const outcome: NotifyOutcome = {
       attemptedAt: new Date().toISOString(),
       mode: this.config.notifyMode,
+      trigger: options?.trigger ?? 'auto',
     };
 
     if (this.config.notifyMode === 'claude') {
@@ -58,18 +63,25 @@ export class JobNotifyService {
       outcome.telegram = telegram;
     }
 
-    await this.persistOutcome(job.id, outcome);
-    return outcome;
+    return this.persistOutcome(job.id, outcome);
   }
 
-  private async persistOutcome(jobId: string, outcome: NotifyOutcome): Promise<void> {
+  private async persistOutcome(jobId: string, outcome: NotifyOutcome): Promise<NotifyOutcome> {
     const latest = await this.repository.getById(jobId);
-    if (!latest) return;
+    if (!latest) return outcome;
+    const attemptIndex = latest.notifyHistory?.length ?? 0;
+    const outcomeWithIndex = { ...outcome, attemptIndex };
+    const updatedHistory = [...(latest.notifyHistory ?? []), outcomeWithIndex].slice(-10);
     try {
-      await this.repository.save({ ...latest, notifyOutcome: outcome });
+      await this.repository.save({
+        ...latest,
+        notifyOutcome: outcomeWithIndex,
+        notifyHistory: updatedHistory,
+      });
     } catch (err) {
       this.logger.warn(`Failed to persist notifyOutcome for ${jobId}: ${String(err)}`);
     }
+    return outcomeWithIndex;
   }
 
   private async _notifyClaudeWebhook(job: BridgeJob): Promise<NotifyChannelResult> {
