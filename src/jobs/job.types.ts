@@ -10,7 +10,7 @@ export interface JobExecutionMetadata {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: 'spawn_error' | 'timeout' | 'non_zero_exit' | 'cancelled';
+  errorType?: 'spawn_error' | 'timeout' | 'non_zero_exit' | 'cancelled' | 'execution_error';
   recoveredFromRestart?: boolean;
 }
 

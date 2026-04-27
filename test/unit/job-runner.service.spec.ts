@@ -152,6 +152,27 @@ describe('JobRunnerService', () => {
     });
   });
 
+  it('marks running jobs failed when omx execution rejects unexpectedly', async () => {
+    const runner = new JobRunnerService(
+      repository,
+      {
+        execute: jest.fn().mockRejectedValue(new Error('wrapper crashed')),
+      } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await repository.save(createJob());
+
+    await expect(runner.runOnce()).resolves.toBe(true);
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
+      status: 'failed',
+      stderr: 'Unexpected OMX execution error: wrapper crashed',
+      exitCode: null,
+      execution: { errorType: 'execution_error' },
+    });
+  });
+
   it('aborts running jobs and preserves external terminal updates', async () => {
     let abortSignal: AbortSignal | undefined;
     let resolveExecution: (() => void) | undefined;
