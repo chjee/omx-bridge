@@ -10,6 +10,7 @@ function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConf
     jobPollIntervalMs: 100,
     jobTimeoutMs: 1000,
     maxOutputChars: 1000,
+    sigkillGraceMs: 5000,
     notifyMode: 'openclaw',
     callbackSecret,
   };

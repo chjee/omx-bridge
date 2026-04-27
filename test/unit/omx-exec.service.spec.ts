@@ -21,6 +21,7 @@ function createService(
     jobPollIntervalMs: 10,
     jobTimeoutMs: 100,
     maxOutputChars: 10,
+    sigkillGraceMs: 50,
     notifyMode: 'openclaw',
     ...overrides,
   };

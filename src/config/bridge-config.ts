@@ -9,8 +9,16 @@ export interface BridgeConfig {
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
+  /** SIGTERM 후 SIGKILL을 보내기까지 대기 시간 (ms) */
+  sigkillGraceMs: number;
   /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
   callbackSecret?: string;
+  /**
+   * Bearer 토큰: POST /jobs, GET /jobs[/:id], POST /jobs/:id/cancel 보호.
+   * undefined 시 가드 비활성(기본). 외부 호스트 노출 시 반드시 설정 권장.
+   * /callback은 callbackSecret 기반 HMAC을 별도 사용하므로 영향 없음.
+   */
+  apiToken?: string;
   /**
    * 완료 알림 모드
    * - openclaw: OpenClaw hooks + 텔레그램 직접 전송 (기본값, 현재 운영 중)
@@ -68,7 +76,12 @@ export function buildBridgeConfig(
       configService.get<string>('BRIDGE_MAX_OUTPUT_CHARS'),
       32_000,
     ),
+    sigkillGraceMs: parsePositiveInt(
+      configService.get<string>('BRIDGE_SIGKILL_GRACE_MS'),
+      5_000,
+    ),
     callbackSecret: configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined,
+    apiToken: configService.get<string>('BRIDGE_API_TOKEN') || undefined,
     notifyMode,
     claudeNotifyUrl: configService.get<string>('CLAUDE_NOTIFY_URL') || undefined,
     ...(configService.get<string>('OPENCLAW_HOOKS_URL')

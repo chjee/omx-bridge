@@ -71,7 +71,14 @@ NOTIFY_MODE=openclaw
 Notification modes:
 
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.
-- `claude`: POST job completion to `CLAUDE_NOTIFY_URL`; Telegram settings provide fallback push.
+- `claude`: POST job completion to a Claude webhook; Telegram settings provide fallback push.
+
+Claude webhook URL resolution order (highest priority first):
+
+1. **per-job `notifyUrl`** (sent by the caller in the job payload, e.g. `omx-dispatch` always supplies its own session-local webhook URL).
+2. **`CLAUDE_NOTIFY_URL`** (configured fallback for callers that did not supply `notifyUrl`).
+
+When a request comes from `omx-dispatch`, `CLAUDE_NOTIFY_URL` is effectively unused because `notifyUrl` is always present.
 
 In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
 
@@ -89,6 +96,111 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 ```
 
 `BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
+
+### API token guard
+
+`BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. When unset, the guard is disabled and these routes accept all requests — appropriate for the default `BRIDGE_HOST=127.0.0.1` localhost-only deployment.
+
+`/callback` is intentionally excluded — it carries its own HMAC signature via `BRIDGE_CALLBACK_SECRET` (different concern: bind-to-body, not just identity).
+
+#### When to enable
+
+- The bridge is exposed beyond loopback (`BRIDGE_HOST=0.0.0.0`).
+- Multiple unprivileged users share the host.
+- Defense-in-depth even on localhost-only deployments.
+
+#### Deployment procedure (lockstep)
+
+The bridge and every caller must agree on the same token before the guard is enabled. Enabling the guard with a missing client config will return `401 Unauthorized` to that client.
+
+**1. Generate a token.**
+
+```bash
+openssl rand -hex 32
+```
+
+**2. Set on the bridge.** Edit `~/workspace/omx-bridge/.env`:
+
+```env
+BRIDGE_API_TOKEN=<generated>
+```
+
+**3. Propagate to every caller.** Same value in every place a caller reads its config from.
+
+- **omx-dispatch (Claude Code MCP server).** Add to the `env` block of the omx-dispatch entry in `~/.claude.json` under `mcpServers.omx-dispatch.env`:
+
+  ```json
+  "omx-dispatch": {
+    "command": "node",
+    "args": ["/path/to/omx-bridge/omx-dispatch/dist/index.js"],
+    "env": {
+      "BRIDGE_URL": "http://localhost:3992",
+      "BRIDGE_CALLBACK_SECRET": "<same as bridge .env>",
+      "BRIDGE_API_TOKEN": "<same generated token>"
+    }
+  }
+  ```
+
+  Setting it explicitly here is the most reliable path because Claude Code spawns MCP servers with this `env` block and we don't have to depend on parent-env inheritance.
+
+- **omx-bridge-plugin (OpenClaw plugin).** In the OpenClaw plugin config:
+
+  ```json
+  {
+    "plugins": {
+      "entries": {
+        "omx-bridge-plugin": {
+          "config": {
+            "bridgeUrl": "http://localhost:3992",
+            "callbackSecret": "<same as bridge .env>",
+            "apiToken": "<same generated token>"
+          }
+        }
+      }
+    }
+  }
+  ```
+
+- **claude-synapse (Telegram broker).** Edit `~/workspace/claude-synapse/.env`:
+
+  ```env
+  BRIDGE_CALLBACK_SECRET=<same as bridge .env>
+  BRIDGE_API_TOKEN=<same generated token>
+  ```
+
+  Synapse loads its `.env` programmatically and inherits to spawned Claude workers, so the worker's omx-dispatch picks the value up via env inheritance.
+
+  Setting `BRIDGE_CALLBACK_SECRET` here also enables HMAC verification on synapse's `/notify` endpoint (it currently accepts unsigned bodies when the secret is unset).
+
+- **claude-resident (CLI launcher).** Inherits from the same `omx-bridge/.env` it loads. No separate change needed once step 2 is done.
+
+**4. Restart in lockstep.**
+
+```bash
+systemctl --user restart omx-bridge
+systemctl --user restart claude-synapse
+```
+
+Restart any active Claude Code CLI sessions so they respawn `omx-dispatch` with the new MCP `env` block.
+
+**5. Verify.**
+
+```bash
+# Should reject without token (401):
+curl -i -X POST http://127.0.0.1:3992/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"ping"}'
+
+# Should accept with token (202):
+curl -i -X POST http://127.0.0.1:3992/jobs \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $BRIDGE_API_TOKEN" \
+  -d '{"prompt":"ping"}'
+```
+
+#### Disabling the guard
+
+Remove or comment out `BRIDGE_API_TOKEN` from `~/workspace/omx-bridge/.env` and restart `omx-bridge`. Callers that still send the header will be ignored (header is parsed but unused when the guard is disabled).
 
 ## Claude Code MCP Server
 

@@ -125,7 +125,7 @@ export class OmxExecService {
       const sendSigkillAfterDelay = (): void => {
         sigkillHandle = setTimeout(() => {
           child.kill('SIGKILL');
-        }, 5_000);
+        }, this.config.sigkillGraceMs);
       };
 
       const timeoutHandle = setTimeout(() => {

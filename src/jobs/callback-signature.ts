@@ -1,6 +1,23 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 /**
+ * Callback signature protocol — SOURCE OF TRUTH.
+ *
+ * Three implementations exist and MUST stay byte-for-byte equivalent.
+ * If you change the algorithm or message format here, also update:
+ *   - omx-dispatch/index.ts        (buildCallbackSignatureHeader, verifyWebhookSignature)
+ *   - omx-bridge-plugin/index.ts   (buildCallbackSignatureHeader)
+ * and the protocol vectors in test/unit/callback-signature.spec.ts.
+ *
+ * Protocol contract:
+ *   header  = X-Callback-Signature
+ *   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+ *   body    = the exact request body bytes (the receiver MUST verify against
+ *             the raw bytes — re-serializing parsed JSON may reorder keys
+ *             and produce a different HMAC).
+ */
+
+/**
  * Computes the X-Callback-Signature header value for a job callback.
  * body may be a string (sender side) or Buffer (receiver/raw-body side).
  * Never pass a re-serialized parsed JSON — key order may differ and will

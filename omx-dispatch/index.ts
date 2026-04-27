@@ -21,6 +21,10 @@ import type {
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
+// Bearer token for non-callback bridge routes. Empty string disables the
+// header (matches bridge default-allow). Must match BRIDGE_API_TOKEN on
+// the server when set.
+const BRIDGE_API_TOKEN = process.env["BRIDGE_API_TOKEN"] ?? "";
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "0", 10); // 0 = dynamic range
 const WEBHOOK_PORT_MIN = 12000;
 const WEBHOOK_PORT_MAX = 12999;
@@ -49,6 +53,8 @@ interface BridgeJobExecution {
   recoveredFromRestart?: boolean;
 }
 
+type JobSource = "dispatch" | "synapse" | "openclaw";
+
 interface BridgeJob {
   id: string;
   prompt: string;
@@ -56,6 +62,8 @@ interface BridgeJob {
   queueOrder: string;
   requestId?: string;
   originRoutingKey?: string;
+  source?: JobSource;
+  notifyUrl?: string;
   metadata?: Record<string, unknown>;
   status: JobStatus;
   createdAt: string;
@@ -92,6 +100,7 @@ type OmxBridgeMcpServer = Server<Request, ClaudeChannelNotification, Result>;
 // ---------------------------------------------------------------------------
 
 const notificationQueue: JobNotification[] = [];
+let notificationDropCount = 0;
 
 // ---------------------------------------------------------------------------
 // HTTP 헬퍼
@@ -116,6 +125,21 @@ function buildBridgeUrl(path: string): URL {
   return new URL(path, ensureTrailingSlash(BRIDGE_URL));
 }
 
+// ---------------------------------------------------------------------------
+// Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
+//
+// All three implementations must stay byte-for-byte equivalent:
+//   - src/jobs/callback-signature.ts        (server, source of truth)
+//   - omx-dispatch/index.ts                 (this file)
+//   - omx-bridge-plugin/index.ts
+//
+// Protocol contract:
+//   header  = X-Callback-Signature
+//   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+//
+// If you change anything here, update the other two and the vectors in
+// test/unit/callback-signature.spec.ts in the same change.
+// ---------------------------------------------------------------------------
 function buildCallbackSignatureHeader(jobId: string, body: string): string {
   const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", BRIDGE_CALLBACK_SECRET).update(message).digest("hex");
@@ -124,9 +148,13 @@ function buildCallbackSignatureHeader(jobId: string, body: string): string {
 
 function verifyWebhookSignature(jobId: string, rawBody: string, signature: string): boolean {
   if (!BRIDGE_CALLBACK_SECRET) return true; // secret 미설정 시 검증 생략
+  if (!signature.startsWith("sha256=")) return false;
   const expected = buildCallbackSignatureHeader(jobId, rawBody);
   try {
-    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    return timingSafeEqual(
+      Buffer.from(expected.slice("sha256=".length), "hex"),
+      Buffer.from(signature.slice("sha256=".length), "hex"),
+    );
   } catch {
     return false;
   }
@@ -150,6 +178,7 @@ async function requestJson<T>(
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(BRIDGE_API_TOKEN ? { Authorization: `Bearer ${BRIDGE_API_TOKEN}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
@@ -193,6 +222,10 @@ function isJobStatus(value: unknown): value is JobStatus {
   return typeof value === "string" && JOB_STATUS_VALUES.includes(value as JobStatus);
 }
 
+function isJobSource(value: unknown): value is JobSource {
+  return value === "dispatch" || value === "synapse" || value === "openclaw";
+}
+
 function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   if (!isRecord(payload)) return null;
 
@@ -202,6 +235,7 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   }
 
   const execution = isRecord(payload["execution"]) ? payload["execution"] : {};
+  const rawSource = payload["source"];
 
   return {
     id,
@@ -209,6 +243,9 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
     cwd: getStringField(payload, "cwd"),
     queueOrder: getStringField(payload, "queueOrder") ?? "",
     requestId: getStringField(payload, "requestId"),
+    originRoutingKey: getStringField(payload, "originRoutingKey"),
+    source: isJobSource(rawSource) ? rawSource : undefined,
+    notifyUrl: getStringField(payload, "notifyUrl"),
     metadata: isRecord(payload["metadata"]) ? payload["metadata"] : undefined,
     status: payload["status"],
     createdAt: getStringField(payload, "createdAt") ?? "",
@@ -268,7 +305,12 @@ async function sendClaudeChannelNotification(
 function enqueueNotification(notification: JobNotification): void {
   notificationQueue.push(notification);
   if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
-    notificationQueue.splice(0, notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE);
+    const dropped = notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE;
+    notificationQueue.splice(0, dropped);
+    notificationDropCount += dropped;
+    process.stderr.write(
+      `[omx-dispatch] notification queue overflow: dropped ${dropped} oldest entr${dropped === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
+    );
   }
 }
 
@@ -363,7 +405,11 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
     }
 
     if (req.method === "GET" && req.url === "/health") {
-      sendJsonResponse(res, 200, { ok: true, pending: notificationQueue.length });
+      sendJsonResponse(res, 200, {
+        ok: true,
+        pending: notificationQueue.length,
+        dropped: notificationDropCount,
+      });
       return;
     }
 

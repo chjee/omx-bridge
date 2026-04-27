@@ -22,6 +22,11 @@ const pluginConfigSchema = Type.Object(
         description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server.",
       }),
     ),
+    apiToken: Type.Optional(
+      Type.String({
+        description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN on the server when set.",
+      }),
+    ),
   },
   {
     additionalProperties: false,
@@ -138,21 +143,38 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
       typeof pluginConfig.callbackSecret === "string" && pluginConfig.callbackSecret.length > 0
         ? pluginConfig.callbackSecret
         : undefined,
+    apiToken:
+      typeof pluginConfig.apiToken === "string" && pluginConfig.apiToken.length > 0
+        ? pluginConfig.apiToken
+        : undefined,
   };
 }
 
 /**
- * 콜백 요청에 붙일 HMAC-SHA256 서명 헤더를 생성합니다.
- * 서버의 CallbackAuthGuard와 동일한 방식:
- *   HMAC-SHA256(key=callbackSecret, message=`${jobId}:${JSON.stringify(body)}`)
- *   헤더: X-Callback-Signature: sha256=<hex>
+ * Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
+ *
+ * All three implementations must stay byte-for-byte equivalent:
+ *   - src/jobs/callback-signature.ts        (server, source of truth)
+ *   - omx-dispatch/index.ts
+ *   - omx-bridge-plugin/index.ts            (this file)
+ *
+ * Protocol contract:
+ *   header  = X-Callback-Signature
+ *   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+ *
+ * Note: this plugin is sender-only. The body is JSON.stringify()-ed at the
+ * call site and that exact string is both signed here AND sent as the HTTP
+ * body. The receiver verifies against raw bytes, so don't re-stringify.
+ *
+ * If you change anything here, update the other two and the vectors in
+ * test/unit/callback-signature.spec.ts in the same change.
  */
 function buildCallbackSignatureHeader(
   secret: string,
   jobId: string,
-  body: unknown,
+  body: string,
 ): string {
-  const message = `${jobId}:${JSON.stringify(body)}`;
+  const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", secret).update(message).digest("hex");
   return `sha256=${hex}`;
 }
@@ -172,11 +194,13 @@ async function requestJson<T>(
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
+  const apiToken = getPluginConfig(api).apiToken;
   const response = await fetch(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
@@ -228,6 +252,7 @@ export default definePluginEntry({
           method: "POST",
           body: JSON.stringify({
             prompt: params.prompt,
+            source: "openclaw",
             ...(params.requestId ? { requestId: params.requestId } : {}),
             ...(params.metadata ? { metadata: params.metadata } : {}),
           }),
@@ -309,11 +334,13 @@ export default definePluginEntry({
           ...(params.stderr !== undefined ? { stderr: params.stderr } : {}),
           ...(params.exitCode !== undefined ? { exitCode: params.exitCode } : {}),
         };
+        // Stringify once; sign and send the SAME bytes so the receiver's
+        // raw-body HMAC verification cannot drift on key reordering.
+        const bodyText = JSON.stringify(body);
 
-        // 콜백시크릿이 설정된 경우 HMAC 서명 헤더 생성
         const config = getPluginConfig(api);
         const signatureHeader = config.callbackSecret
-          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, body)
+          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, bodyText)
           : undefined;
 
         const result = await requestJson<BridgeJob>(
@@ -321,7 +348,7 @@ export default definePluginEntry({
           `jobs/${encodeURIComponent(params.jobId)}/callback`,
           {
             method: "POST",
-            body: JSON.stringify(body),
+            body: bodyText,
           },
           signatureHeader,
         );

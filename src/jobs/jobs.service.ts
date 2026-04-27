@@ -65,7 +65,9 @@ export class JobsService {
   async completeJobFromCallback(id: string, input: JobCallbackDto): Promise<BridgeJob> {
     const job = await this.getJobOrThrow(id);
     if (this.isTerminal(job.status)) {
-      throw new ConflictException(`Job ${id} is already ${job.status}`);
+      // 잡이 이미 terminal이면 callback을 idempotent하게 처리.
+      // cancel 직후 callback이 늦게 도착하는 정상 race 등에서 caller에게 409를 던지지 않도록.
+      return job;
     }
 
     const savedJob = await this.repository.save({
@@ -127,9 +129,10 @@ export class JobsService {
   }
 
   private nextQueueOrder(): string {
+    // {ms}-{seq}: ms는 unix epoch millis(현재 13자리), seq는 동일 ms 내 tie-breaker.
+    // 프로세스 재시작 시 seq가 0으로 리셋되지만 listAll의 createdAt/id 보조 정렬이
+    // 동일 (ms,seq) 충돌을 안정적으로 풀어준다.
     this.queueSequence += 1;
-    return `${Date.now().toString().padStart(13, '0')}-${this.queueSequence
-      .toString()
-      .padStart(6, '0')}`;
+    return `${Date.now()}-${this.queueSequence.toString().padStart(6, '0')}`;
   }
 }
