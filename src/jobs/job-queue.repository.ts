@@ -5,6 +5,19 @@ import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { BridgeJob, JobStatus } from './job.types';
 
+const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
+
+export interface CleanupTerminalJobsOptions {
+  retentionDays: number;
+  maxTerminalJobs: number;
+  now?: Date;
+}
+
+export interface CleanupTerminalJobsResult {
+  deleted: number;
+  retained: number;
+}
+
 @Injectable()
 export class JobQueueRepository {
   private readonly logger = new Logger(JobQueueRepository.name);
@@ -76,6 +89,44 @@ export class JobQueueRepository {
     return jobs.filter((job) => job.status === status);
   }
 
+  async countActive(): Promise<number> {
+    const jobs = await this.listAll();
+    return jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+  }
+
+  async cleanupTerminalJobs(
+    options: CleanupTerminalJobsOptions,
+  ): Promise<CleanupTerminalJobsResult> {
+    const now = options.now ?? new Date();
+    const cutoffMs = now.getTime() - options.retentionDays * 24 * 60 * 60 * 1000;
+    const terminalJobs = (await this.listAll())
+      .filter((job) => TERMINAL_STATUSES.has(job.status))
+      .sort((left, right) => this.terminalSortKey(left).localeCompare(this.terminalSortKey(right)));
+
+    const deleteIds = new Set<string>();
+    for (const job of terminalJobs) {
+      const finishedAtMs = job.finishedAt ? Date.parse(job.finishedAt) : Number.NaN;
+      if (Number.isFinite(finishedAtMs) && finishedAtMs < cutoffMs) {
+        deleteIds.add(job.id);
+      }
+    }
+
+    const remainingAfterAge = terminalJobs.filter((job) => !deleteIds.has(job.id));
+    const overflow = Math.max(0, remainingAfterAge.length - options.maxTerminalJobs);
+    for (const job of remainingAfterAge.slice(0, overflow)) {
+      deleteIds.add(job.id);
+    }
+
+    for (const id of deleteIds) {
+      await fs.rm(this.jobPath(id), { force: true });
+    }
+
+    return {
+      deleted: deleteIds.size,
+      retained: terminalJobs.length - deleteIds.size,
+    };
+  }
+
   private jobPath(id: string): string {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new BadRequestException(`Invalid job id: ${id}`);
@@ -113,5 +164,9 @@ export class JobQueueRepository {
 
   private describeError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private terminalSortKey(job: BridgeJob): string {
+    return `${job.finishedAt ?? job.createdAt}:${job.queueOrder ?? ''}:${job.id}`;
   }
 }

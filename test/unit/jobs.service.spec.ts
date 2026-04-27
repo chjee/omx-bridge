@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import type { JobCallbackDto } from '../../src/jobs/dto/job-callback.dto';
 import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
@@ -37,18 +37,28 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     maxOutputChars: 32_000,
     sigkillGraceMs: 5000,
     maxConcurrency: 1,
+    maxActiveJobs: 50,
+    jobRetentionDays: 7,
+    maxTerminalJobs: 1000,
+    jobCleanupIntervalMs: 3600000,
     notifyMode: 'claude',
     ...overrides,
   };
 }
 
-function createService(jobs: Map<string, BridgeJob> = new Map()) {
+function createService(
+  jobs: Map<string, BridgeJob> = new Map(),
+  configOverrides: Partial<BridgeConfig> = {},
+) {
   const repository = {
     create: jest.fn(async (job: BridgeJob) => { jobs.set(job.id, job); return job; }),
     save: jest.fn(async (job: BridgeJob) => { jobs.set(job.id, job); return job; }),
     getById: jest.fn(async (id: string) => jobs.get(id) ?? null),
     listAll: jest.fn(async () => [...jobs.values()]),
     listByStatus: jest.fn(async (status: string) => [...jobs.values()].filter((j) => j.status === status)),
+    countActive: jest.fn(async () =>
+      [...jobs.values()].filter((j) => j.status === 'queued' || j.status === 'running').length,
+    ),
   } as unknown as JobQueueRepository;
 
   const jobRunnerService = {
@@ -60,7 +70,7 @@ function createService(jobs: Map<string, BridgeJob> = new Map()) {
     notifyJobComplete: jest.fn().mockResolvedValue(undefined),
   } as unknown as JobNotifyService;
 
-  const service = new JobsService(repository, jobRunnerService, jobNotify, createConfig());
+  const service = new JobsService(repository, jobRunnerService, jobNotify, createConfig(configOverrides));
   return { service, repository, jobRunnerService, jobNotify };
 }
 
@@ -76,6 +86,16 @@ describe('JobsService.createJob', () => {
       status: 'queued',
     }));
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects new jobs when active job capacity is full', async () => {
+    const activeJob = createJob({ status: 'queued' });
+    const jobs = new Map([[activeJob.id, activeJob]]);
+    const { service, repository, jobRunnerService } = createService(jobs, { maxActiveJobs: 1 });
+
+    await expect(service.createJob({ prompt: 'overflow' })).rejects.toThrow(HttpException);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
   });
 });
 

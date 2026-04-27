@@ -23,6 +23,10 @@ function createService(
     maxOutputChars: 10,
     sigkillGraceMs: 50,
     maxConcurrency: 1,
+    maxActiveJobs: 50,
+    jobRetentionDays: 7,
+    maxTerminalJobs: 1000,
+    jobCleanupIntervalMs: 3600000,
     notifyMode: 'openclaw',
     ...overrides,
   };
