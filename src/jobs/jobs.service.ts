@@ -1,4 +1,11 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { CreateJobDto } from './dto/create-job.dto';
@@ -11,6 +18,7 @@ import type { BridgeJob, JobExecutionMetadata, JobStatus } from './job.types';
 @Injectable()
 export class JobsService {
   private queueSequence = 0;
+  private createMutex: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly repository: JobQueueRepository,
@@ -20,31 +28,41 @@ export class JobsService {
   ) {}
 
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
-    const job: BridgeJob = {
-      id: randomUUID(),
-      prompt: input.prompt,
-      cwd: input.cwd,
-      queueOrder: this.nextQueueOrder(),
-      requestId: input.requestId,
-      originRoutingKey: input.originRoutingKey,
-      source: input.source,
-      metadata: input.metadata,
-      notifyUrl: input.notifyUrl,
-      status: 'queued',
-      createdAt: new Date().toISOString(),
-      exitCode: null,
-      stdout: '',
-      stderr: '',
-      execution: {
-        command: this.config.omxCommand,
-        timeoutMs: this.config.jobTimeoutMs,
-        maxOutputChars: this.config.maxOutputChars,
-      },
-    };
+    return this.withCreateLock(async () => {
+      const activeCount = await this.repository.countActive();
+      if (activeCount >= this.config.maxActiveJobs) {
+        throw new HttpException(
+          `Job queue is full (${activeCount}/${this.config.maxActiveJobs} active jobs)`,
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
 
-    const savedJob = await this.repository.save(job);
-    this.jobRunnerService.trigger();
-    return savedJob;
+      const job: BridgeJob = {
+        id: randomUUID(),
+        prompt: input.prompt,
+        cwd: input.cwd,
+        queueOrder: this.nextQueueOrder(),
+        requestId: input.requestId,
+        originRoutingKey: input.originRoutingKey,
+        source: input.source,
+        metadata: input.metadata,
+        notifyUrl: input.notifyUrl,
+        status: 'queued',
+        createdAt: new Date().toISOString(),
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        execution: {
+          command: this.config.omxCommand,
+          timeoutMs: this.config.jobTimeoutMs,
+          maxOutputChars: this.config.maxOutputChars,
+        },
+      };
+
+      const savedJob = await this.repository.save(job);
+      this.jobRunnerService.trigger();
+      return savedJob;
+    });
   }
 
   async listJobs(status?: JobStatus): Promise<BridgeJob[]> {
@@ -136,5 +154,20 @@ export class JobsService {
     // 동일 (ms,seq) 충돌을 안정적으로 풀어준다.
     this.queueSequence += 1;
     return `${Date.now()}-${this.queueSequence.toString().padStart(6, '0')}`;
+  }
+
+  private async withCreateLock<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prev = this.createMutex;
+    this.createMutex = next;
+    await prev;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 }

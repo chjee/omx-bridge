@@ -101,6 +101,26 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 `BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
 
+### Queue capacity and retention
+
+The bridge rejects new job submissions once active jobs (`queued` + `running`) reach
+`BRIDGE_MAX_ACTIVE_JOBS`. Existing jobs are never dropped to make room for new ones.
+
+```env
+BRIDGE_MAX_CONCURRENCY=4
+BRIDGE_MAX_ACTIVE_JOBS=50
+```
+
+Completed job files are cleaned up on service startup and then periodically. Only
+terminal jobs (`succeeded`, `failed`, `cancelled`) are eligible for deletion;
+`queued` and `running` jobs are always retained.
+
+```env
+BRIDGE_JOB_RETENTION_DAYS=7
+BRIDGE_MAX_TERMINAL_JOBS=1000
+BRIDGE_JOB_CLEANUP_INTERVAL_MS=3600000
+```
+
 ### API token guard
 
 `BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. When unset, the guard is disabled and these routes accept all requests — appropriate for the default `BRIDGE_HOST=127.0.0.1` localhost-only deployment.
@@ -309,6 +329,8 @@ cd omx-dispatch && npm run build
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are recovered to `queued` on service startup.
+- New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
+- Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.

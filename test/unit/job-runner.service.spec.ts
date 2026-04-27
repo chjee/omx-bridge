@@ -61,6 +61,10 @@ describe('JobRunnerService', () => {
       maxOutputChars: 1000,
       sigkillGraceMs: 5000,
       maxConcurrency: 1,
+      maxActiveJobs: 50,
+      jobRetentionDays: 7,
+      maxTerminalJobs: 1000,
+      jobCleanupIntervalMs: 3600000,
       notifyMode: 'openclaw',
     };
     repository = new JobQueueRepository(config);

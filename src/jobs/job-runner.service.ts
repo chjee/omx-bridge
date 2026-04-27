@@ -12,6 +12,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
   private claimMutex: Promise<void> = Promise.resolve();
+  private cleanupIntervalHandle?: NodeJS.Timeout;
   private shuttingDown = false;
 
   constructor(
@@ -25,6 +26,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.shuttingDown = false;
     await this.repository.ensureReady();
     await this.recoverInterruptedJobs();
+    await this.cleanupTerminalJobs();
+    this.cleanupIntervalHandle = setInterval(
+      () => void this.cleanupTerminalJobs(),
+      this.config.jobCleanupIntervalMs,
+    );
     this.intervalHandle = setInterval(() => this.tick(), this.config.jobPollIntervalMs);
     this.tick();
   }
@@ -34,6 +40,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (this.intervalHandle) {
       clearInterval(this.intervalHandle);
       this.intervalHandle = undefined;
+    }
+    if (this.cleanupIntervalHandle) {
+      clearInterval(this.cleanupIntervalHandle);
+      this.cleanupIntervalHandle = undefined;
     }
 
     for (const controller of this.abortControllers.values()) {
@@ -60,6 +70,18 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
           recoveredFromRestart: true,
         },
       });
+    }
+  }
+
+  async cleanupTerminalJobs(): Promise<void> {
+    const result = await this.repository.cleanupTerminalJobs({
+      retentionDays: this.config.jobRetentionDays,
+      maxTerminalJobs: this.config.maxTerminalJobs,
+    });
+    if (result.deleted > 0) {
+      this.logger.log(
+        `Cleaned up ${result.deleted} terminal job file(s); retained ${result.retained}`,
+      );
     }
   }
 
