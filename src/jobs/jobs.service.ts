@@ -42,7 +42,9 @@ export class JobsService {
       },
     };
 
-    return this.repository.save(job);
+    const savedJob = await this.repository.save(job);
+    this.jobRunnerService.trigger();
+    return savedJob;
   }
 
   async listJobs(status?: JobStatus): Promise<BridgeJob[]> {

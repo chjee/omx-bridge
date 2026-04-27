@@ -21,6 +21,7 @@ describe('buildBridgeConfig', () => {
       maxOutputChars: 32000,
       sigkillGraceMs: 5000,
       maxConcurrency: 2,
+      notifyRetryDelaysMs: [500, 1000, 2000],
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: undefined,
@@ -37,6 +38,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_MAX_OUTPUT_CHARS: '999',
       BRIDGE_SIGKILL_GRACE_MS: '7500',
       BRIDGE_MAX_CONCURRENCY: '4',
+      BRIDGE_NOTIFY_RETRY_DELAYS_MS: '10,20,40',
       BRIDGE_API_TOKEN: 'token-xyz',
     };
 
@@ -50,6 +52,7 @@ describe('buildBridgeConfig', () => {
       maxOutputChars: 999,
       sigkillGraceMs: 7500,
       maxConcurrency: 4,
+      notifyRetryDelaysMs: [10, 20, 40],
       notifyMode: 'openclaw',
       callbackSecret: undefined,
       apiToken: 'token-xyz',

@@ -85,11 +85,15 @@ In claude notify mode, Telegram fallback behaviour depends on whether a per-job 
 - **`notifyUrl` absent**: Telegram is used as a fallback when the configured `CLAUDE_NOTIFY_URL` webhook cannot be delivered.
 - **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers.
 
+Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAYS_MS`
+(default: `500,1000,2000`, which means four total attempts).
+
 For Claude mode:
 
 ```env
 NOTIFY_MODE=claude
 CLAUDE_NOTIFY_URL=http://127.0.0.1:<port>/notify  # omx-dispatch auto-assigns port in 12000-12999
+BRIDGE_NOTIFY_RETRY_DELAYS_MS=500,1000,2000
 BRIDGE_CALLBACK_SECRET=shared-secret
 TELEGRAM_BOT_TOKEN=optional-fallback-token
 TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id

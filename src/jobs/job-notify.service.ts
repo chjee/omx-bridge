@@ -8,6 +8,12 @@ import type {
   NotifyOutcome,
 } from './job.types';
 
+const DEFAULT_NOTIFY_RETRY_DELAYS_MS = [500, 1_000, 2_000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 @Injectable()
 export class JobNotifyService {
   private readonly logger = new Logger(JobNotifyService.name);
@@ -63,26 +69,44 @@ export class JobNotifyService {
     };
     const body = JSON.stringify(payload);
 
-    try {
-      const response = await fetch(notifyUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.config.callbackSecret
-            ? { 'X-Callback-Signature': computeCallbackSignature(job.id, body, this.config.callbackSecret) }
-            : {}),
-        },
-        body,
-      });
-      if (!response.ok) {
-        this.logger.warn(`Claude webhook 응답 오류: ${response.status} ${response.statusText}`);
-        return { status: 'failed', error: `http_${response.status}`, httpStatus: response.status };
+    const retryDelays = this.config.notifyRetryDelaysMs ?? DEFAULT_NOTIFY_RETRY_DELAYS_MS;
+    let lastResult: NotifyChannelResult = { status: 'failed', error: 'unknown_error', attempts: 0 };
+    for (let attempt = 1; attempt <= retryDelays.length + 1; attempt += 1) {
+      try {
+        const response = await fetch(notifyUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(this.config.callbackSecret
+              ? { 'X-Callback-Signature': computeCallbackSignature(job.id, body, this.config.callbackSecret) }
+              : {}),
+          },
+          body,
+        });
+        if (!response.ok) {
+          lastResult = {
+            status: 'failed',
+            error: `http_${response.status}`,
+            httpStatus: response.status,
+            attempts: attempt,
+          };
+        } else {
+          return { status: 'ok', attempts: attempt };
+        }
+      } catch {
+        lastResult = { status: 'failed', error: 'fetch_error', attempts: attempt };
       }
-      return { status: 'ok' };
-    } catch (err) {
-      this.logger.warn(`Claude webhook 전송 실패: ${String(err)}`);
-      return { status: 'failed', error: 'fetch_error' };
+
+      const nextDelay = retryDelays[attempt - 1];
+      if (nextDelay !== undefined) {
+        await sleep(nextDelay);
+      }
     }
+
+    this.logger.warn(
+      `Claude webhook 전송 실패: ${lastResult.error ?? 'unknown_error'} after ${lastResult.attempts ?? 0} attempt(s)`,
+    );
+    return lastResult;
   }
 
   private async _maybeSendTelegramFallback(
@@ -92,9 +116,11 @@ export class JobNotifyService {
     if (webhookResult.status === 'ok') {
       return { status: 'skipped', skippedReason: 'webhook_ok' };
     }
-    const isSynapseBroker = job.source === 'synapse' || (!job.source && !!job.originRoutingKey);
-    if (isSynapseBroker) {
-      return { status: 'skipped', skippedReason: 'synapse_fallback' };
+    if (job.notifyUrl) {
+      return { status: 'skipped', skippedReason: 'per_job_webhook_failed' };
+    }
+    if (job.source === 'synapse' || (!job.source && !!job.originRoutingKey)) {
+      return { status: 'skipped', skippedReason: 'broker_fallback' };
     }
     return this._sendTelegram(job);
   }

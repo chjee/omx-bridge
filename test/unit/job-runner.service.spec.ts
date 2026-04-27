@@ -107,8 +107,10 @@ describe('JobRunnerService', () => {
     const completedJob = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(completedJob?.status).toBe('succeeded');
 
-    await runner.runOnce();
-    expect(execute).toHaveBeenCalledTimes(2);
+    await waitFor(
+      () => Promise.resolve(execute.mock.calls.length),
+      (callCount) => callCount === 2,
+    );
   });
 
   it('marks failed results when the omx execution fails', async () => {
@@ -282,6 +284,25 @@ describe('JobRunnerService', () => {
     releasers[2]?.();
     await secondRun;
     await fourthRun;
+  });
+
+  it('trigger starts queued work without waiting for the polling interval', async () => {
+    const execute = jest.fn().mockResolvedValue(createExecutionResult());
+    const runner = new JobRunnerService(
+      repository,
+      { execute } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await repository.save(createJob());
+    runner.trigger();
+
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
+      (job) => job?.status === 'succeeded',
+    );
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   it('recovers stranded running jobs by re-queueing them', async () => {
