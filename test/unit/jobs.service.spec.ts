@@ -194,3 +194,79 @@ describe('JobsService.completeJobFromCallback', () => {
     );
   });
 });
+
+describe('JobsService.getStats', () => {
+  it('returns zero counts and null oldestQueuedAgeMs for an empty queue', async () => {
+    const { service, repository } = createService(
+      new Map(),
+      { maxActiveJobs: 12, maxConcurrency: 3 },
+    );
+
+    const stats = await service.getStats();
+
+    expect(repository.listAll).toHaveBeenCalledTimes(1);
+    expect(stats).toEqual({
+      queuedCount: 0,
+      runningCount: 0,
+      activeCount: 0,
+      terminalCount: 0,
+      maxActiveJobs: 12,
+      maxConcurrency: 3,
+      oldestQueuedAgeMs: null,
+    });
+  });
+
+  it('counts queued jobs as active and reports an oldest queued age', async () => {
+    const queuedJob = createJob({
+      status: 'queued',
+      createdAt: new Date(Date.now() - 1_000).toISOString(),
+    });
+    const jobs = new Map([[queuedJob.id, queuedJob]]);
+    const { service } = createService(jobs);
+
+    const stats = await service.getStats();
+
+    expect(stats.queuedCount).toBe(1);
+    expect(stats.runningCount).toBe(0);
+    expect(stats.activeCount).toBe(1);
+    expect(stats.terminalCount).toBe(0);
+    expect(stats.oldestQueuedAgeMs).not.toBeNull();
+    expect(stats.oldestQueuedAgeMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('JobsService.triggerNotifyRetry', () => {
+  it('manually retries notify for terminal jobs and returns the latest persisted job', async () => {
+    const job = createJob({ status: 'succeeded' });
+    const updatedJob = createJob({
+      status: 'succeeded',
+      notifyHistory: [
+        {
+          attemptedAt: '2026-04-23T00:00:01.000Z',
+          mode: 'claude',
+          trigger: 'manual',
+          attemptIndex: 0,
+        },
+      ],
+    });
+    const jobs = new Map([[job.id, job]]);
+    const { service, repository, jobNotify } = createService(jobs);
+    (jobNotify.notifyJobComplete as jest.Mock).mockImplementation(async () => {
+      await repository.save(updatedJob);
+    });
+
+    const result = await service.triggerNotifyRetry(job.id);
+
+    expect(jobNotify.notifyJobComplete).toHaveBeenCalledWith(job, { trigger: 'manual' });
+    expect(result).toEqual(updatedJob);
+  });
+
+  it('rejects manual notify retry for non-terminal jobs', async () => {
+    const job = createJob({ status: 'queued' });
+    const jobs = new Map([[job.id, job]]);
+    const { service, jobNotify } = createService(jobs);
+
+    await expect(service.triggerNotifyRetry(job.id)).rejects.toThrow(ConflictException);
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+});

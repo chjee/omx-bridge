@@ -37,6 +37,12 @@ export class JobsController {
     return this.jobsService.listJobs(query.status);
   }
 
+  @Get('stats')
+  @UseGuards(ApiTokenGuard)
+  async getStats() {
+    return this.jobsService.getStats();
+  }
+
   @Get(':id')
   @UseGuards(ApiTokenGuard)
   async getJob(@Param('id') id: string) {
@@ -47,6 +53,12 @@ export class JobsController {
   @UseGuards(CallbackAuthGuard)
   async handleJobCallback(@Param('id') id: string, @Body() body: JobCallbackDto) {
     return this.jobsService.completeJobFromCallback(id, body);
+  }
+
+  @Post(':id/notify/retry')
+  @UseGuards(ApiTokenGuard)
+  async retryNotify(@Param('id') id: string) {
+    return this.jobsService.triggerNotifyRetry(id);
   }
 
   @Post(':id/cancel')

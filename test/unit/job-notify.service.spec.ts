@@ -133,6 +133,39 @@ describe('JobNotifyService', () => {
     expect(repoMock.current.notifyOutcome).toEqual(outcome);
   });
 
+  it('persists notify outcomes into notifyHistory with sequential attempt indexes', async () => {
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({ notifyMode: 'openclaw', telegram: undefined }),
+      repoMock.repo,
+    );
+
+    const firstOutcome = await service.notifyJobComplete(job);
+    const secondOutcome = await service.notifyJobComplete(repoMock.current);
+
+    expect(repoMock.current.notifyHistory).toHaveLength(2);
+    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([0, 1]);
+    expect(repoMock.current.notifyHistory?.[0]).toEqual(firstOutcome);
+    expect(repoMock.current.notifyHistory?.[1]).toEqual(secondOutcome);
+    expect(repoMock.current.notifyOutcome).toEqual(secondOutcome);
+  });
+
+  it('marks manually triggered notify outcomes', async () => {
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({ notifyMode: 'openclaw', telegram: undefined }),
+      repoMock.repo,
+    );
+
+    const outcome = await service.notifyJobComplete(job, { trigger: 'manual' });
+
+    expect(outcome.trigger).toBe('manual');
+    expect(repoMock.current.notifyHistory).toEqual([outcome]);
+    expect(repoMock.current.notifyOutcome).toEqual(outcome);
+  });
+
   it('sends telegram fallback in claude mode when notifyUrl is missing', async () => {
     const job = createJob();
     const repoMock = createRepoMock(job);
