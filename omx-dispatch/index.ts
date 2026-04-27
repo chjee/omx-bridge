@@ -38,6 +38,11 @@ const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
 );
 const NOTIFICATION_STORE_PATH = process.env["OMX_DISPATCH_NOTIFICATION_STORE_PATH"]
   ?? path.join(process.cwd(), ".omx", "state", "omx-dispatch-notifications.jsonl");
+const NOTIFICATION_LOCK_PATH = `${NOTIFICATION_STORE_PATH}.lock`;
+const NOTIFICATION_LOCK_STALE_MS = 30_000;
+const NOTIFICATION_LOCK_TIMEOUT_MS = 5_000;
+const NOTIFICATION_PREVIEW_MAX = 20;
+const NOTIFICATION_PREVIEW_TEXT_MAX = 200;
 
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 type JobStatus = (typeof JOB_STATUS_VALUES)[number];
@@ -87,6 +92,28 @@ interface CreateJobResponse {
 interface JobNotification {
   receivedAt: string;
   job: BridgeJob;
+}
+
+interface PersistedNotificationRead {
+  notifications: JobNotification[];
+  malformed: number;
+  readFailed: boolean;
+}
+
+interface NotificationStats {
+  pending: number;
+  dropped: number;
+  storePath: string;
+  storeBytes: number;
+  oldestEnqueuedAt: string | null;
+  preview?: Array<{
+    jobId: string;
+    status: JobStatus;
+    receivedAt: string;
+    finishedAt?: string;
+    stdoutPreview: string;
+    stderrPreview: string;
+  }>;
 }
 
 interface ClaudeChannelNotification extends Notification {
@@ -331,6 +358,10 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function withNotificationStoreLock<T>(operation: () => Promise<T>): Promise<T> {
   const next = notificationStoreMutex.then(operation, operation);
   notificationStoreMutex = next.then(
@@ -344,43 +375,108 @@ async function ensureNotificationStoreDirectory(): Promise<void> {
   await fs.mkdir(path.dirname(NOTIFICATION_STORE_PATH), { recursive: true });
 }
 
-async function appendPersistedNotification(notification: JobNotification): Promise<void> {
+async function withNotificationFileLock<T>(operation: () => Promise<T>): Promise<T> {
   await ensureNotificationStoreDirectory();
+  const startedAt = Date.now();
+  let attempt = 0;
+  let lockHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  const lockToken = `${process.pid}:${randomUUID()}`;
+
+  while (!lockHandle) {
+    try {
+      const acquired = await fs.open(NOTIFICATION_LOCK_PATH, "wx");
+      try {
+        await acquired.writeFile(`${lockToken} ${new Date().toISOString()}\n`, "utf8");
+      } catch (writeError) {
+        await acquired.close().catch(() => undefined);
+        await fs.rm(NOTIFICATION_LOCK_PATH, { force: true }).catch(() => undefined);
+        throw writeError;
+      }
+      lockHandle = acquired;
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && "code" in error
+        && (error as NodeJS.ErrnoException).code === "EEXIST"
+      ) {
+        try {
+          const stat = await fs.stat(NOTIFICATION_LOCK_PATH);
+          if (Date.now() - stat.mtimeMs > NOTIFICATION_LOCK_STALE_MS) {
+            await fs.rm(NOTIFICATION_LOCK_PATH, { force: true });
+            continue;
+          }
+        } catch (statError) {
+          if (!isMissingFile(statError)) {
+            process.stderr.write(
+              `[omx-dispatch] failed to inspect notification lock: ${describeError(statError)}\n`,
+            );
+          }
+        }
+
+        if (Date.now() - startedAt > NOTIFICATION_LOCK_TIMEOUT_MS) {
+          throw new Error(`Timed out waiting for notification store lock: ${NOTIFICATION_LOCK_PATH}`);
+        }
+
+        attempt += 1;
+        await sleep(Math.min(250, 25 + attempt * 25));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await lockHandle.close().catch(() => undefined);
+    try {
+      const contents = await fs.readFile(NOTIFICATION_LOCK_PATH, "utf8");
+      if (contents.startsWith(lockToken)) {
+        await fs.rm(NOTIFICATION_LOCK_PATH, { force: true });
+      }
+    } catch {
+      // Lock file already removed or replaced; the next owner will clean up its own token.
+    }
+  }
+}
+
+async function appendPersistedNotificationUnsafe(notification: JobNotification): Promise<void> {
   await fs.appendFile(NOTIFICATION_STORE_PATH, `${JSON.stringify(notification)}\n`, "utf8");
 }
 
-async function rewritePersistedNotifications(notifications: JobNotification[]): Promise<void> {
+async function rewritePersistedNotificationsUnsafe(notifications: JobNotification[]): Promise<void> {
   if (notifications.length === 0) {
-    await clearPersistedNotifications();
+    await clearPersistedNotificationsUnsafe();
     return;
   }
 
-  await ensureNotificationStoreDirectory();
   const tempPath = `${NOTIFICATION_STORE_PATH}.${randomUUID()}.tmp`;
   const payload = notifications.map((notification) => JSON.stringify(notification)).join("\n");
   await fs.writeFile(tempPath, `${payload}\n`, "utf8");
   await fs.rename(tempPath, NOTIFICATION_STORE_PATH);
 }
 
-async function clearPersistedNotifications(): Promise<void> {
+async function clearPersistedNotificationsUnsafe(): Promise<void> {
   await fs.rm(NOTIFICATION_STORE_PATH, { force: true });
 }
 
-async function loadPersistedNotifications(): Promise<void> {
+async function readPersistedNotificationsUnsafe(): Promise<PersistedNotificationRead> {
   let raw: string;
   try {
     raw = await fs.readFile(NOTIFICATION_STORE_PATH, "utf8");
   } catch (error) {
     if (isMissingFile(error)) {
-      return;
+      return { notifications: [], malformed: 0, readFailed: false };
     }
     process.stderr.write(
       `[omx-dispatch] failed to read persisted notifications: ${describeError(error)}\n`,
     );
-    return;
+    return { notifications: [], malformed: 0, readFailed: true };
   }
 
-  const restored: JobNotification[] = [];
+  const notifications: JobNotification[] = [];
   let malformed = 0;
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -389,7 +485,7 @@ async function loadPersistedNotifications(): Promise<void> {
     try {
       const notification = normalizeNotification(JSON.parse(trimmed));
       if (notification) {
-        restored.push(notification);
+        notifications.push(notification);
       } else {
         malformed += 1;
       }
@@ -398,75 +494,199 @@ async function loadPersistedNotifications(): Promise<void> {
     }
   }
 
-  const overflow = Math.max(0, restored.length - MAX_NOTIFICATION_QUEUE_SIZE);
-  const retained = overflow > 0 ? restored.slice(overflow) : restored;
-  notificationQueue.splice(0, notificationQueue.length, ...retained);
-  notificationDropCount += overflow;
-
-  if (malformed > 0) {
-    process.stderr.write(
-      `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"}\n`,
-    );
-  }
-  if (overflow > 0) {
-    process.stderr.write(
-      `[omx-dispatch] persisted notification queue overflow on startup: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE})\n`,
-    );
-  }
-  if (retained.length > 0 || malformed > 0 || overflow > 0) {
-    try {
-      await rewritePersistedNotifications(retained);
-    } catch (error) {
-      process.stderr.write(
-        `[omx-dispatch] failed to compact persisted notifications: ${describeError(error)}\n`,
-      );
-    }
-  }
+  return { notifications, malformed, readFailed: false };
 }
 
-async function enqueueNotification(notification: JobNotification): Promise<void> {
-  await withNotificationStoreLock(async () => {
-    notificationQueue.push(notification);
-    if (notificationQueue.length > MAX_NOTIFICATION_QUEUE_SIZE) {
-      const dropped = notificationQueue.length - MAX_NOTIFICATION_QUEUE_SIZE;
-      notificationQueue.splice(0, dropped);
-      notificationDropCount += dropped;
-      process.stderr.write(
-        `[omx-dispatch] notification queue overflow: dropped ${dropped} oldest entr${dropped === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
-      );
+function notificationTime(notification: JobNotification): number {
+  const timestamp = Date.parse(notification.receivedAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
 
-      try {
-        await rewritePersistedNotifications(notificationQueue);
-      } catch (error) {
-        process.stderr.write(
-          `[omx-dispatch] failed to rewrite persisted notifications after overflow: ${describeError(error)}\n`,
-        );
-      }
-      return;
+function dedupeNotifications(notifications: JobNotification[]): JobNotification[] {
+  const byJobId = new Map<string, JobNotification>();
+  for (const notification of notifications) {
+    const existing = byJobId.get(notification.job.id);
+    if (!existing || notificationTime(notification) >= notificationTime(existing)) {
+      byJobId.set(notification.job.id, notification);
     }
+  }
 
-    try {
-      await appendPersistedNotification(notification);
-    } catch (error) {
-      process.stderr.write(
-        `[omx-dispatch] failed to persist notification ${notification.job.id}: ${describeError(error)}\n`,
-      );
-    }
+  return [...byJobId.values()].sort((left, right) => {
+    const byTime = notificationTime(left) - notificationTime(right);
+    return byTime === 0 ? left.job.id.localeCompare(right.job.id) : byTime;
   });
 }
 
-async function drainNotifications(): Promise<JobNotification[]> {
-  return withNotificationStoreLock(async () => {
-    const pending = notificationQueue.splice(0);
+function retainWithinNotificationLimit(notifications: JobNotification[]): {
+  retained: JobNotification[];
+  overflow: number;
+} {
+  const overflow = Math.max(0, notifications.length - MAX_NOTIFICATION_QUEUE_SIZE);
+  return {
+    retained: overflow > 0 ? notifications.slice(overflow) : notifications,
+    overflow,
+  };
+}
+
+async function getNotificationStoreBytes(): Promise<number> {
+  try {
+    const stat = await fs.stat(NOTIFICATION_STORE_PATH);
+    return stat.size;
+  } catch (error) {
+    if (isMissingFile(error)) return 0;
+    process.stderr.write(
+      `[omx-dispatch] failed to stat persisted notifications: ${describeError(error)}\n`,
+    );
+    return 0;
+  }
+}
+
+function buildNotificationStats(
+  notifications: JobNotification[],
+  storeBytes: number,
+  previewCount: number,
+): NotificationStats {
+  const previewSize = Math.max(0, Math.min(NOTIFICATION_PREVIEW_MAX, previewCount));
+  const stats: NotificationStats = {
+    pending: notifications.length,
+    dropped: notificationDropCount,
+    storePath: NOTIFICATION_STORE_PATH,
+    storeBytes,
+    oldestEnqueuedAt: notifications[0]?.receivedAt ?? null,
+  };
+
+  if (previewSize > 0) {
+    stats.preview = notifications.slice(0, previewSize).map((notification) => ({
+      jobId: notification.job.id,
+      status: notification.job.status,
+      receivedAt: notification.receivedAt,
+      finishedAt: notification.job.finishedAt,
+      stdoutPreview: notification.job.stdout.slice(0, NOTIFICATION_PREVIEW_TEXT_MAX),
+      stderrPreview: notification.job.stderr.slice(0, NOTIFICATION_PREVIEW_TEXT_MAX),
+    }));
+  }
+
+  return stats;
+}
+
+async function loadPersistedNotifications(): Promise<void> {
+  await withNotificationStoreLock(async () => withNotificationFileLock(async () => {
+    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
+    if (readFailed) return;
+    const deduped = dedupeNotifications(notifications);
+    const { retained, overflow } = retainWithinNotificationLimit(deduped);
+    notificationQueue.splice(0, notificationQueue.length, ...retained);
+    notificationDropCount += overflow;
+
+    if (malformed > 0) {
+      process.stderr.write(
+        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"}\n`,
+      );
+    }
+    if (overflow > 0) {
+      process.stderr.write(
+        `[omx-dispatch] persisted notification queue overflow on startup: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE})\n`,
+      );
+    }
+    if (
+      retained.length !== notifications.length
+      || malformed > 0
+      || overflow > 0
+    ) {
+      try {
+        await rewritePersistedNotificationsUnsafe(retained);
+      } catch (error) {
+        process.stderr.write(
+          `[omx-dispatch] failed to compact persisted notifications: ${describeError(error)}\n`,
+        );
+      }
+    }
+  }));
+}
+
+async function enqueueNotification(notification: JobNotification): Promise<number> {
+  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
+    notificationQueue.push(notification);
+
     try {
-      await clearPersistedNotifications();
+      const persisted = await readPersistedNotificationsUnsafe();
+      if (persisted.readFailed) {
+        throw new Error("Failed to read persisted notifications before enqueue");
+      }
+      const deduped = dedupeNotifications([...persisted.notifications, notification]);
+      const { retained, overflow } = retainWithinNotificationLimit(deduped);
+      notificationDropCount += overflow;
+
+      if (persisted.malformed > 0) {
+        process.stderr.write(
+          `[omx-dispatch] skipped ${persisted.malformed} malformed persisted notification entr${persisted.malformed === 1 ? "y" : "ies"} while enqueueing\n`,
+        );
+      }
+
+      const retainedJobIds = new Set(retained.map((item) => item.job.id));
+      const localRetained = dedupeNotifications(notificationQueue)
+        .filter((item) => retainedJobIds.has(item.job.id));
+      notificationQueue.splice(0, notificationQueue.length, ...localRetained);
+
+      await rewritePersistedNotificationsUnsafe(retained);
+      if (overflow > 0) {
+        process.stderr.write(
+          `[omx-dispatch] notification queue overflow: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
+        );
+      }
+      return retained.length;
+    } catch (error) {
+      notificationQueue.pop();
+      process.stderr.write(
+        `[omx-dispatch] failed to persist notification ${notification.job.id}: ${describeError(error)}\n`,
+      );
+      await appendPersistedNotificationUnsafe(notification).catch(() => undefined);
+      return notificationQueue.length;
+    }
+  }));
+}
+
+async function getNotificationStats(previewCount = 0): Promise<NotificationStats> {
+  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
+    const read = await readPersistedNotificationsUnsafe();
+    if (read.readFailed) {
+      const storeBytes = await getNotificationStoreBytes();
+      return buildNotificationStats(dedupeNotifications(notificationQueue), storeBytes, previewCount);
+    }
+    const { notifications, malformed } = read;
+    const deduped = dedupeNotifications(notifications);
+    if (malformed > 0) {
+      process.stderr.write(
+        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while reading stats\n`,
+      );
+    }
+    const storeBytes = await getNotificationStoreBytes();
+    return buildNotificationStats(deduped, storeBytes, previewCount);
+  }));
+}
+
+async function drainNotifications(): Promise<JobNotification[]> {
+  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
+    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
+    if (readFailed) {
+      throw new Error("Failed to read persisted notifications before drain");
+    }
+    const pending = dedupeNotifications(notifications);
+    notificationQueue.splice(0);
+    if (malformed > 0) {
+      process.stderr.write(
+        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while draining\n`,
+      );
+    }
+    try {
+      await clearPersistedNotificationsUnsafe();
     } catch (error) {
       process.stderr.write(
         `[omx-dispatch] failed to clear persisted notifications: ${describeError(error)}\n`,
       );
     }
     return pending;
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +757,16 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
         receivedAt: new Date().toISOString(),
         job,
       };
-      await enqueueNotification(notification);
+      let queued: number;
+      try {
+        queued = await enqueueNotification(notification);
+      } catch (error) {
+        sendJsonResponse(res, 503, {
+          error: "Failed to persist job notification",
+          details: describeError(error),
+        });
+        return;
+      }
 
       // MCP logging 알림 발송 (Claude Code 로그에 노출)
       try {
@@ -555,15 +784,28 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
         // channel preview 기능이 비활성/미지원인 경우 알림 큐와 logging 경로는 유지
       }
 
-      sendJsonResponse(res, 200, { ok: true, queued: notificationQueue.length });
+      sendJsonResponse(res, 200, { ok: true, queued });
       return;
     }
 
     if (req.method === "GET" && req.url === "/health") {
+      let stats: NotificationStats;
+      try {
+        stats = await getNotificationStats();
+      } catch (error) {
+        sendJsonResponse(res, 503, {
+          ok: false,
+          error: "Failed to read notification stats",
+          details: describeError(error),
+        });
+        return;
+      }
       sendJsonResponse(res, 200, {
         ok: true,
-        pending: notificationQueue.length,
-        dropped: notificationDropCount,
+        pending: stats.pending,
+        dropped: stats.dropped,
+        storePath: stats.storePath,
+        storeBytes: stats.storeBytes,
       });
       return;
     }
@@ -756,10 +998,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "omx_get_notifications",
       description:
-        "Return all pending job-completion notifications received via the webhook channel and clear the queue. Call this to check whether any OMX jobs have finished since the last poll.",
+        "Return all pending job-completion notifications received via the shared webhook notification store and clear the queue. Call this to check whether any OMX jobs have finished since the last poll.",
       inputSchema: {
         type: "object",
         properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "omx_notification_stats",
+      description:
+        "Inspect the shared job-completion notification store without draining it. Use this to see whether pending OMX completion notifications exist and optionally preview a bounded subset.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          previewCount: {
+            type: "number",
+            minimum: 0,
+            maximum: NOTIFICATION_PREVIEW_MAX,
+            description: "Number of pending notifications to preview without draining. Defaults to 0.",
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -855,6 +1114,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "omx_get_notifications": {
       const pending = await drainNotifications();
       return toTextResult({ count: pending.length, notifications: pending });
+    }
+
+    case "omx_notification_stats": {
+      const { previewCount } = args as { previewCount?: number };
+      const result = await getNotificationStats(
+        typeof previewCount === "number" && Number.isFinite(previewCount) ? previewCount : 0,
+      );
+      return toTextResult(result);
     }
 
     default:
