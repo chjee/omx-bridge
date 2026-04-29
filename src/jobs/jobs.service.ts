@@ -57,6 +57,7 @@ export class JobsService {
         requestId: input.requestId,
         originRoutingKey: input.originRoutingKey,
         source: input.source,
+        sourceName: input.sourceName,
         metadata: input.metadata,
         notifyUrl: input.notifyUrl,
         status: 'queued',

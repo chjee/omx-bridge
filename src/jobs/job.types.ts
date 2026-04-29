@@ -14,7 +14,7 @@ export interface JobExecutionMetadata {
   recoveredFromRestart?: boolean;
 }
 
-export type JobSource = 'dispatch' | 'synapse' | 'openclaw';
+export type JobSource = 'dispatch' | 'channel' | 'synapse' | 'openclaw';
 
 export type NotifyChannelStatus = 'ok' | 'failed' | 'skipped';
 
@@ -26,7 +26,7 @@ export interface NotifyChannelResult {
   httpStatus?: number;
   /** 전송 시도 횟수. retry가 있는 채널에서 기록된다. */
   attempts?: number;
-  /** 'skipped' 시 사유(예: 'not_configured', 'synapse_fallback', 'webhook_ok') */
+  /** 'skipped' 시 사유(예: 'not_configured', 'broker_fallback', 'webhook_ok') */
   skippedReason?: string;
 }
 
@@ -48,6 +48,7 @@ export interface BridgeJob {
   requestId?: string;
   originRoutingKey?: string;
   source?: JobSource;
+  sourceName?: string;
   metadata?: Record<string, unknown>;
   notifyUrl?: string;
   status: JobStatus;

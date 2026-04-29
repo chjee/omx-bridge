@@ -93,6 +93,7 @@ function createBridgeJobFixture(overrides: Partial<BridgeJob> = {}): BridgeJob {
     requestId: overrides.requestId,
     originRoutingKey: overrides.originRoutingKey,
     source: overrides.source,
+    sourceName: overrides.sourceName,
     metadata: overrides.metadata,
     notifyUrl: overrides.notifyUrl,
     status: overrides.status ?? 'queued',
