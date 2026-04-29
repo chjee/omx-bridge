@@ -92,6 +92,26 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves channel sourceName on queued jobs', async () => {
+    const { service, repository } = createService();
+
+    const job = await service.createJob({
+      prompt: 'run from channel',
+      source: 'channel',
+      sourceName: 'claude-chopper',
+      originRoutingKey: 'telegram:group:-100123',
+    });
+
+    expect(job.source).toBe('channel');
+    expect(job.sourceName).toBe('claude-chopper');
+    expect(job.originRoutingKey).toBe('telegram:group:-100123');
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'channel',
+      sourceName: 'claude-chopper',
+      originRoutingKey: 'telegram:group:-100123',
+    }));
+  });
+
   it('rejects new jobs when active job capacity is full', async () => {
     const activeJob = createJob({ status: 'queued' });
     const jobs = new Map([[activeJob.id, activeJob]]);

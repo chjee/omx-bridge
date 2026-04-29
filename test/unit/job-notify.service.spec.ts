@@ -15,6 +15,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
     metadata: overrides.metadata,
     notifyUrl: overrides.notifyUrl,
     source: overrides.source,
+    sourceName: overrides.sourceName,
     originRoutingKey: overrides.originRoutingKey,
     status: overrides.status ?? 'succeeded',
     createdAt: overrides.createdAt ?? '2026-04-22T00:00:00.000Z',
@@ -328,6 +329,29 @@ describe('JobNotifyService', () => {
       return Promise.resolve({ ok: true });
     });
     const job = createJob({ source: 'synapse', originRoutingKey: 'telegram:direct:123' });
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(createConfig({ claudeNotifyUrl: CLAUDE_URL }), repoMock.repo);
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(CLAUDE_URL);
+    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502, attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'broker_fallback' });
+  });
+
+  it('skips telegram fallback for channel-broker callers in claude mode', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === CLAUDE_URL) {
+        return Promise.resolve({ ok: false, status: 502, statusText: 'Bad Gateway' });
+      }
+      return Promise.resolve({ ok: true });
+    });
+    const job = createJob({
+      source: 'channel',
+      sourceName: 'claude-chopper',
+      originRoutingKey: 'telegram:group:-100123',
+    });
     const repoMock = createRepoMock(job);
     const service = new JobNotifyService(createConfig({ claudeNotifyUrl: CLAUDE_URL }), repoMock.repo);
 

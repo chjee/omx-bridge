@@ -84,7 +84,8 @@ When a request comes from `omx-dispatch`, `CLAUDE_NOTIFY_URL` is effectively unu
 In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
 
 - **`notifyUrl` absent**: Telegram is used as a fallback when the configured `CLAUDE_NOTIFY_URL` webhook cannot be delivered.
-- **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with synapse or similar brokers. For `omx-dispatch`, a 2xx response from the session-local `/notify` endpoint means the bridge treats delivery as complete; if `ENABLE_CLAUDE_CHANNEL` is not enabled in the Claude Code MCP server environment, the completion is only queued for `omx_get_notifications` and will not wake the active CLI conversation.
+- **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with channel brokers such as `claude-chopper` or legacy `claude-synapse`. For `omx-dispatch`, a 2xx response from the session-local `/notify` endpoint means the bridge treats delivery as complete; if `ENABLE_CLAUDE_CHANNEL` is not enabled in the Claude Code MCP server environment, the completion is only queued for `omx_get_notifications` and will not wake the active CLI conversation.
+- **`source: "channel"` with `originRoutingKey`**: Telegram fallback is also skipped when webhook delivery fails. `sourceName` carries the concrete broker name, e.g. `claude-chopper`.
 
 Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAYS_MS`
 (default: `500,1000,2000`, which means four total attempts). Each notification
@@ -266,7 +267,7 @@ Available tools:
 
 | Tool | Description |
 |------|-------------|
-| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey` and `notifyUrl` for callback routing. |
+| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey`, `notifyUrl`, `source`, and `sourceName` for callback routing. |
 | `omx_submit_job_and_wait` | Submit a prompt, then wait for that specific job to complete in the same tool call |
 | `omx_get_job` | Fetch status and result for a specific job |
 | `omx_wait_for_job` | Wait for an existing job to complete without draining other pending notifications |
@@ -375,4 +376,5 @@ cd omx-dispatch && npm run build
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
 - On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
 - When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
-- `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Brokers such as `claude-synapse` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; synapse accepts both with `originRoutingKey` taking precedence.
+- `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Channel brokers such as `claude-chopper` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; `originRoutingKey` takes precedence.
+- `source` accepts `dispatch`, `channel`, `synapse`, and `openclaw`. New broker-owned chat integrations should use `source: "channel"` plus `sourceName` (for example `claude-chopper`) instead of adding app-specific source enum values.

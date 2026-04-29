@@ -74,7 +74,7 @@ interface BridgeJobExecution {
   recoveredFromRestart?: boolean;
 }
 
-type JobSource = "dispatch" | "synapse" | "openclaw";
+type JobSource = "dispatch" | "channel" | "synapse" | "openclaw";
 
 interface BridgeJob {
   id: string;
@@ -84,6 +84,7 @@ interface BridgeJob {
   requestId?: string;
   originRoutingKey?: string;
   source?: JobSource;
+  sourceName?: string;
   notifyUrl?: string;
   metadata?: Record<string, unknown>;
   status: JobStatus;
@@ -109,6 +110,7 @@ interface SubmitJobInput {
   metadata?: Record<string, unknown>;
   notifyUrl?: string;
   source?: JobSource;
+  sourceName?: string;
 }
 
 interface WaitForJobOptions {
@@ -303,7 +305,7 @@ function isTerminalJobStatus(value: JobStatus): boolean {
 }
 
 function isJobSource(value: unknown): value is JobSource {
-  return value === "dispatch" || value === "synapse" || value === "openclaw";
+  return value === "dispatch" || value === "channel" || value === "synapse" || value === "openclaw";
 }
 
 function isMissingFile(error: unknown): error is NodeJS.ErrnoException {
@@ -334,6 +336,7 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
     requestId: getStringField(payload, "requestId"),
     originRoutingKey: getStringField(payload, "originRoutingKey"),
     source: isJobSource(rawSource) ? rawSource : undefined,
+    sourceName: getStringField(payload, "sourceName"),
     notifyUrl: getStringField(payload, "notifyUrl"),
     metadata: isRecord(payload["metadata"]) ? payload["metadata"] : undefined,
     status: payload["status"],
@@ -778,7 +781,7 @@ async function drainNotifications(): Promise<JobNotification[]> {
 }
 
 async function submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse> {
-  const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source } = input;
+  const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source, sourceName } = input;
   return requestJson<CreateJobResponse>("jobs", {
     method: "POST",
     body: JSON.stringify({
@@ -788,6 +791,7 @@ async function submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse
       ...(originRoutingKey ? { originRoutingKey } : {}),
       ...(metadata ? { metadata } : {}),
       ...(source ? { source } : {}),
+      ...(sourceName ? { sourceName } : {}),
       notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
     }),
   });
@@ -1089,7 +1093,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           originRoutingKey: {
             type: "string",
             maxLength: 200,
-            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Used by synapse to route the callback result back to the correct chat.",
+            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Channel brokers use this to route the callback result back to the correct chat.",
           },
           notifyUrl: {
             type: "string",
@@ -1097,8 +1101,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           source: {
             type: "string",
-            enum: ["dispatch", "synapse", "openclaw"],
-            description: "Caller identity. Use 'dispatch' for Claude Code CLI sessions.",
+            enum: ["dispatch", "channel", "synapse", "openclaw"],
+            description: "Caller class. Use 'dispatch' for Claude Code CLI sessions and 'channel' for broker-owned channel routing.",
+          },
+          sourceName: {
+            type: "string",
+            maxLength: 200,
+            description: "Optional concrete channel broker name when source is 'channel', e.g. 'claude-chopper'.",
           },
         },
         required: ["prompt"],
@@ -1135,7 +1144,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           originRoutingKey: {
             type: "string",
             maxLength: 200,
-            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Used by synapse to route the callback result back to the correct chat.",
+            description: "Routing key of the conversation that initiated this job (e.g. 'telegram:direct:123456'). Channel brokers use this to route the callback result back to the correct chat.",
           },
           notifyUrl: {
             type: "string",
@@ -1143,8 +1152,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           source: {
             type: "string",
-            enum: ["dispatch", "synapse", "openclaw"],
-            description: "Caller identity. Use 'dispatch' for Claude Code CLI sessions.",
+            enum: ["dispatch", "channel", "synapse", "openclaw"],
+            description: "Caller class. Use 'dispatch' for Claude Code CLI sessions and 'channel' for broker-owned channel routing.",
+          },
+          sourceName: {
+            type: "string",
+            maxLength: 200,
+            description: "Optional concrete channel broker name when source is 'channel', e.g. 'claude-chopper'.",
           },
           waitTimeoutMs: {
             type: "number",
@@ -1312,14 +1326,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   switch (name) {
     case "omx_submit_job": {
-      const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source } = args as {
+      const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source, sourceName } = args as {
         prompt: string;
         cwd?: string;
         requestId?: string;
         originRoutingKey?: string;
         metadata?: Record<string, unknown>;
         notifyUrl?: string;
-        source?: 'dispatch' | 'synapse' | 'openclaw';
+        source?: JobSource;
+        sourceName?: string;
       };
       const result = await submitBridgeJob({
         prompt,
@@ -1329,6 +1344,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         metadata,
         notifyUrl,
         source,
+        sourceName,
       });
       return toTextResult(result);
     }
@@ -1342,6 +1358,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         metadata,
         notifyUrl,
         source,
+        sourceName,
         waitTimeoutMs,
         pollIntervalMs,
       } = args as unknown as SubmitJobInput & WaitForJobOptions;
@@ -1353,6 +1370,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         metadata,
         notifyUrl,
         source,
+        sourceName,
       });
       const waited = await waitForJobCompletion(submitted.jobId, {
         waitTimeoutMs,

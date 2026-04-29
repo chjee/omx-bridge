@@ -152,10 +152,18 @@ export class JobNotifyService {
     if (job.notifyUrl) {
       return { status: 'skipped', skippedReason: 'per_job_webhook_failed' };
     }
-    if (job.source === 'synapse' || (!job.source && !!job.originRoutingKey)) {
+    if (this.isBrokerOwnedRouting(job)) {
       return { status: 'skipped', skippedReason: 'broker_fallback' };
     }
     return this._sendTelegram(job);
+  }
+
+  private isBrokerOwnedRouting(job: BridgeJob): boolean {
+    return (
+      job.source === 'channel' ||
+      job.source === 'synapse' ||
+      (!job.source && !!job.originRoutingKey)
+    );
   }
 
   private async _notifyOpenClawHooks(job: BridgeJob): Promise<NotifyChannelResult> {
