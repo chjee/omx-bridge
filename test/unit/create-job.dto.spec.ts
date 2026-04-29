@@ -41,6 +41,29 @@ describe('CreateJobDto', () => {
     expect(dto.metadata).toEqual({ source: 'openclaw', chatId: 1234 });
   });
 
+  it('accepts channel source with sourceName', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    dto.source = 'channel';
+    dto.sourceName = 'claude-chopper';
+    dto.originRoutingKey = 'telegram:group:-100123';
+
+    const errors = await validate(dto);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects unknown source values', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    // @ts-expect-error intentionally validating runtime input
+    dto.source = 'chopper';
+
+    const errors = await validate(dto);
+
+    expect(errors.some((error) => error.property === 'source')).toBe(true);
+  });
+
   it('accepts loopback notify URLs', async () => {
     const dto = new CreateJobDto();
     dto.prompt = 'Implement phase 1';

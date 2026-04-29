@@ -61,8 +61,13 @@ export class CreateJobDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['dispatch', 'synapse', 'openclaw'])
-  source?: 'dispatch' | 'synapse' | 'openclaw';
+  @IsIn(['dispatch', 'channel', 'synapse', 'openclaw'])
+  source?: 'dispatch' | 'channel' | 'synapse' | 'openclaw';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  sourceName?: string;
 
   @IsOptional()
   @IsObject()
