@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -15,6 +14,11 @@ import type {
   Result,
   ServerCapabilities,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  NotificationStore,
+  type JobNotification,
+  type NotificationStats,
+} from "./notification-store.js";
 
 // ---------------------------------------------------------------------------
 // 설정
@@ -43,7 +47,6 @@ const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
 );
 const NOTIFICATION_STORE_PATH = process.env["OMX_DISPATCH_NOTIFICATION_STORE_PATH"]
   ?? path.join(process.cwd(), ".omx", "state", "omx-dispatch-notifications.jsonl");
-const NOTIFICATION_LOCK_PATH = `${NOTIFICATION_STORE_PATH}.lock`;
 const NOTIFICATION_LOCK_STALE_MS = 30_000;
 const NOTIFICATION_LOCK_TIMEOUT_MS = 5_000;
 const NOTIFICATION_PREVIEW_MAX = 20;
@@ -133,39 +136,12 @@ interface WaitForJobOptions {
   pollIntervalMs?: number;
 }
 
-interface JobNotification {
-  receivedAt: string;
-  job: BridgeJob;
-}
-
-interface PersistedNotificationRead {
-  notifications: JobNotification[];
-  malformed: number;
-  readFailed: boolean;
-}
-
-interface NotificationStats {
-  pending: number;
-  dropped: number;
-  storePath: string;
-  storeBytes: number;
-  oldestEnqueuedAt: string | null;
-  preview?: Array<{
-    jobId: string;
-    status: JobStatus;
-    receivedAt: string;
-    finishedAt?: string;
-    stdoutPreview: string;
-    stderrPreview: string;
-  }>;
-}
-
 interface WaitForJobResult {
   jobId: string;
   status: JobStatus;
   completed: boolean;
   timedOut: boolean;
-  notification: JobNotification | null;
+  notification: JobNotification<BridgeJob> | null;
   job: BridgeJob;
   notificationMissing?: boolean;
 }
@@ -177,7 +153,7 @@ interface DispatchHealthResult {
     stats?: BridgeJobStats;
     error?: string;
   };
-  notifications: NotificationStats;
+  notifications: NotificationStats<JobStatus>;
 }
 
 interface ClaudeChannelNotification extends Notification {
@@ -189,14 +165,6 @@ interface ClaudeChannelNotification extends Notification {
 }
 
 type OmxBridgeMcpServer = Server<Request, ClaudeChannelNotification, Result>;
-
-// ---------------------------------------------------------------------------
-// 알림 큐 (in-memory)
-// ---------------------------------------------------------------------------
-
-const notificationQueue: JobNotification[] = [];
-let notificationDropCount = 0;
-let notificationStoreMutex: Promise<void> = Promise.resolve();
 
 // ---------------------------------------------------------------------------
 // HTTP 헬퍼
@@ -364,15 +332,6 @@ function isJobSource(value: unknown): value is JobSource {
   return value === "dispatch" || value === "channel" || value === "synapse" || value === "openclaw";
 }
 
-function isMissingFile(error: unknown): error is NodeJS.ErrnoException {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
-}
-
 function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   if (!isRecord(payload)) return null;
 
@@ -424,7 +383,7 @@ function normalizeWebhookJob(payload: unknown): BridgeJob | null {
   };
 }
 
-function normalizeNotification(payload: unknown): JobNotification | null {
+function normalizeNotification(payload: unknown): JobNotification<BridgeJob> | null {
   if (!isRecord(payload)) return null;
   const receivedAt = getStringField(payload, "receivedAt");
   const job = normalizeWebhookJob(payload["job"]);
@@ -469,371 +428,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withNotificationStoreLock<T>(operation: () => Promise<T>): Promise<T> {
-  const next = notificationStoreMutex.then(operation, operation);
-  notificationStoreMutex = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  return next;
-}
-
-async function ensureNotificationStoreDirectory(): Promise<void> {
-  await fs.mkdir(path.dirname(NOTIFICATION_STORE_PATH), { recursive: true });
-}
-
-async function withNotificationFileLock<T>(operation: () => Promise<T>): Promise<T> {
-  await ensureNotificationStoreDirectory();
-  const startedAt = Date.now();
-  let attempt = 0;
-  let lockHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
-  const lockToken = `${process.pid}:${randomUUID()}`;
-
-  while (!lockHandle) {
-    try {
-      const acquired = await fs.open(NOTIFICATION_LOCK_PATH, "wx");
-      try {
-        await acquired.writeFile(`${lockToken} ${new Date().toISOString()}\n`, "utf8");
-      } catch (writeError) {
-        await acquired.close().catch(() => undefined);
-        await fs.rm(NOTIFICATION_LOCK_PATH, { force: true }).catch(() => undefined);
-        throw writeError;
-      }
-      lockHandle = acquired;
-    } catch (error) {
-      if (
-        typeof error === "object"
-        && error !== null
-        && "code" in error
-        && (error as NodeJS.ErrnoException).code === "EEXIST"
-      ) {
-        try {
-          const stat = await fs.stat(NOTIFICATION_LOCK_PATH);
-          if (Date.now() - stat.mtimeMs > NOTIFICATION_LOCK_STALE_MS) {
-            await fs.rm(NOTIFICATION_LOCK_PATH, { force: true });
-            continue;
-          }
-        } catch (statError) {
-          if (!isMissingFile(statError)) {
-            process.stderr.write(
-              `[omx-dispatch] failed to inspect notification lock: ${describeError(statError)}\n`,
-            );
-          }
-        }
-
-        if (Date.now() - startedAt > NOTIFICATION_LOCK_TIMEOUT_MS) {
-          throw new Error(`Timed out waiting for notification store lock: ${NOTIFICATION_LOCK_PATH}`);
-        }
-
-        attempt += 1;
-        await sleep(Math.min(250, 25 + attempt * 25));
-        continue;
-      }
-
-      throw error;
-    }
-  }
-
-  try {
-    return await operation();
-  } finally {
-    await lockHandle.close().catch(() => undefined);
-    try {
-      const contents = await fs.readFile(NOTIFICATION_LOCK_PATH, "utf8");
-      if (contents.startsWith(lockToken)) {
-        await fs.rm(NOTIFICATION_LOCK_PATH, { force: true });
-      }
-    } catch {
-      // Lock file already removed or replaced; the next owner will clean up its own token.
-    }
-  }
-}
-
-async function appendPersistedNotificationUnsafe(notification: JobNotification): Promise<void> {
-  await fs.appendFile(NOTIFICATION_STORE_PATH, `${JSON.stringify(notification)}\n`, "utf8");
-}
-
-async function rewritePersistedNotificationsUnsafe(notifications: JobNotification[]): Promise<void> {
-  if (notifications.length === 0) {
-    await clearPersistedNotificationsUnsafe();
-    return;
-  }
-
-  const tempPath = `${NOTIFICATION_STORE_PATH}.${randomUUID()}.tmp`;
-  const payload = notifications.map((notification) => JSON.stringify(notification)).join("\n");
-  await fs.writeFile(tempPath, `${payload}\n`, "utf8");
-  await fs.rename(tempPath, NOTIFICATION_STORE_PATH);
-}
-
-async function clearPersistedNotificationsUnsafe(): Promise<void> {
-  await fs.rm(NOTIFICATION_STORE_PATH, { force: true });
-}
-
-async function readPersistedNotificationsUnsafe(): Promise<PersistedNotificationRead> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(NOTIFICATION_STORE_PATH, "utf8");
-  } catch (error) {
-    if (isMissingFile(error)) {
-      return { notifications: [], malformed: 0, readFailed: false };
-    }
-    process.stderr.write(
-      `[omx-dispatch] failed to read persisted notifications: ${describeError(error)}\n`,
-    );
-    return { notifications: [], malformed: 0, readFailed: true };
-  }
-
-  const notifications: JobNotification[] = [];
-  let malformed = 0;
-  for (const line of raw.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    try {
-      const notification = normalizeNotification(JSON.parse(trimmed));
-      if (notification) {
-        notifications.push(notification);
-      } else {
-        malformed += 1;
-      }
-    } catch {
-      malformed += 1;
-    }
-  }
-
-  return { notifications, malformed, readFailed: false };
-}
-
-function notificationTime(notification: JobNotification): number {
-  const timestamp = Date.parse(notification.receivedAt);
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function dedupeNotifications(notifications: JobNotification[]): JobNotification[] {
-  const byJobId = new Map<string, JobNotification>();
-  for (const notification of notifications) {
-    const existing = byJobId.get(notification.job.id);
-    if (!existing || notificationTime(notification) >= notificationTime(existing)) {
-      byJobId.set(notification.job.id, notification);
-    }
-  }
-
-  return [...byJobId.values()].sort((left, right) => {
-    const byTime = notificationTime(left) - notificationTime(right);
-    return byTime === 0 ? left.job.id.localeCompare(right.job.id) : byTime;
-  });
-}
-
-function retainWithinNotificationLimit(notifications: JobNotification[]): {
-  retained: JobNotification[];
-  overflow: number;
-} {
-  const overflow = Math.max(0, notifications.length - MAX_NOTIFICATION_QUEUE_SIZE);
-  return {
-    retained: overflow > 0 ? notifications.slice(overflow) : notifications,
-    overflow,
-  };
-}
-
-async function getNotificationStoreBytes(): Promise<number> {
-  try {
-    const stat = await fs.stat(NOTIFICATION_STORE_PATH);
-    return stat.size;
-  } catch (error) {
-    if (isMissingFile(error)) return 0;
-    process.stderr.write(
-      `[omx-dispatch] failed to stat persisted notifications: ${describeError(error)}\n`,
-    );
-    return 0;
-  }
-}
-
-function buildNotificationStats(
-  notifications: JobNotification[],
-  storeBytes: number,
-  previewCount: number,
-): NotificationStats {
-  const previewSize = Math.max(0, Math.min(NOTIFICATION_PREVIEW_MAX, previewCount));
-  const stats: NotificationStats = {
-    pending: notifications.length,
-    dropped: notificationDropCount,
-    storePath: NOTIFICATION_STORE_PATH,
-    storeBytes,
-    oldestEnqueuedAt: notifications[0]?.receivedAt ?? null,
-  };
-
-  if (previewSize > 0) {
-    stats.preview = notifications.slice(0, previewSize).map((notification) => ({
-      jobId: notification.job.id,
-      status: notification.job.status,
-      receivedAt: notification.receivedAt,
-      finishedAt: notification.job.finishedAt,
-      stdoutPreview: notification.job.stdout.slice(0, NOTIFICATION_PREVIEW_TEXT_MAX),
-      stderrPreview: notification.job.stderr.slice(0, NOTIFICATION_PREVIEW_TEXT_MAX),
-    }));
-  }
-
-  return stats;
-}
+const notificationStore = new NotificationStore<BridgeJob>({
+  storePath: NOTIFICATION_STORE_PATH,
+  maxQueueSize: MAX_NOTIFICATION_QUEUE_SIZE,
+  lockStaleMs: NOTIFICATION_LOCK_STALE_MS,
+  lockTimeoutMs: NOTIFICATION_LOCK_TIMEOUT_MS,
+  previewMax: NOTIFICATION_PREVIEW_MAX,
+  previewTextMax: NOTIFICATION_PREVIEW_TEXT_MAX,
+  normalizeNotification,
+  logWarning: (message) => process.stderr.write(`[omx-dispatch] ${message}\n`),
+});
 
 async function loadPersistedNotifications(): Promise<void> {
-  await withNotificationStoreLock(async () => withNotificationFileLock(async () => {
-    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
-    if (readFailed) return;
-    const deduped = dedupeNotifications(notifications);
-    const { retained, overflow } = retainWithinNotificationLimit(deduped);
-    notificationQueue.splice(0, notificationQueue.length, ...retained);
-    notificationDropCount += overflow;
-
-    if (malformed > 0) {
-      process.stderr.write(
-        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"}\n`,
-      );
-    }
-    if (overflow > 0) {
-      process.stderr.write(
-        `[omx-dispatch] persisted notification queue overflow on startup: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE})\n`,
-      );
-    }
-    if (
-      retained.length !== notifications.length
-      || malformed > 0
-      || overflow > 0
-    ) {
-      try {
-        await rewritePersistedNotificationsUnsafe(retained);
-      } catch (error) {
-        process.stderr.write(
-          `[omx-dispatch] failed to compact persisted notifications: ${describeError(error)}\n`,
-        );
-      }
-    }
-  }));
+  await notificationStore.load();
 }
 
-async function enqueueNotification(notification: JobNotification): Promise<number> {
-  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
-    notificationQueue.push(notification);
-
-    try {
-      const persisted = await readPersistedNotificationsUnsafe();
-      if (persisted.readFailed) {
-        throw new Error("Failed to read persisted notifications before enqueue");
-      }
-      const deduped = dedupeNotifications([...persisted.notifications, notification]);
-      const { retained, overflow } = retainWithinNotificationLimit(deduped);
-      notificationDropCount += overflow;
-
-      if (persisted.malformed > 0) {
-        process.stderr.write(
-          `[omx-dispatch] skipped ${persisted.malformed} malformed persisted notification entr${persisted.malformed === 1 ? "y" : "ies"} while enqueueing\n`,
-        );
-      }
-
-      const retainedJobIds = new Set(retained.map((item) => item.job.id));
-      const localRetained = dedupeNotifications(notificationQueue)
-        .filter((item) => retainedJobIds.has(item.job.id));
-      notificationQueue.splice(0, notificationQueue.length, ...localRetained);
-
-      await rewritePersistedNotificationsUnsafe(retained);
-      if (overflow > 0) {
-        process.stderr.write(
-          `[omx-dispatch] notification queue overflow: dropped ${overflow} oldest entr${overflow === 1 ? "y" : "ies"} (total dropped: ${notificationDropCount}, MAX_NOTIFICATION_QUEUE_SIZE=${MAX_NOTIFICATION_QUEUE_SIZE}). Call omx_get_notifications more frequently or raise the limit.\n`,
-        );
-      }
-      return retained.length;
-    } catch (error) {
-      notificationQueue.pop();
-      process.stderr.write(
-        `[omx-dispatch] failed to persist notification ${notification.job.id}: ${describeError(error)}\n`,
-      );
-      await appendPersistedNotificationUnsafe(notification).catch(() => undefined);
-      return notificationQueue.length;
-    }
-  }));
+async function enqueueNotification(notification: JobNotification<BridgeJob>): Promise<number> {
+  return notificationStore.enqueue(notification);
 }
 
-async function getNotificationStats(previewCount = 0): Promise<NotificationStats> {
-  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
-    const read = await readPersistedNotificationsUnsafe();
-    if (read.readFailed) {
-      const storeBytes = await getNotificationStoreBytes();
-      return buildNotificationStats(dedupeNotifications(notificationQueue), storeBytes, previewCount);
-    }
-    const { notifications, malformed } = read;
-    const deduped = dedupeNotifications(notifications);
-    if (malformed > 0) {
-      process.stderr.write(
-        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while reading stats\n`,
-      );
-    }
-    const storeBytes = await getNotificationStoreBytes();
-    return buildNotificationStats(deduped, storeBytes, previewCount);
-  }));
+async function getNotificationStats(previewCount = 0): Promise<NotificationStats<JobStatus>> {
+  return notificationStore.getStats(previewCount);
 }
 
-async function drainNotificationForJob(jobId: string): Promise<JobNotification | null> {
-  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
-    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
-    if (readFailed) {
-      throw new Error("Failed to read persisted notifications before job-specific drain");
-    }
-
-    const deduped = dedupeNotifications(notifications);
-    const target = deduped.find((notification) => notification.job.id === jobId) ?? null;
-    if (!target && malformed === 0) {
-      return null;
-    }
-
-    const remaining = deduped.filter((notification) => notification.job.id !== jobId);
-    notificationQueue.splice(
-      0,
-      notificationQueue.length,
-      ...dedupeNotifications(notificationQueue)
-        .filter((notification) => notification.job.id !== jobId),
-    );
-
-    try {
-      await rewritePersistedNotificationsUnsafe(remaining);
-    } catch (error) {
-      process.stderr.write(
-        `[omx-dispatch] failed to rewrite persisted notifications after job-specific drain: ${describeError(error)}\n`,
-      );
-      throw error;
-    }
-
-    if (malformed > 0) {
-      process.stderr.write(
-        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while draining job ${jobId}\n`,
-      );
-    }
-
-    return target;
-  }));
+async function drainNotificationForJob(jobId: string): Promise<JobNotification<BridgeJob> | null> {
+  return notificationStore.drainForJob(jobId);
 }
 
-async function drainNotifications(): Promise<JobNotification[]> {
-  return withNotificationStoreLock(async () => withNotificationFileLock(async () => {
-    const { notifications, malformed, readFailed } = await readPersistedNotificationsUnsafe();
-    if (readFailed) {
-      throw new Error("Failed to read persisted notifications before drain");
-    }
-    const pending = dedupeNotifications(notifications);
-    notificationQueue.splice(0);
-    if (malformed > 0) {
-      process.stderr.write(
-        `[omx-dispatch] skipped ${malformed} malformed persisted notification entr${malformed === 1 ? "y" : "ies"} while draining\n`,
-      );
-    }
-    try {
-      await clearPersistedNotificationsUnsafe();
-    } catch (error) {
-      process.stderr.write(
-        `[omx-dispatch] failed to clear persisted notifications: ${describeError(error)}\n`,
-      );
-    }
-    return pending;
-  }));
+async function drainNotifications(): Promise<Array<JobNotification<BridgeJob>>> {
+  return notificationStore.drainAll();
 }
 
 async function submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse> {
@@ -1032,7 +655,7 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
         return;
       }
 
-      const notification: JobNotification = {
+      const notification: JobNotification<BridgeJob> = {
         receivedAt: new Date().toISOString(),
         job,
       };
@@ -1068,7 +691,7 @@ function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
     }
 
     if (req.method === "GET" && req.url === "/health") {
-      let stats: NotificationStats;
+      let stats: NotificationStats<JobStatus>;
       try {
         stats = await getNotificationStats();
       } catch (error) {
