@@ -7,8 +7,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
-import path from 'node:path';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { CreateJobDto } from './dto/create-job.dto';
 import type { JobCallbackDto } from './dto/job-callback.dto';
 import { JobQueueRepository } from './job-queue.repository';
@@ -40,9 +40,12 @@ export class JobsService {
 
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
-      this.assertAllowedCwd(input.cwd);
-      const requestFingerprint = this.buildRequestFingerprint(input);
-      const existingJob = await this.findExistingRequestJob(input);
+      const normalizedInput = {
+        ...input,
+        cwd: await this.assertAllowedCwd(input.cwd),
+      };
+      const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
+      const existingJob = await this.findExistingRequestJob(normalizedInput);
       if (existingJob) {
         this.assertRequestFingerprintMatches(existingJob, requestFingerprint);
         return existingJob;
@@ -58,16 +61,16 @@ export class JobsService {
 
       const job: BridgeJob = {
         id: randomUUID(),
-        prompt: input.prompt,
-        cwd: input.cwd,
+        prompt: normalizedInput.prompt,
+        cwd: normalizedInput.cwd,
         queueOrder: this.nextQueueOrder(),
-        requestId: input.requestId,
+        requestId: normalizedInput.requestId,
         requestFingerprint,
-        originRoutingKey: input.originRoutingKey,
-        source: input.source,
-        sourceName: input.sourceName,
-        metadata: input.metadata,
-        notifyUrl: input.notifyUrl,
+        originRoutingKey: normalizedInput.originRoutingKey,
+        source: normalizedInput.source,
+        sourceName: normalizedInput.sourceName,
+        metadata: normalizedInput.metadata,
+        notifyUrl: normalizedInput.notifyUrl,
         status: 'queued',
         createdAt: new Date().toISOString(),
         exitCode: null,
@@ -283,21 +286,15 @@ export class JobsService {
     return `${Date.now()}-${this.queueSequence.toString().padStart(6, '0')}`;
   }
 
-  private assertAllowedCwd(cwd: string | undefined): void {
-    if (!cwd) {
-      return;
-    }
-
-    const resolvedCwd = path.resolve(cwd);
-    const allowed = this.config.allowedCwdPrefixes.some((prefix) => {
-      const resolvedPrefix = path.resolve(prefix);
-      const relative = path.relative(resolvedPrefix, resolvedCwd);
-      return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
-    });
-
-    if (!allowed) {
+  private async assertAllowedCwd(cwd: string | undefined): Promise<string | undefined> {
+    try {
+      return await resolveAllowedExecutionCwd(cwd, this.config.allowedCwdPrefixes);
+    } catch (error) {
+      if (!(error instanceof CwdBoundaryError)) {
+        throw error;
+      }
       throw new HttpException(
-        `cwd is outside allowed prefixes: ${cwd}`,
+        error.message,
         HttpStatus.BAD_REQUEST,
       );
     }

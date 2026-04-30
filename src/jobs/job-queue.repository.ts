@@ -13,6 +13,7 @@ const EXECUTION_ERROR_TYPES = [
   'non_zero_exit',
   'cancelled',
   'execution_error',
+  'invalid_cwd',
 ] as const;
 const NOTIFY_MODES = ['openclaw', 'claude'] as const;
 const NOTIFY_TRIGGERS = ['auto', 'manual'] as const;

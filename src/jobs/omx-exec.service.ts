@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { BRIDGE_CONFIG, DEFAULT_OMX_ENV_ALLOWLIST, type BridgeConfig } from '../config/bridge-config';
+import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { JobExecutionMetadata, OmxExecutionResult, TerminalJobStatus } from './job.types';
 
 export type SpawnFunction = (
@@ -32,6 +33,13 @@ export class OmxExecService {
 
   async execute(prompt: string, options: ExecuteOmxOptions = {}): Promise<OmxExecutionResult> {
     const startedAt = Date.now();
+    const cwdResolution = options.cwd
+      ? await this.resolveExecutionCwd(options.cwd, startedAt)
+      : undefined;
+    if (cwdResolution && typeof cwdResolution !== 'string') {
+      return cwdResolution;
+    }
+    const executionCwd = cwdResolution;
 
     return new Promise<OmxExecutionResult>((resolve) => {
       let stdoutCapture = this.emptyOutputCapture();
@@ -45,7 +53,7 @@ export class OmxExecService {
       const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', '-s', 'danger-full-access', prompt], {
         stdio: 'pipe',
         env: this.buildChildEnv(),
-        ...(options.cwd ? { cwd: options.cwd } : {}),
+        ...(executionCwd ? { cwd: executionCwd } : {}),
       });
       child.stdin.end();
 
@@ -170,6 +178,32 @@ export class OmxExecService {
       }
     }
     return env;
+  }
+
+  private async resolveExecutionCwd(
+    cwd: string | undefined,
+    startedAt: number,
+  ): Promise<string | OmxExecutionResult | undefined> {
+    try {
+      return await resolveAllowedExecutionCwd(cwd, this.config.allowedCwdPrefixes);
+    } catch (error) {
+      if (!(error instanceof CwdBoundaryError)) {
+        throw error;
+      }
+      return {
+        status: 'failed',
+        stdout: '',
+        stderr: error.message,
+        exitCode: null,
+        execution: {
+          command: this.config.omxCommand,
+          timeoutMs: this.config.jobTimeoutMs,
+          maxOutputChars: this.config.maxOutputChars,
+          durationMs: Date.now() - startedAt,
+          errorType: 'invalid_cwd',
+        },
+      };
+    }
   }
 
   private emptyOutputCapture(): OutputCapture {
