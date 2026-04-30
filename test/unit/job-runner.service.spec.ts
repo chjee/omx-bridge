@@ -295,6 +295,105 @@ describe('JobRunnerService', () => {
     });
   });
 
+  it('waits for completion notifications to flush during module destroy', async () => {
+    let abortSignal: AbortSignal | undefined;
+    let resolveNotification: (() => void) | undefined;
+    const notifyJobComplete = jest.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNotification = resolve;
+        }),
+    );
+    const runner = new JobRunnerService(
+      repository,
+      {
+        execute: jest.fn().mockImplementation(
+          (_prompt: string, options?: { signal?: AbortSignal }) =>
+            new Promise<OmxExecutionResult>((resolve) => {
+              abortSignal = options?.signal;
+              options?.signal?.addEventListener('abort', () => {
+                resolve(
+                  createExecutionResult({
+                    status: 'cancelled',
+                    stderr: 'Command cancelled',
+                    exitCode: null,
+                    execution: {
+                      command: 'omx',
+                      timeoutMs: 1000,
+                      maxOutputChars: 1000,
+                      errorType: 'cancelled',
+                    },
+                  }),
+                );
+              }, { once: true });
+            }),
+        ),
+      } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+
+    await repository.save(createJob());
+
+    const runPromise = runner.runOnce();
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
+      (job) => job?.status === 'running',
+    );
+
+    let destroySettled = false;
+    const destroyPromise = runner.onModuleDestroy().then(() => {
+      destroySettled = true;
+    });
+    await waitFor(
+      () => Promise.resolve(notifyJobComplete.mock.calls.length),
+      (callCount) => callCount === 1,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(abortSignal?.aborted).toBe(true);
+    expect(destroySettled).toBe(false);
+
+    resolveNotification?.();
+    await destroyPromise;
+    await runPromise;
+
+    expect(destroySettled).toBe(true);
+  });
+
+  it('stops waiting for stuck completion notifications after the shutdown grace timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      const notifyJobComplete = jest.fn().mockReturnValue(new Promise<void>(() => undefined));
+      const runner = new JobRunnerService(
+        repository,
+        {
+          execute: jest.fn().mockResolvedValue(createExecutionResult()),
+        } as unknown as OmxExecService,
+        { notifyJobComplete } as unknown as JobNotifyService,
+        config,
+      );
+
+      await repository.save(createJob());
+      await runner.runOnce();
+
+      let destroySettled = false;
+      const destroyPromise = runner.onModuleDestroy().then(() => {
+        destroySettled = true;
+      });
+      await Promise.resolve();
+
+      expect(destroySettled).toBe(false);
+
+      jest.advanceTimersByTime(config.sigkillGraceMs + 2_000);
+      await destroyPromise;
+
+      expect(destroySettled).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('runs up to maxConcurrency jobs in parallel and respects the cap', async () => {
     config.maxConcurrency = 2;
 

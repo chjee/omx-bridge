@@ -13,6 +13,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
   private readonly inFlightRuns = new Map<string, Promise<void>>();
+  private readonly completionNotifications = new Map<string, Promise<void>>();
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
   private shuttingDown = false;
@@ -58,6 +59,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     await this.waitForInFlightRuns();
     this.abortControllers.clear();
+    await this.waitForCompletionNotifications();
     await this.instanceLock?.release();
   }
 
@@ -254,7 +256,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         exitCode: result.exitCode,
         execution: result.execution,
       });
-      void this.jobNotify.notifyJobComplete(savedJob);
+      this.trackCompletionNotification(savedJob);
     } catch (error) {
       await this.markRunningJobFailed(job.id, error);
     } finally {
@@ -281,7 +283,24 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       },
     });
     this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
-    void this.jobNotify.notifyJobComplete(savedJob);
+    this.trackCompletionNotification(savedJob);
+  }
+
+  private trackCompletionNotification(job: BridgeJob): void {
+    const task = Promise.resolve()
+      .then(async () => {
+        await this.jobNotify.notifyJobComplete(job);
+      })
+      .catch((error) => {
+        this.logger.warn(`Failed to send completion notification for ${job.id}: ${String(error)}`);
+      });
+
+    this.completionNotifications.set(job.id, task);
+    void task.finally(() => {
+      if (this.completionNotifications.get(job.id) === task) {
+        this.completionNotifications.delete(job.id);
+      }
+    });
   }
 
   private async waitForInFlightRuns(): Promise<void> {
@@ -294,6 +313,23 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     let timeoutHandle: NodeJS.Timeout | undefined;
     await Promise.race([
       Promise.allSettled(runs),
+      new Promise<void>((resolve) => {
+        timeoutHandle = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+    clearTimeout(timeoutHandle);
+  }
+
+  private async waitForCompletionNotifications(): Promise<void> {
+    const notifications = [...this.completionNotifications.values()];
+    if (notifications.length === 0) {
+      return;
+    }
+
+    const timeoutMs = this.config.sigkillGraceMs + 2_000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.allSettled(notifications),
       new Promise<void>((resolve) => {
         timeoutHandle = setTimeout(resolve, timeoutMs);
       }),
