@@ -7,6 +7,8 @@
     "./bridge-client.ts",
     "./bridge-client.test.ts",
     "./notification-store.ts",
-    "./notification-store.test.ts"
+    "./notification-store.test.ts",
+    "./webhook-server.ts",
+    "./webhook-server.test.ts"
   ]
 }

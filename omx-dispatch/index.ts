@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -20,6 +19,7 @@ import {
   type NotificationStats,
 } from "./notification-store.js";
 import { BridgeClient } from "./bridge-client.js";
+import { startWebhookServer as startDispatchWebhookServer } from "./webhook-server.js";
 
 // ---------------------------------------------------------------------------
 // 설정
@@ -40,6 +40,10 @@ const BRIDGE_REQUEST_TIMEOUT_MS = parsePositiveInt(
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "0", 10); // 0 = dynamic range
 const WEBHOOK_PORT_MIN = 12000;
 const WEBHOOK_PORT_MAX = 12999;
+const WEBHOOK_BODY_LIMIT_BYTES = parsePositiveInt(
+  process.env["OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES"],
+  1_000_000,
+);
 let SELF_NOTIFY_URL = "";
 const ENABLE_CLAUDE_CHANNEL = parseBoolean(process.env["ENABLE_CLAUDE_CHANNEL"]);
 const MAX_NOTIFICATION_QUEUE_SIZE = parsePositiveInt(
@@ -529,157 +533,38 @@ async function waitForJobCompletion(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Webhook HTTP 서버
-// ---------------------------------------------------------------------------
-
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-
-function sendJsonResponse(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    "Content-Type": "application/json",
-    "Content-Length": Buffer.byteLength(payload),
-  });
-  res.end(payload);
-}
-
-function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
-  return new Promise((resolve, reject) => {
-  const http = createServer(async (req, res) => {
-    if (req.method === "POST" && req.url === "/notify") {
-      let rawBody: string;
-      try {
-        rawBody = await readBody(req);
-      } catch {
-        sendJsonResponse(res, 400, { error: "Failed to read request body" });
-        return;
-      }
-
-      let payload: unknown;
-      try {
-        payload = JSON.parse(rawBody);
-      } catch {
-        sendJsonResponse(res, 400, { error: "Invalid JSON body" });
-        return;
-      }
-
-      const jobId = extractWebhookJobId(payload);
-      if (!jobId) {
-        sendJsonResponse(res, 400, { error: "Missing job id" });
-        return;
-      }
-
-      const signature = req.headers["x-callback-signature"] as string | undefined;
-      if (BRIDGE_CALLBACK_SECRET && !signature) {
-        sendJsonResponse(res, 401, { error: "Missing X-Callback-Signature header" });
-        return;
-      }
-      if (signature && !verifyWebhookSignature(jobId, rawBody, signature)) {
-        sendJsonResponse(res, 403, { error: "Signature verification failed" });
-        return;
-      }
-
-      const job = normalizeWebhookJob(payload);
-      if (!job) {
-        sendJsonResponse(res, 400, { error: "Invalid job notification payload" });
-        return;
-      }
-
-      const notification: JobNotification<BridgeJob> = {
-        receivedAt: new Date().toISOString(),
-        job,
-      };
-      let queued: number;
-      try {
-        queued = await enqueueNotification(notification);
-      } catch (error) {
-        sendJsonResponse(res, 503, {
-          error: "Failed to persist job notification",
-          details: describeError(error),
-        });
-        return;
-      }
-
-      // MCP logging 알림 발송 (Claude Code 로그에 노출)
-      try {
-        await server.sendLoggingMessage({
-          level: "info",
-          data: `[omx-bridge] Job ${job.id} ${job.status}: ${job.stdout.slice(0, 200)}`,
-        });
-      } catch {
-        // MCP 연결이 끊겼을 경우 무시
-      }
-
-      try {
-        await sendClaudeChannelNotification(server, job);
-      } catch {
-        // channel preview 기능이 비활성/미지원인 경우 알림 큐와 logging 경로는 유지
-      }
-
-      sendJsonResponse(res, 200, { ok: true, queued });
-      return;
-    }
-
-    if (req.method === "GET" && req.url === "/health") {
-      let stats: NotificationStats<JobStatus>;
-      try {
-        stats = await getNotificationStats();
-      } catch (error) {
-        sendJsonResponse(res, 503, {
-          ok: false,
-          error: "Failed to read notification stats",
-          details: describeError(error),
-        });
-        return;
-      }
-      sendJsonResponse(res, 200, {
-        ok: true,
-        pending: stats.pending,
-        dropped: stats.dropped,
-        storePath: stats.storePath,
-        storeBytes: stats.storeBytes,
+async function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
+  await startDispatchWebhookServer<BridgeJob>({
+    port: WEBHOOK_PORT,
+    portMin: WEBHOOK_PORT_MIN,
+    portMax: WEBHOOK_PORT_MAX,
+    bodyLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
+    signatureRequired: !!BRIDGE_CALLBACK_SECRET,
+    extractJobId: extractWebhookJobId,
+    verifySignature: verifyWebhookSignature,
+    normalizeJob: normalizeWebhookJob,
+    enqueueNotification,
+    getNotificationStats,
+    describeError,
+    sendLoggingMessage: async (job) => {
+      await server.sendLoggingMessage({
+        level: "info",
+        data: `[omx-bridge] Job ${job.id} ${job.status}: ${job.stdout.slice(0, 200)}`,
       });
-      return;
-    }
-
-    sendJsonResponse(res, 404, { error: "Not found" });
+    },
+    sendChannelNotification: async (job) => {
+      await sendClaudeChannelNotification(server, job);
+    },
+    onListening: (notifyUrl) => {
+      SELF_NOTIFY_URL = notifyUrl;
+    },
+    onLog: (message) => {
+      process.stderr.write(`[omx-dispatch] ${message}\n`);
+    },
+  }).catch((error) => {
+    process.stderr.write(`[omx-dispatch] Webhook server error: ${describeError(error)}\n`);
+    process.exit(1);
   });
-
-  let currentPort = WEBHOOK_PORT > 0
-    ? WEBHOOK_PORT
-    : WEBHOOK_PORT_MIN + Math.floor(Math.random() * (WEBHOOK_PORT_MAX - WEBHOOK_PORT_MIN + 1));
-
-  const tryListen = () => http.listen(currentPort, "127.0.0.1");
-
-  http.on("listening", () => {
-    const addr = http.address();
-    const port = typeof addr === "object" && addr !== null ? addr.port : currentPort;
-    SELF_NOTIFY_URL = `http://127.0.0.1:${port}/notify`;
-    process.stderr.write(`[omx-dispatch] Webhook server listening on ${SELF_NOTIFY_URL}\n`);
-    resolve();
-  });
-
-  http.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE" && WEBHOOK_PORT === 0 && currentPort < WEBHOOK_PORT_MAX) {
-      currentPort++;
-      tryListen();
-    } else {
-      process.stderr.write(`[omx-dispatch] Webhook server error: ${err.message}\n`);
-      reject(err);
-      process.exit(1);
-    }
-  });
-
-  tryListen();
-});
 }
 
 // ---------------------------------------------------------------------------
