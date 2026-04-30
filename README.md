@@ -312,6 +312,7 @@ Important `omx-dispatch/.env` values:
 ```env
 BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
+BRIDGE_REQUEST_TIMEOUT_MS=10000
 # WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
 ENABLE_CLAUDE_CHANNEL=true  # required for callback-to-CLI continuation; false only queues for polling
 MAX_NOTIFICATION_QUEUE_SIZE=200
