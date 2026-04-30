@@ -275,6 +275,7 @@ Available tools:
 | `omx_cancel_job` | Cancel a queued or running job |
 | `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
 | `omx_get_notifications` | Atomically drain all pending completion notifications from the shared webhook notification store |
+| `omx_health` | Inspect bridge reachability, job stats, and pending dispatch notifications in one response |
 | `omx_notification_stats` | Inspect pending notification count/store metadata without draining |
 
 Important `omx-dispatch/.env` values:
