@@ -1,5 +1,9 @@
 import { ConfigService } from '@nestjs/config';
-import { DEFAULT_OMX_ENV_ALLOWLIST, buildBridgeConfig } from '../../src/config/bridge-config';
+import {
+  DEFAULT_OMX_ENV_ALLOWLIST,
+  DEFAULT_REQUEST_BODY_LIMIT,
+  buildBridgeConfig,
+} from '../../src/config/bridge-config';
 
 describe('buildBridgeConfig', () => {
   const originalEnv = process.env;
@@ -15,6 +19,7 @@ describe('buildBridgeConfig', () => {
 
     expect(config).toEqual({
       host: '127.0.0.1',
+      requestBodyLimit: DEFAULT_REQUEST_BODY_LIMIT,
       jobsDirectory: '/workspace/app/.omx/state/bridge-jobs',
       omxCommand: 'omx',
       omxEnvAllowlist: DEFAULT_OMX_ENV_ALLOWLIST,
@@ -41,6 +46,7 @@ describe('buildBridgeConfig', () => {
     process.env = {
       BRIDGE_JOBS_DIR: '/tmp/custom-jobs',
       BRIDGE_HOST: 'localhost',
+      BRIDGE_REQUEST_BODY_LIMIT: '2mb',
       OMX_COMMAND: 'omx-custom',
       BRIDGE_OMX_ENV_ALLOWLIST: 'PATH,HOME,CUSTOM_ENV,PATH',
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
@@ -62,6 +68,7 @@ describe('buildBridgeConfig', () => {
 
     expect(config).toEqual({
       host: 'localhost',
+      requestBodyLimit: '2mb',
       jobsDirectory: '/tmp/custom-jobs',
       omxCommand: 'omx-custom',
       omxEnvAllowlist: ['PATH', 'HOME', 'CUSTOM_ENV'],
@@ -82,6 +89,16 @@ describe('buildBridgeConfig', () => {
       allowedCwdPrefixes: ['/home/tester/workspace', '/srv/projects'],
       claudeNotifyUrl: undefined,
     });
+  });
+
+  it('falls back to the default request body limit for invalid values', () => {
+    process.env = {
+      BRIDGE_REQUEST_BODY_LIMIT: 'not a size',
+    };
+
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
+
+    expect(config.requestBodyLimit).toBe(DEFAULT_REQUEST_BODY_LIMIT);
   });
 
   it('rejects non-loopback hosts without API token', () => {

@@ -151,6 +151,31 @@ describe('JobQueueRepository', () => {
     await expect(repository.getById(TEST_ID_3)).resolves.toMatchObject({ status: 'queued' });
   });
 
+  it('uses createdAt as the cleanup age for terminal jobs missing finishedAt', async () => {
+    await repository.save(createJob({
+      id: TEST_ID_1,
+      status: 'succeeded',
+      createdAt: '2026-04-01T00:00:00.000Z',
+      finishedAt: undefined,
+    }));
+    await repository.save(createJob({
+      id: TEST_ID_2,
+      status: 'failed',
+      createdAt: '2026-04-26T00:00:00.000Z',
+      finishedAt: undefined,
+    }));
+
+    const result = await repository.cleanupTerminalJobs({
+      retentionDays: 7,
+      maxTerminalJobs: 1000,
+      now: new Date('2026-04-27T00:00:00.000Z'),
+    });
+
+    expect(result).toEqual({ deleted: 1, retained: 1 });
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+    await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
+  });
+
   it('enforces max terminal job retention by deleting oldest terminal files', async () => {
     await repository.save(createJob({
       id: TEST_ID_1,
