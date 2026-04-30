@@ -6,6 +6,8 @@ import { JobNotifyService } from './job-notify.service';
 import type { BridgeJob, NotifyChannelResult, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
+const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
+
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -68,16 +70,14 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     for (const job of runningJobs) {
       await this.repository.save({
         ...job,
-        status: 'queued',
-        startedAt: undefined,
-        finishedAt: undefined,
+        status: 'failed',
+        finishedAt: new Date().toISOString(),
         exitCode: null,
         stdout: '',
-        stderr: job.stderr
-          ? `${job.stderr}\nRecovered after process restart`
-          : 'Recovered after process restart',
+        stderr: job.stderr ? `${job.stderr}\n${RESTART_INTERRUPTED_MESSAGE}` : RESTART_INTERRUPTED_MESSAGE,
         execution: {
           ...job.execution,
+          errorType: 'execution_error',
           recoveredFromRestart: true,
         },
       });

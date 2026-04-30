@@ -487,7 +487,7 @@ describe('JobRunnerService', () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
-  it('recovers stranded running jobs by re-queueing them', async () => {
+  it('marks stranded running jobs failed without re-queueing them', async () => {
     await repository.save(
       createJob({
         status: 'running',
@@ -506,11 +506,135 @@ describe('JobRunnerService', () => {
 
     const recovered = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(recovered).toMatchObject({
-      status: 'queued',
-      execution: { recoveredFromRestart: true },
+      status: 'failed',
+      exitCode: null,
+      stdout: '',
+      execution: {
+        errorType: 'execution_error',
+        recoveredFromRestart: true,
+      },
     });
-    expect(recovered?.startedAt).toBeUndefined();
-    expect(recovered?.stderr).toContain('Recovered after process restart');
+    expect(recovered?.startedAt).toBe('2026-04-02T00:00:03.000Z');
+    expect(recovered?.finishedAt).toBeDefined();
+    expect(Date.parse(recovered?.finishedAt ?? '')).not.toBeNaN();
+    expect(recovered?.stderr).toContain('partial stderr');
+    expect(recovered?.stderr).toContain('Process was interrupted by service restart before completion.');
+  });
+
+  it('does not modify terminal jobs during interrupted job recovery', async () => {
+    const succeeded = createJob({
+      id: '00000000-0000-4000-a000-000000000001',
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:00:05.000Z',
+      exitCode: 0,
+      stdout: 'done',
+      execution: { command: 'omx', timeoutMs: 1000, maxOutputChars: 1000, durationMs: 10 },
+    });
+    const failed = createJob({
+      id: '00000000-0000-4000-a000-000000000002',
+      status: 'failed',
+      finishedAt: '2026-04-02T00:00:06.000Z',
+      exitCode: 1,
+      stderr: 'boom',
+      execution: {
+        command: 'omx',
+        timeoutMs: 1000,
+        maxOutputChars: 1000,
+        errorType: 'non_zero_exit',
+      },
+    });
+    const cancelled = createJob({
+      id: '00000000-0000-4000-a000-000000000003',
+      status: 'cancelled',
+      finishedAt: '2026-04-02T00:00:07.000Z',
+      execution: {
+        command: 'omx',
+        timeoutMs: 1000,
+        maxOutputChars: 1000,
+        errorType: 'cancelled',
+      },
+    });
+    await repository.save(succeeded);
+    await repository.save(failed);
+    await repository.save(cancelled);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await runner.recoverInterruptedJobs();
+
+    await expect(repository.getById(succeeded.id)).resolves.toEqual(succeeded);
+    await expect(repository.getById(failed.id)).resolves.toEqual(failed);
+    await expect(repository.getById(cancelled.id)).resolves.toEqual(cancelled);
+  });
+
+  it('keeps interrupted job recovery idempotent', async () => {
+    await repository.save(
+      createJob({
+        status: 'running',
+        startedAt: '2026-04-02T00:00:03.000Z',
+      }),
+    );
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    await runner.recoverInterruptedJobs();
+    const recoveredOnce = await repository.getById('00000000-0000-4000-a000-000000000001');
+    await runner.recoverInterruptedJobs();
+    const recoveredTwice = await repository.getById('00000000-0000-4000-a000-000000000001');
+
+    expect(recoveredTwice).toEqual(recoveredOnce);
+  });
+
+  it('marks stranded running jobs failed and reconciles their notification during module initialization', async () => {
+    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+    await repository.save(
+      createJob({
+        status: 'running',
+        startedAt: '2026-04-02T00:00:03.000Z',
+      }),
+    );
+
+    try {
+      await runner.onModuleInit();
+      const recovered = await repository.getById('00000000-0000-4000-a000-000000000001');
+      expect(recovered).toMatchObject({
+        status: 'failed',
+        stdout: '',
+        execution: {
+          errorType: 'execution_error',
+          recoveredFromRestart: true,
+        },
+      });
+      await waitFor(
+        () => Promise.resolve(notifyJobComplete.mock.calls.length),
+        (callCount) => callCount === 1,
+      );
+      expect(notifyJobComplete).toHaveBeenCalledWith(expect.objectContaining({
+        id: '00000000-0000-4000-a000-000000000001',
+        status: 'failed',
+        stdout: '',
+        execution: expect.objectContaining({
+          errorType: 'execution_error',
+          recoveredFromRestart: true,
+        }),
+      }));
+    } finally {
+      await runner.onModuleDestroy();
+    }
   });
 
   it('reconciles terminal jobs with missing or failed notification outcomes', async () => {
