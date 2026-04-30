@@ -95,6 +95,12 @@ Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAY
 fetch attempt is bounded by `BRIDGE_NOTIFY_TIMEOUT_MS` (default: `5000`); this is
 separate from `BRIDGE_JOB_TIMEOUT_MS`.
 
+On startup, the runner also reconciles retained terminal jobs whose completion
+notification was never recorded, or whose latest notification attempt has no
+successful channel and at least one failed channel. Terminal jobs whose channels
+were only skipped, such as an intentionally unconfigured delivery target, are not
+retried repeatedly.
+
 For Claude mode:
 
 ```env
