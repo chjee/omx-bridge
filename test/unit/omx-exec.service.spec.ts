@@ -135,6 +135,7 @@ describe('OmxExecService', () => {
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 100 },
     );
 
     const pending = service.execute('missing');
@@ -171,24 +172,50 @@ describe('OmxExecService', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('truncates captured output when it exceeds the limit', async () => {
+  it('keeps head and tail when captured output exceeds the limit', async () => {
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
       {
-        maxOutputChars: 4,
+        maxOutputChars: 40,
       },
     );
 
     const pending = service.execute('truncate');
-    child.stdout.write('abcdef');
+    child.stdout.write('HEAD-1234567890-MIDDLE-abcdefghijklmnopqrstuvwxyz-TAIL');
     child.emit('close', 0);
 
-    await expect(pending).resolves.toMatchObject({
-      status: 'succeeded',
-      stdout: 'abcd',
-      execution: { outputTruncated: true },
-    });
+    const result = await pending;
+
+    expect(result.status).toBe('succeeded');
+    expect(result.stdout).toHaveLength(40);
+    expect(result.stdout).toContain('...[truncated ');
+    expect(result.stdout).toContain(' chars]...');
+    expect(result.stdout.startsWith('HEAD')).toBe(true);
+    expect(result.stdout.endsWith('TAIL')).toBe(true);
+    expect(result.execution.outputTruncated).toBe(true);
+  });
+
+  it('keeps the latest output tail across multiple chunks', async () => {
+    const child = new MockChildProcess();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 80 },
+    );
+
+    const pending = service.execute('streaming output');
+    child.stderr.write(`BEGIN-${'x'.repeat(60)}-MIDDLE-`);
+    child.stderr.write('error: final failure details');
+    child.emit('close', 1);
+
+    const result = await pending;
+
+    expect(result.status).toBe('failed');
+    expect(result.stderr).toHaveLength(80);
+    expect(result.stderr).toContain('...[truncated ');
+    expect(result.stderr.startsWith('BEGIN')).toBe(true);
+    expect(result.stderr).toContain('failure details');
+    expect(result.execution.outputTruncated).toBe(true);
   });
 
   it('preserves stderr chunks arriving after stdout reaches the limit', async () => {
@@ -205,7 +232,7 @@ describe('OmxExecService', () => {
 
     await expect(pending).resolves.toMatchObject({
       status: 'failed',
-      stdout: 'abcd',
+      stdout: 'cdef',
       stderr: 'ERR',
       execution: { outputTruncated: true },
     });
