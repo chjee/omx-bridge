@@ -8,6 +8,8 @@ export interface BridgeConfig {
   host: string;
   jobsDirectory: string;
   omxCommand: string;
+  /** `omx exec` 자식 프로세스에 전달할 환경 변수 이름 allowlist. */
+  omxEnvAllowlist?: string[];
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
@@ -60,6 +62,31 @@ export interface BridgeConfig {
 
 export const BRIDGE_CONFIG = Symbol('BRIDGE_CONFIG');
 
+export const DEFAULT_OMX_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'TMPDIR',
+  'CODEX_HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'SSH_AUTH_SOCK',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OMX_DEFAULT_FRONTIER_MODEL',
+  'OMX_DEFAULT_SPARK_MODEL',
+  'OMX_DEFAULT_STANDARD_MODEL',
+];
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -96,6 +123,18 @@ function parseAllowedCwdPrefixes(
   });
 
   return [...new Set(prefixes)];
+}
+
+function parseStringList(value: string | undefined, fallback: string[]): string[] {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parsed.length > 0 ? [...new Set(parsed)] : fallback;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -136,6 +175,10 @@ export function buildBridgeConfig(
       path.join(cwd, '.omx', 'state', 'bridge-jobs'),
     ),
     omxCommand: configService.get<string>('OMX_COMMAND', 'omx'),
+    omxEnvAllowlist: parseStringList(
+      configService.get<string>('BRIDGE_OMX_ENV_ALLOWLIST'),
+      DEFAULT_OMX_ENV_ALLOWLIST,
+    ),
     jobPollIntervalMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_POLL_INTERVAL_MS'),
       500,

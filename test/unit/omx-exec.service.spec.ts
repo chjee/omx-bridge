@@ -38,8 +38,11 @@ function createService(
 }
 
 describe('OmxExecService', () => {
+  const originalEnv = process.env;
+
   afterEach(() => {
     jest.useRealTimers();
+    process.env = originalEnv;
   });
 
   it('invokes omx exec and maps a successful result', async () => {
@@ -89,6 +92,43 @@ describe('OmxExecService', () => {
       exitCode: 2,
       execution: { errorType: 'non_zero_exit' },
     });
+  });
+
+  it('passes only allowlisted environment variables to omx exec', async () => {
+    process.env = {
+      PATH: '/usr/bin',
+      HOME: '/home/tester',
+      OPENAI_API_KEY: 'model-key',
+      BRIDGE_API_TOKEN: 'bridge-token',
+      BRIDGE_CALLBACK_SECRET: 'callback-secret',
+      TELEGRAM_BOT_TOKEN: 'telegram-token',
+      CUSTOM_ALLOWED: 'custom-value',
+    };
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(
+      () => child as unknown as ChildProcessWithoutNullStreams,
+    );
+    const service = createService(spawnFn, {
+      omxEnvAllowlist: ['PATH', 'HOME', 'OPENAI_API_KEY', 'CUSTOM_ALLOWED'],
+      maxOutputChars: 100,
+    });
+
+    const pending = service.execute('check env');
+    child.emit('close', 0);
+    await pending;
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      'omx',
+      ['exec', '--full-auto', '-s', 'danger-full-access', 'check env'],
+      expect.objectContaining({
+        env: {
+          PATH: '/usr/bin',
+          HOME: '/home/tester',
+          OPENAI_API_KEY: 'model-key',
+          CUSTOM_ALLOWED: 'custom-value',
+        },
+      }),
+    );
   });
 
   it('maps spawn errors into failed results', async () => {
