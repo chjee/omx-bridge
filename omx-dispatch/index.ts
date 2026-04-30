@@ -19,6 +19,7 @@ import {
   type JobNotification,
   type NotificationStats,
 } from "./notification-store.js";
+import { BridgeClient } from "./bridge-client.js";
 
 // ---------------------------------------------------------------------------
 // 설정
@@ -188,14 +189,6 @@ function clampNumber(value: number | undefined, fallback: number, min: number, m
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
-function ensureTrailingSlash(value: string): string {
-  return value.endsWith("/") ? value : `${value}/`;
-}
-
-function buildBridgeUrl(path: string): URL {
-  return new URL(path, ensureTrailingSlash(BRIDGE_URL));
-}
-
 // ---------------------------------------------------------------------------
 // Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
 //
@@ -231,79 +224,24 @@ function verifyWebhookSignature(jobId: string, rawBody: string, signature: strin
   }
 }
 
-function safeJsonParse(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-async function fetchWithTimeout(
-  url: URL,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      ...init,
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutHandle);
-  }
-}
+const bridgeClient = new BridgeClient({
+  baseUrl: BRIDGE_URL,
+  apiToken: BRIDGE_API_TOKEN,
+  timeoutMs: BRIDGE_REQUEST_TIMEOUT_MS,
+});
 
 async function requestJson<T>(
   path: string,
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
-  const response = await fetchWithTimeout(buildBridgeUrl(path), {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(BRIDGE_API_TOKEN ? { Authorization: `Bearer ${BRIDGE_API_TOKEN}` } : {}),
-      ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
-      ...(init?.headers ?? {}),
-    },
-  }, BRIDGE_REQUEST_TIMEOUT_MS);
-
-  const text = await response.text();
-  const data = text.length > 0 ? safeJsonParse(text) : null;
-
-  if (!response.ok) {
-    const details =
-      data && typeof data === "object"
-        ? JSON.stringify(data, null, 2)
-        : text || response.statusText;
-    throw new Error(`Bridge request failed (${response.status} ${response.statusText}): ${details}`);
-  }
-
-  return data as T;
+  return bridgeClient.requestJson<T>(path, init, signatureHeader);
 }
 
 function toTextResult(payload: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
   };
-}
-
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "name" in error &&
-    (error as { name?: unknown }).name === "AbortError"
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
