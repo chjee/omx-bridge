@@ -29,6 +29,7 @@ Main components:
 - `.omx/state/bridge-jobs`: default job state directory.
 
 Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
+Runtime validation steps are documented in [docs/runtime-smoke-checks.md](docs/runtime-smoke-checks.md).
 
 ## Setup
 
