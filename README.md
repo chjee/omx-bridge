@@ -140,6 +140,10 @@ variable explicitly:
 BRIDGE_OMX_ENV_ALLOWLIST=PATH,HOME,CODEX_HOME,OPENAI_API_KEY,CUSTOM_TOOL_ENV
 ```
 
+Captured stdout/stderr are bounded by `BRIDGE_MAX_OUTPUT_CHARS` per stream. When
+output exceeds the limit, the bridge keeps both the beginning and the end with a
+truncation marker in the middle so late build/test failures remain visible.
+
 `BRIDGE_HOST` defaults to `127.0.0.1`. If it is set to a non-loopback host
 such as `0.0.0.0`, startup requires both:
 
