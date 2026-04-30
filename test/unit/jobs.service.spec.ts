@@ -112,6 +112,50 @@ describe('JobsService.createJob', () => {
     }));
   });
 
+  it('returns an existing job for repeated source-scoped requestId submissions', async () => {
+    const existingJob = createJob({
+      requestId: 'req-1',
+      source: 'dispatch',
+      status: 'running',
+    });
+    const jobs = new Map([[existingJob.id, existingJob]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    const result = await service.createJob({
+      prompt: 'same request retry',
+      requestId: 'req-1',
+      source: 'dispatch',
+    });
+
+    expect(result).toBe(existingJob);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('treats the same requestId from a different source as a new job', async () => {
+    const existingJob = createJob({
+      requestId: 'req-1',
+      source: 'dispatch',
+      status: 'running',
+    });
+    const jobs = new Map([[existingJob.id, existingJob]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    const result = await service.createJob({
+      prompt: 'channel request',
+      requestId: 'req-1',
+      source: 'channel',
+    });
+
+    expect(result.id).not.toBe(existingJob.id);
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'req-1',
+      source: 'channel',
+      status: 'queued',
+    }));
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects new jobs when active job capacity is full', async () => {
     const activeJob = createJob({ status: 'queued' });
     const jobs = new Map([[activeJob.id, activeJob]]);
@@ -143,6 +187,44 @@ describe('JobsService.createJob', () => {
     );
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('JobsService.cancelJob', () => {
+  it('marks a queued job cancelled and sends completion notification', async () => {
+    const job = createJob({ status: 'queued' });
+    const jobs = new Map([[job.id, job]]);
+    const { service, jobNotify, jobRunnerService } = createService(jobs);
+
+    const result = await service.cancelJob(job.id);
+
+    expect(result.status).toBe('cancelled');
+    expect(result.stderr).toBe('Cancelled by API request');
+    expect(jobRunnerService.cancel).toHaveBeenCalledWith(job.id);
+    expect(jobNotify.notifyJobComplete).toHaveBeenCalledWith(
+      expect.objectContaining({ id: job.id, status: 'cancelled' }),
+    );
+  });
+
+  it('returns an already cancelled job without sending another notification', async () => {
+    const job = createJob({ status: 'cancelled' });
+    const jobs = new Map([[job.id, job]]);
+    const { service, jobNotify, jobRunnerService } = createService(jobs);
+
+    const result = await service.cancelJob(job.id);
+
+    expect(result).toBe(job);
+    expect(jobRunnerService.cancel).not.toHaveBeenCalled();
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+
+  it('rejects cancelling a non-cancelled terminal job', async () => {
+    const job = createJob({ status: 'succeeded' });
+    const jobs = new Map([[job.id, job]]);
+    const { service, jobNotify } = createService(jobs);
+
+    await expect(service.cancelJob(job.id)).rejects.toThrow(ConflictException);
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 });
 

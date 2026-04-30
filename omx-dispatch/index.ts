@@ -102,6 +102,16 @@ interface CreateJobResponse {
   status: JobStatus;
 }
 
+interface BridgeJobStats {
+  queuedCount: number;
+  runningCount: number;
+  activeCount: number;
+  terminalCount: number;
+  maxActiveJobs: number;
+  maxConcurrency: number;
+  oldestQueuedAgeMs: number | null;
+}
+
 interface SubmitJobInput {
   prompt: string;
   cwd?: string;
@@ -153,6 +163,16 @@ interface WaitForJobResult {
   notification: JobNotification | null;
   job: BridgeJob;
   notificationMissing?: boolean;
+}
+
+interface DispatchHealthResult {
+  bridge: {
+    reachable: boolean;
+    url: string;
+    stats?: BridgeJobStats;
+    error?: string;
+  };
+  notifications: NotificationStats;
 }
 
 interface ClaudeChannelNotification extends Notification {
@@ -804,6 +824,34 @@ async function getBridgeJob(jobId: string): Promise<BridgeJob> {
   );
 }
 
+async function getBridgeJobStats(): Promise<BridgeJobStats> {
+  return requestJson<BridgeJobStats>("jobs/stats", { method: "GET" });
+}
+
+async function getDispatchHealth(): Promise<DispatchHealthResult> {
+  const notifications = await getNotificationStats();
+  try {
+    const stats = await getBridgeJobStats();
+    return {
+      bridge: {
+        reachable: true,
+        url: BRIDGE_URL,
+        stats,
+      },
+      notifications,
+    };
+  } catch (error) {
+    return {
+      bridge: {
+        reachable: false,
+        url: BRIDGE_URL,
+        error: describeError(error),
+      },
+      notifications,
+    };
+  }
+}
+
 function resolveWaitOptions(options: WaitForJobOptions): {
   waitTimeoutMs: number;
   pollIntervalMs: number;
@@ -1298,6 +1346,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "omx_health",
+      description:
+        "Return a compact operational health summary for omx-dispatch and the local omx-bridge service, including bridge job stats and pending completion notifications.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
       name: "omx_notification_stats",
       description:
         "Inspect the shared job-completion notification store without draining it. Use this to see whether pending OMX completion notifications exist and optionally preview a bounded subset.",
@@ -1445,6 +1503,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "omx_get_notifications": {
       const pending = await drainNotifications();
       return toTextResult({ count: pending.length, notifications: pending });
+    }
+
+    case "omx_health": {
+      const result = await getDispatchHealth();
+      return toTextResult(result);
     }
 
     case "omx_notification_stats": {
