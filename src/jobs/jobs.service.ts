@@ -41,6 +41,11 @@ export class JobsService {
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
       this.assertAllowedCwd(input.cwd);
+      const existingJob = await this.findExistingRequestJob(input);
+      if (existingJob) {
+        return existingJob;
+      }
+
       const activeCount = await this.repository.countActive();
       if (activeCount >= this.config.maxActiveJobs) {
         throw new HttpException(
@@ -173,6 +178,7 @@ export class JobsService {
       },
     });
     await this.jobRunnerService.cancel(id);
+    void this.jobNotify.notifyJobComplete(savedJob);
     return savedJob;
   }
 
@@ -190,6 +196,18 @@ export class JobsService {
 
   private isTerminal(status: JobStatus): boolean {
     return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+  }
+
+  private async findExistingRequestJob(input: CreateJobDto): Promise<BridgeJob | null> {
+    if (!input.requestId) {
+      return null;
+    }
+
+    const jobs = await this.repository.listAll();
+    return jobs.find((job) =>
+      job.requestId === input.requestId &&
+      job.source === input.source
+    ) ?? null;
   }
 
   private nextQueueOrder(): string {

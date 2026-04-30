@@ -9,23 +9,31 @@
     "properties": {
       "bridgeUrl": {
         "type": "string",
-        "default": "http://localhost:3000",
+        "default": "http://localhost:3992",
         "description": "Base URL for the local omx-bridge service."
       },
       "callbackSecret": {
         "type": "string",
         "description": "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server."
+      },
+      "apiToken": {
+        "type": "string",
+        "description": "Bearer token for non-callback bridge routes. Must match BRIDGE_API_TOKEN on the server when set."
       }
     }
   },
   "uiHints": {
     "bridgeUrl": {
       "label": "Bridge URL",
-      "placeholder": "http://localhost:3000"
+      "placeholder": "http://localhost:3992"
     },
     "callbackSecret": {
       "label": "Callback Secret",
       "placeholder": "BRIDGE_CALLBACK_SECRET 값과 동일하게 설정"
+    },
+    "apiToken": {
+      "label": "API Token",
+      "placeholder": "BRIDGE_API_TOKEN 값과 동일하게 설정"
     }
   }
 }

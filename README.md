@@ -28,6 +28,9 @@ Main components:
 - `omx-bridge-plugin/`: OpenClaw plugin entry point.
 - `.omx/state/bridge-jobs`: default job state directory.
 
+Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
+Runtime validation steps are documented in [docs/runtime-smoke-checks.md](docs/runtime-smoke-checks.md).
+
 ## Setup
 
 Install dependencies:
@@ -275,6 +278,7 @@ Available tools:
 | `omx_cancel_job` | Cancel a queued or running job |
 | `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
 | `omx_get_notifications` | Atomically drain all pending completion notifications from the shared webhook notification store |
+| `omx_health` | Inspect bridge reachability, job stats, and pending dispatch notifications in one response |
 | `omx_notification_stats` | Inspect pending notification count/store metadata without draining |
 
 Important `omx-dispatch/.env` values:
@@ -367,6 +371,7 @@ cd omx-dispatch && npm run build
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are recovered to `queued` on service startup.
+- The bridge creates `.omx-bridge-instance.lock` in `BRIDGE_JOBS_DIR` on startup and refuses to run a second live instance against the same job directory. Stale lock files are recovered automatically when the recorded process is no longer alive.
 - New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
 - Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
