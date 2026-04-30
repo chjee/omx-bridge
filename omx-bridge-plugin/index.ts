@@ -7,7 +7,7 @@ import {
 } from "openclaw/plugin-sdk/plugin-entry";
 
 const PLUGIN_ID = "omx-bridge-plugin";
-const DEFAULT_BRIDGE_URL = "http://localhost:3000";
+const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 
 const pluginConfigSchema = Type.Object(

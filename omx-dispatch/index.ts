@@ -21,6 +21,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
+const SERVER_VERSION = "0.1.0";
 const BRIDGE_URL = process.env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
 const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
 // Bearer token for non-callback bridge routes. Empty string disables the
@@ -1096,7 +1097,7 @@ const serverCapabilities: ServerCapabilities = {
 };
 
 const server = new Server<Request, ClaudeChannelNotification, Result>(
-  { name: "omx-dispatch", version: "0.2.0" },
+  { name: "omx-dispatch", version: SERVER_VERSION },
   {
     capabilities: serverCapabilities,
     instructions: ENABLE_CLAUDE_CHANNEL
