@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { buildBridgeConfig } from '../../src/config/bridge-config';
+import { DEFAULT_OMX_ENV_ALLOWLIST, buildBridgeConfig } from '../../src/config/bridge-config';
 
 describe('buildBridgeConfig', () => {
   const originalEnv = process.env;
@@ -17,6 +17,7 @@ describe('buildBridgeConfig', () => {
       host: '127.0.0.1',
       jobsDirectory: '/workspace/app/.omx/state/bridge-jobs',
       omxCommand: 'omx',
+      omxEnvAllowlist: DEFAULT_OMX_ENV_ALLOWLIST,
       jobPollIntervalMs: 500,
       jobTimeoutMs: 900000,
       maxOutputChars: 32000,
@@ -41,6 +42,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_JOBS_DIR: '/tmp/custom-jobs',
       BRIDGE_HOST: 'localhost',
       OMX_COMMAND: 'omx-custom',
+      BRIDGE_OMX_ENV_ALLOWLIST: 'PATH,HOME,CUSTOM_ENV,PATH',
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
       BRIDGE_JOB_TIMEOUT_MS: '1234',
       BRIDGE_MAX_OUTPUT_CHARS: '999',
@@ -62,6 +64,7 @@ describe('buildBridgeConfig', () => {
       host: 'localhost',
       jobsDirectory: '/tmp/custom-jobs',
       omxCommand: 'omx-custom',
+      omxEnvAllowlist: ['PATH', 'HOME', 'CUSTOM_ENV'],
       jobPollIntervalMs: 250,
       jobTimeoutMs: 1234,
       maxOutputChars: 999,

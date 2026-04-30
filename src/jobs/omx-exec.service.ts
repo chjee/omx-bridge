@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import { BRIDGE_CONFIG, DEFAULT_OMX_ENV_ALLOWLIST, type BridgeConfig } from '../config/bridge-config';
 import type { JobExecutionMetadata, OmxExecutionResult, TerminalJobStatus } from './job.types';
 
 export type SpawnFunction = (
@@ -39,7 +39,7 @@ export class OmxExecService {
 
       const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', '-s', 'danger-full-access', prompt], {
         stdio: 'pipe',
-        env: process.env,
+        env: this.buildChildEnv(),
         ...(options.cwd ? { cwd: options.cwd } : {}),
       });
       child.stdin.end();
@@ -150,6 +150,18 @@ export class OmxExecService {
         }
       }
     });
+  }
+
+  private buildChildEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    const allowlist = this.config.omxEnvAllowlist ?? DEFAULT_OMX_ENV_ALLOWLIST;
+    for (const key of allowlist) {
+      const value = process.env[key];
+      if (value !== undefined) {
+        env[key] = value;
+      }
+    }
+    return env;
   }
 }
 

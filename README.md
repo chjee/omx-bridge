@@ -114,6 +114,17 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 The bridge runs requested work through `omx exec --full-auto -s danger-full-access`,
 so bind and working-directory settings are part of the safety boundary.
 
+The `omx exec` child process receives only an environment-variable allowlist,
+configured by `BRIDGE_OMX_ENV_ALLOWLIST`. By default this keeps common shell,
+Codex/OMX, XDG, SSH agent, and model-provider variables, while excluding bridge
+delivery secrets such as `BRIDGE_API_TOKEN`, `BRIDGE_CALLBACK_SECRET`,
+`TELEGRAM_BOT_TOKEN`, and `OPENCLAW_HOOKS_TOKEN`. Add any required local runtime
+variable explicitly:
+
+```env
+BRIDGE_OMX_ENV_ALLOWLIST=PATH,HOME,CODEX_HOME,OPENAI_API_KEY,CUSTOM_TOOL_ENV
+```
+
 `BRIDGE_HOST` defaults to `127.0.0.1`. If it is set to a non-loopback host
 such as `0.0.0.0`, startup requires both:
 
