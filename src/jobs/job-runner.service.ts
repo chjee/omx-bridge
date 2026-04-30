@@ -3,7 +3,7 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { JobQueueRepository } from './job-queue.repository';
 import { OmxExecService } from './omx-exec.service';
 import { JobNotifyService } from './job-notify.service';
-import type { BridgeJob, NotifyChannelResult, NotifyOutcome } from './job.types';
+import type { BridgeJob, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
@@ -193,27 +193,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private shouldReconcileNotification(outcome: NotifyOutcome | undefined): boolean {
-    if (!outcome) {
-      return true;
-    }
-
-    const channelResults = this.notifyChannelResults(outcome);
-    if (channelResults.length === 0) {
-      return true;
-    }
-    if (channelResults.some((result) => result.status === 'ok')) {
-      return false;
-    }
-    if (channelResults.some((result) => result.status === 'failed')) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private notifyChannelResults(outcome: NotifyOutcome): NotifyChannelResult[] {
-    return [outcome.claudeWebhook, outcome.openclaw, outcome.telegram]
-      .filter((result): result is NotifyChannelResult => result !== undefined);
+    return !outcome;
   }
 
   private async executeJob(job: BridgeJob): Promise<void> {
