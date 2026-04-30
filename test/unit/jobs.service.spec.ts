@@ -1,4 +1,6 @@
 import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import type { JobCallbackDto } from '../../src/jobs/dto/job-callback.dto';
@@ -228,22 +230,46 @@ describe('JobsService.createJob', () => {
   });
 
   it('accepts cwd values inside an allowed prefix', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const project = path.join(root, 'project');
+    await fs.mkdir(project);
     const { service, repository } = createService(new Map(), {
-      allowedCwdPrefixes: [path.resolve('/workspace')],
+      allowedCwdPrefixes: [root],
     });
 
-    const job = await service.createJob({ prompt: 'inside', cwd: '/workspace/project' });
+    const job = await service.createJob({ prompt: 'inside', cwd: project });
 
-    expect(job.cwd).toBe('/workspace/project');
+    await expect(fs.realpath(project)).resolves.toBe(job.cwd);
     expect(repository.save).toHaveBeenCalledTimes(1);
   });
 
   it('rejects cwd values outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-outside-'));
     const { service, repository, jobRunnerService } = createService(new Map(), {
-      allowedCwdPrefixes: [path.resolve('/workspace')],
+      allowedCwdPrefixes: [root],
     });
 
-    await expect(service.createJob({ prompt: 'outside', cwd: '/etc' })).rejects.toThrow(
+    await expect(service.createJob({ prompt: 'outside', cwd: outside })).rejects.toThrow(
+      HttpException,
+    );
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('rejects cwd symlinks that resolve outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const allowed = path.join(root, 'allowed');
+    const outside = path.join(root, 'outside');
+    const link = path.join(allowed, 'link-outside');
+    await fs.mkdir(allowed);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, link, 'dir');
+    const { service, repository, jobRunnerService } = createService(new Map(), {
+      allowedCwdPrefixes: [allowed],
+    });
+
+    await expect(service.createJob({ prompt: 'outside symlink', cwd: link })).rejects.toThrow(
       HttpException,
     );
     expect(repository.save).not.toHaveBeenCalled();

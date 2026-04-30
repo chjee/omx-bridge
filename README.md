@@ -163,7 +163,9 @@ BRIDGE_CALLBACK_SECRET=<shared-secret>
 comma-separated list; `~` expands to the service user's home directory. When
 unset, the bridge allows cwd values under the service user's home directory.
 Jobs that omit `cwd` keep the existing behavior and run from the service
-working directory.
+working directory. Provided `cwd` values must resolve via `realpath` under an
+allowed prefix; symlinks that point outside the allowed tree are rejected at
+submission time and again immediately before `omx exec` starts.
 
 ```env
 BRIDGE_ALLOWED_CWD_PREFIXES=~/workspace,/srv/projects

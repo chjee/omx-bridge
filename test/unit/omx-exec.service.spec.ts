@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { BridgeConfig } from '../../src/config/bridge-config';
@@ -129,6 +132,51 @@ describe('OmxExecService', () => {
         },
       }),
     );
+  });
+
+  it('passes a realpath-normalized cwd when it is inside an allowed prefix', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
+    const project = path.join(root, 'project');
+    await fs.mkdir(project);
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = createService(spawnFn, {
+      allowedCwdPrefixes: [root],
+      maxOutputChars: 100,
+    });
+
+    await service.execute('with cwd', { cwd: project });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      'omx',
+      ['exec', '--full-auto', '-s', 'danger-full-access', 'with cwd'],
+      expect.objectContaining({ cwd: await fs.realpath(project) }),
+    );
+  });
+
+  it('fails without spawning when cwd resolves outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
+    const allowed = path.join(root, 'allowed');
+    const outside = path.join(root, 'outside');
+    const link = path.join(allowed, 'link-outside');
+    await fs.mkdir(allowed);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, link, 'dir');
+    const spawnFn = jest.fn();
+    const service = createService(spawnFn as unknown as SpawnFunction, {
+      allowedCwdPrefixes: [allowed],
+    });
+
+    await expect(service.execute('blocked cwd', { cwd: link })).resolves.toMatchObject({
+      status: 'failed',
+      stderr: `cwd is outside allowed prefixes: ${link}`,
+      exitCode: null,
+      execution: { errorType: 'invalid_cwd' },
+    });
+    expect(spawnFn).not.toHaveBeenCalled();
   });
 
   it('maps spawn errors into failed results', async () => {
