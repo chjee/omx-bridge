@@ -8,6 +8,8 @@
     "./bridge-client.test.ts",
     "./notification-store.ts",
     "./notification-store.test.ts",
+    "./tool-handlers.ts",
+    "./tool-handlers.test.ts",
     "./webhook-server.ts",
     "./webhook-server.test.ts"
   ]

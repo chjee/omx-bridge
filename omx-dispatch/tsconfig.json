@@ -17,6 +17,7 @@
     "./bridge-client.ts",
     "./index.ts",
     "./notification-store.ts",
+    "./tool-handlers.ts",
     "./webhook-server.ts"
   ]
 }
