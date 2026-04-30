@@ -476,6 +476,43 @@ describe('JobsService.triggerNotifyRetry', () => {
     expect(result).toEqual(updatedJob);
   });
 
+  it('manually retries notify for terminal jobs with failed notification outcomes', async () => {
+    const failedOutcome = {
+      attemptedAt: '2026-04-23T00:00:01.000Z',
+      mode: 'claude' as const,
+      claudeWebhook: { status: 'failed' as const, error: 'fetch_error' },
+      attemptIndex: 0,
+    };
+    const manualOutcome = {
+      attemptedAt: '2026-04-23T00:00:02.000Z',
+      mode: 'claude' as const,
+      trigger: 'manual' as const,
+      claudeWebhook: { status: 'ok' as const },
+      attemptIndex: 1,
+    };
+    const job = createJob({
+      status: 'failed',
+      notifyOutcome: failedOutcome,
+      notifyHistory: [failedOutcome],
+    });
+    const updatedJob = createJob({
+      status: 'failed',
+      notifyOutcome: manualOutcome,
+      notifyHistory: [failedOutcome, manualOutcome],
+    });
+    const jobs = new Map([[job.id, job]]);
+    const { service, repository, jobNotify } = createService(jobs);
+    (jobNotify.notifyJobComplete as jest.Mock).mockImplementation(async () => {
+      await repository.save(updatedJob);
+    });
+
+    const result = await service.triggerNotifyRetry(job.id);
+
+    expect(jobNotify.notifyJobComplete).toHaveBeenCalledWith(job, { trigger: 'manual' });
+    expect(result.notifyOutcome).toEqual(manualOutcome);
+    expect(result.notifyHistory).toEqual([failedOutcome, manualOutcome]);
+  });
+
   it('rejects manual notify retry for non-terminal jobs', async () => {
     const job = createJob({ status: 'queued' });
     const jobs = new Map([[job.id, job]]);

@@ -14,7 +14,23 @@ If `BRIDGE_API_TOKEN` is configured, keep it in the shell for authenticated chec
 export BRIDGE_API_TOKEN="<token from omx-bridge .env>"
 ```
 
-## 1. Build Artifacts
+## 1. Automated Verification
+
+Run the aggregate verification script before manual runtime smoke checks:
+
+```bash
+npm run verify
+```
+
+This covers:
+
+- root bridge tests and build
+- `omx-dispatch` typecheck, build, and tests
+- `omx-bridge-plugin` typecheck and build
+
+`omx-bridge-plugin` does not currently define a `test` script, so plugin tests are not part of the aggregate command.
+
+## 2. Build Artifacts
 
 Run all build surfaces that may be launched at runtime:
 
@@ -24,7 +40,7 @@ cd omx-dispatch && npm run build
 cd ../omx-bridge-plugin && npm run build
 ```
 
-## 2. Bridge Service
+## 3. Bridge Service
 
 For the user service:
 
@@ -48,7 +64,7 @@ find .omx/state/bridge-jobs -maxdepth 1 -name '.omx-bridge-instance.lock' -print
 
 If a second bridge instance points at the same `BRIDGE_JOBS_DIR`, it should fail fast instead of competing for jobs.
 
-## 3. Bridge API
+## 4. Bridge API
 
 Stats should be reachable:
 
@@ -109,7 +125,7 @@ curl -sS -X POST "$BRIDGE_URL/jobs/$CANCEL_JOB_ID/cancel" \
 
 Expected: terminal `status` is `cancelled`, and `notifyOutcome` appears after notification persistence.
 
-## 4. Dispatch MCP
+## 5. Dispatch MCP
 
 From a Claude Code session with `omx-dispatch` loaded, run:
 
@@ -153,7 +169,7 @@ Drain only when you intentionally want to consume queued notifications:
 omx_get_notifications({})
 ```
 
-## 5. OpenClaw Plugin
+## 6. OpenClaw Plugin
 
 Confirm plugin config uses the bridge's runtime port:
 
@@ -196,7 +212,7 @@ Submit a small OpenClaw-side job and verify:
 - bridge receives the job
 - completion notification reaches the configured OpenClaw hook or Telegram path when enabled
 
-## 6. Routing Sanity
+## 7. Routing Sanity
 
 Before testing broker-owned routing, re-check the contract:
 
@@ -213,7 +229,7 @@ Expected source behavior:
 
 Do not validate channel routing by adding direct Telegram fallback in the bridge. The broker should receive the completion payload and route it.
 
-## 7. Failure Triage
+## 8. Failure Triage
 
 If a job is terminal but the caller did not wake up:
 
@@ -229,7 +245,7 @@ curl -sS "$BRIDGE_URL/jobs/<job id>" \
 4. If a notification is pending and should be consumed, run `omx_wait_for_job` for the specific job or `omx_get_notifications` for all pending notifications.
 5. Check bridge logs with `journalctl --user -u omx-bridge -n 120 --no-pager`.
 
-## 8. Completion Criteria
+## 9. Completion Criteria
 
 A runtime smoke pass is complete when:
 
@@ -241,4 +257,3 @@ A runtime smoke pass is complete when:
 - dispatch submit-and-wait completes
 - OpenClaw plugin config points at `http://localhost:3992`
 - no unexpected duplicate bridge process is running against the same job directory
-

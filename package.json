@@ -14,7 +14,11 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:unit": "jest --runInBand test/unit",
-    "test:e2e": "jest --runInBand --testPathPatterns=test/.*\\.e2e-spec\\.ts$"
+    "test:e2e": "jest --runInBand --testPathPatterns=test/.*\\.e2e-spec\\.ts$",
+    "verify": "npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
+    "verify:root": "npm test && npm run build",
+    "verify:dispatch": "npm --prefix omx-dispatch run typecheck && npm --prefix omx-dispatch run build && npm --prefix omx-dispatch test",
+    "verify:plugin": "npm --prefix omx-bridge-plugin run typecheck && npm --prefix omx-bridge-plugin run build"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",
