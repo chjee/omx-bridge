@@ -28,6 +28,8 @@ Main components:
 - `omx-bridge-plugin/`: OpenClaw plugin entry point.
 - `.omx/state/bridge-jobs`: default job state directory.
 
+Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
+
 ## Setup
 
 Install dependencies:
