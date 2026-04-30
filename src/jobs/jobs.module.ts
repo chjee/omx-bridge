@@ -9,6 +9,7 @@ import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
 import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
 import { JobNotifyService } from './job-notify.service';
+import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
 @Module({
   controllers: [JobsController],
@@ -26,6 +27,7 @@ import { JobNotifyService } from './job-notify.service';
     JobsService,
     OmxExecService,
     JobRunnerService,
+    BridgeInstanceLockService,
     ApiTokenGuard,
     CallbackAuthGuard,
     JobNotifyService,
