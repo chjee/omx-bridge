@@ -14,6 +14,7 @@
     "outDir": "./dist"
   },
   "include": [
-    "./index.ts"
+    "./index.ts",
+    "./notification-store.ts"
   ]
 }
