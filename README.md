@@ -72,6 +72,15 @@ OMX_COMMAND=omx
 NOTIFY_MODE=openclaw
 ```
 
+Idempotent submissions:
+
+- `requestId` is scoped by `source`. Repeating the same `source + requestId`
+  with the same payload returns the existing job instead of creating another one.
+- When `requestId` is present, the bridge stores a request fingerprint over the
+  routing-sensitive payload (`prompt`, `cwd`, `notifyUrl`, `originRoutingKey`,
+  `source`, `sourceName`, and stable `metadata`). Reusing the same `source +
+  requestId` with a different payload is rejected with `409 Conflict`.
+
 Notification modes:
 
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.

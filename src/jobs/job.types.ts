@@ -46,6 +46,7 @@ export interface BridgeJob {
   cwd?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   originRoutingKey?: string;
   source?: JobSource;
   sourceName?: string;

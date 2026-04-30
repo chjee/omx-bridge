@@ -92,6 +92,23 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
+  it('stores a request fingerprint when requestId is provided', async () => {
+    const { service, repository } = createService();
+
+    const job = await service.createJob({
+      prompt: 'fingerprinted',
+      requestId: 'req-fingerprint',
+      source: 'dispatch',
+      metadata: { nested: { b: 2, a: 1 } },
+    });
+
+    expect(job.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'req-fingerprint',
+      requestFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
+  });
+
   it('preserves channel sourceName on queued jobs', async () => {
     const { service, repository } = createService();
 
@@ -114,6 +131,7 @@ describe('JobsService.createJob', () => {
 
   it('returns an existing job for repeated source-scoped requestId submissions', async () => {
     const existingJob = createJob({
+      prompt: 'same request retry',
       requestId: 'req-1',
       source: 'dispatch',
       status: 'running',
@@ -130,6 +148,49 @@ describe('JobsService.createJob', () => {
     expect(result).toBe(existingJob);
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('treats metadata key order as the same request fingerprint', async () => {
+    const jobs = new Map<string, BridgeJob>();
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    const first = await service.createJob({
+      prompt: 'same metadata',
+      requestId: 'req-stable',
+      source: 'dispatch',
+      metadata: { b: 2, a: { y: true, x: false } },
+    });
+    const second = await service.createJob({
+      prompt: 'same metadata',
+      requestId: 'req-stable',
+      source: 'dispatch',
+      metadata: { a: { x: false, y: true }, b: 2 },
+    });
+
+    expect(second).toBe(first);
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects repeated source-scoped requestId submissions with a different payload', async () => {
+    const jobs = new Map<string, BridgeJob>();
+    const { service, repository, jobRunnerService } = createService(jobs);
+    await service.createJob({
+      prompt: 'original prompt',
+      requestId: 'req-conflict',
+      source: 'dispatch',
+      notifyUrl: 'http://127.0.0.1:12000/notify',
+    });
+
+    await expect(service.createJob({
+      prompt: 'changed prompt',
+      requestId: 'req-conflict',
+      source: 'dispatch',
+      notifyUrl: 'http://127.0.0.1:12000/notify',
+    })).rejects.toThrow(ConflictException);
+
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
   it('treats the same requestId from a different source as a new job', async () => {

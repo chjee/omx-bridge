@@ -6,7 +6,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import type { CreateJobDto } from './dto/create-job.dto';
@@ -41,8 +41,10 @@ export class JobsService {
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
       this.assertAllowedCwd(input.cwd);
+      const requestFingerprint = this.buildRequestFingerprint(input);
       const existingJob = await this.findExistingRequestJob(input);
       if (existingJob) {
+        this.assertRequestFingerprintMatches(existingJob, requestFingerprint);
         return existingJob;
       }
 
@@ -60,6 +62,7 @@ export class JobsService {
         cwd: input.cwd,
         queueOrder: this.nextQueueOrder(),
         requestId: input.requestId,
+        requestFingerprint,
         originRoutingKey: input.originRoutingKey,
         source: input.source,
         sourceName: input.sourceName,
@@ -208,6 +211,68 @@ export class JobsService {
       job.requestId === input.requestId &&
       job.source === input.source
     ) ?? null;
+  }
+
+  private buildRequestFingerprint(input: CreateJobDto): string | undefined {
+    if (!input.requestId) {
+      return undefined;
+    }
+
+    return this.hashStableJson({
+      prompt: input.prompt,
+      cwd: input.cwd,
+      notifyUrl: input.notifyUrl,
+      originRoutingKey: input.originRoutingKey,
+      source: input.source,
+      sourceName: input.sourceName,
+      metadata: input.metadata,
+    });
+  }
+
+  private assertRequestFingerprintMatches(
+    existingJob: BridgeJob,
+    incomingFingerprint: string | undefined,
+  ): void {
+    if (!existingJob.requestId || !incomingFingerprint) {
+      return;
+    }
+
+    const existingFingerprint = existingJob.requestFingerprint ?? this.hashStableJson({
+      prompt: existingJob.prompt,
+      cwd: existingJob.cwd,
+      notifyUrl: existingJob.notifyUrl,
+      originRoutingKey: existingJob.originRoutingKey,
+      source: existingJob.source,
+      sourceName: existingJob.sourceName,
+      metadata: existingJob.metadata,
+    });
+    if (existingFingerprint !== incomingFingerprint) {
+      throw new ConflictException(
+        `requestId ${existingJob.requestId} for source ${existingJob.source ?? 'default'} ` +
+          'already belongs to a different job payload',
+      );
+    }
+  }
+
+  private hashStableJson(value: unknown): string {
+    return createHash('sha256')
+      .update(this.stableStringify(value))
+      .digest('hex');
+  }
+
+  private stableStringify(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableStringify(item)).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      const entries = Object.keys(record)
+        .filter((key) => record[key] !== undefined)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${this.stableStringify(record[key])}`);
+      return `{${entries.join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'null';
   }
 
   private nextQueueOrder(): string {
