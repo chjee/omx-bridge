@@ -1,9 +1,10 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { JobQueueRepository } from './job-queue.repository';
 import { OmxExecService } from './omx-exec.service';
 import { JobNotifyService } from './job-notify.service';
 import type { BridgeJob } from './job.types';
+import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -21,10 +22,12 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     private readonly omxExecService: OmxExecService,
     private readonly jobNotify: JobNotifyService,
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
+    @Optional() private readonly instanceLock?: BridgeInstanceLockService,
   ) {}
 
   async onModuleInit(): Promise<void> {
     this.shuttingDown = false;
+    await this.instanceLock?.acquire();
     await this.repository.ensureReady();
     await this.recoverInterruptedJobs();
     await this.cleanupTerminalJobs();
@@ -52,6 +55,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     await this.waitForInFlightRuns();
     this.abortControllers.clear();
+    await this.instanceLock?.release();
   }
 
   async recoverInterruptedJobs(): Promise<void> {

@@ -368,6 +368,7 @@ cd omx-dispatch && npm run build
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are recovered to `queued` on service startup.
+- The bridge creates `.omx-bridge-instance.lock` in `BRIDGE_JOBS_DIR` on startup and refuses to run a second live instance against the same job directory. Stale lock files are recovered automatically when the recorded process is no longer alive.
 - New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
 - Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
