@@ -18,6 +18,7 @@
     "./index.ts",
     "./job-operations.ts",
     "./notification-store.ts",
+    "./runtime-config.ts",
     "./tool-handlers.ts",
     "./webhook-codec.ts",
     "./webhook-server.ts"
