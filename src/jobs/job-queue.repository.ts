@@ -6,6 +6,17 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { JOB_STATUSES, type BridgeJob, type JobStatus } from './job.types';
 
 const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
+const JOB_SOURCES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
+const EXECUTION_ERROR_TYPES = [
+  'spawn_error',
+  'timeout',
+  'non_zero_exit',
+  'cancelled',
+  'execution_error',
+] as const;
+const NOTIFY_MODES = ['openclaw', 'claude'] as const;
+const NOTIFY_TRIGGERS = ['auto', 'manual'] as const;
+const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
 
 export interface CleanupTerminalJobsOptions {
   retentionDays: number;
@@ -189,16 +200,80 @@ export class JobQueueRepository {
       value.id === jobId &&
       typeof value.prompt === 'string' &&
       (value.queueOrder === undefined || typeof value.queueOrder === 'string') &&
+      (value.cwd === undefined || typeof value.cwd === 'string') &&
+      (value.requestId === undefined || typeof value.requestId === 'string') &&
+      (value.requestFingerprint === undefined || typeof value.requestFingerprint === 'string') &&
+      (value.originRoutingKey === undefined || typeof value.originRoutingKey === 'string') &&
+      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCES)) &&
+      (value.sourceName === undefined || typeof value.sourceName === 'string') &&
+      (value.metadata === undefined || this.isRecord(value.metadata)) &&
+      (value.notifyUrl === undefined || typeof value.notifyUrl === 'string') &&
       typeof value.createdAt === 'string' &&
+      (value.startedAt === undefined || typeof value.startedAt === 'string') &&
+      (value.finishedAt === undefined || typeof value.finishedAt === 'string') &&
+      (value.exitCode === undefined || value.exitCode === null || typeof value.exitCode === 'number') &&
       typeof value.stdout === 'string' &&
       typeof value.stderr === 'string' &&
       typeof value.status === 'string' &&
       JOB_STATUSES.includes(value.status as JobStatus) &&
-      this.isRecord(execution) &&
-      typeof execution.command === 'string' &&
-      typeof execution.timeoutMs === 'number' &&
-      typeof execution.maxOutputChars === 'number'
+      this.isExecutionMetadata(execution) &&
+      (value.notifyOutcome === undefined || this.isNotifyOutcome(value.notifyOutcome)) &&
+      (
+        value.notifyHistory === undefined ||
+        (Array.isArray(value.notifyHistory) && value.notifyHistory.every((entry) => this.isNotifyOutcome(entry)))
+      )
     );
+  }
+
+  private isExecutionMetadata(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      typeof value.command === 'string' &&
+      typeof value.timeoutMs === 'number' &&
+      typeof value.maxOutputChars === 'number' &&
+      (value.durationMs === undefined || typeof value.durationMs === 'number') &&
+      (value.timedOut === undefined || typeof value.timedOut === 'boolean') &&
+      (value.outputTruncated === undefined || typeof value.outputTruncated === 'boolean') &&
+      (value.errorType === undefined || this.isOneOf(value.errorType, EXECUTION_ERROR_TYPES)) &&
+      (value.recoveredFromRestart === undefined || typeof value.recoveredFromRestart === 'boolean')
+    );
+  }
+
+  private isNotifyOutcome(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      typeof value.attemptedAt === 'string' &&
+      this.isOneOf(value.mode, NOTIFY_MODES) &&
+      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGERS)) &&
+      (value.attemptIndex === undefined || typeof value.attemptIndex === 'number') &&
+      (value.claudeWebhook === undefined || this.isNotifyChannelResult(value.claudeWebhook)) &&
+      (value.openclaw === undefined || this.isNotifyChannelResult(value.openclaw)) &&
+      (value.telegram === undefined || this.isNotifyChannelResult(value.telegram))
+    );
+  }
+
+  private isNotifyChannelResult(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      this.isOneOf(value.status, NOTIFY_CHANNEL_STATUSES) &&
+      (value.error === undefined || typeof value.error === 'string') &&
+      (value.httpStatus === undefined || typeof value.httpStatus === 'number') &&
+      (value.attempts === undefined || typeof value.attempts === 'number') &&
+      (value.skippedReason === undefined || typeof value.skippedReason === 'string')
+    );
+  }
+
+  private isOneOf<const T extends readonly unknown[]>(value: unknown, values: T): value is T[number] {
+    return values.includes(value);
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

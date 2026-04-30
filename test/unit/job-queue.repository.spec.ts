@@ -94,6 +94,57 @@ describe('JobQueueRepository', () => {
     await expect(repository.getById(job.id)).resolves.toEqual(updated);
   });
 
+  it('reads jobs with validated optional persisted fields', async () => {
+    const job = createJob({
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:01:00.000Z',
+      exitCode: 0,
+      execution: {
+        command: 'omx',
+        timeoutMs: 1000,
+        maxOutputChars: 500,
+        durationMs: 250,
+        timedOut: false,
+        outputTruncated: true,
+        errorType: 'non_zero_exit',
+        recoveredFromRestart: false,
+      },
+    });
+    const persisted: BridgeJob = {
+      ...job,
+      cwd: '/workspace/app',
+      requestId: 'req-1',
+      requestFingerprint: 'fingerprint',
+      originRoutingKey: 'telegram:direct:123',
+      source: 'dispatch',
+      sourceName: 'omx-dispatch',
+      metadata: { source: 'dispatch' },
+      notifyUrl: 'http://127.0.0.1:3993/notify',
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:01:01.000Z',
+        mode: 'claude',
+        trigger: 'manual',
+        attemptIndex: 0,
+        claudeWebhook: { status: 'failed', error: 'http_500', httpStatus: 500, attempts: 1 },
+        telegram: { status: 'skipped', skippedReason: 'per_job_webhook_failed' },
+      },
+      notifyHistory: [
+        {
+          attemptedAt: '2026-04-02T00:01:01.000Z',
+          mode: 'claude',
+          trigger: 'manual',
+          attemptIndex: 0,
+          claudeWebhook: { status: 'failed', error: 'http_500', httpStatus: 500, attempts: 1 },
+          telegram: { status: 'skipped', skippedReason: 'per_job_webhook_failed' },
+        },
+      ],
+    };
+
+    await repository.save(persisted);
+
+    await expect(repository.getById(job.id)).resolves.toEqual(persisted);
+  });
+
   it('lists queued jobs in deterministic FIFO order', async () => {
     await repository.save(
       createJob({ id: TEST_ID_2, createdAt: '2026-04-02T00:00:02.000Z' }),
@@ -237,5 +288,65 @@ describe('JobQueueRepository', () => {
         now: new Date('2026-04-27T00:00:00.000Z'),
       }),
     ).resolves.toEqual({ deleted: 0, retained: 0 });
+  });
+
+  it.each([
+    ['invalid exitCode', { exitCode: '0' }],
+    ['invalid source', { source: 'unknown' }],
+    ['invalid metadata', { metadata: ['not', 'a', 'record'] }],
+    ['invalid execution errorType', { execution: { errorType: 'unknown_error' } }],
+    ['invalid execution durationMs', { execution: { durationMs: '250' } }],
+    ['invalid notifyOutcome mode', { notifyOutcome: { mode: 'slack' } }],
+    ['invalid notifyHistory entry', { notifyHistory: [{ mode: 'claude' }] }],
+    ['invalid notify channel status', {
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:01:01.000Z',
+        mode: 'claude',
+        telegram: { status: 'sent' },
+      },
+    }],
+  ])('skips job files with %s', async (_label, patch) => {
+    const job: Record<string, unknown> = {
+      ...createJob({
+        id: TEST_ID_1,
+        status: 'succeeded',
+        finishedAt: '2026-04-02T00:01:00.000Z',
+        exitCode: 0,
+        execution: {
+          command: 'omx',
+          timeoutMs: 1000,
+          maxOutputChars: 500,
+          durationMs: 250,
+          errorType: 'non_zero_exit',
+        },
+      }),
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:01:01.000Z',
+        mode: 'claude',
+        telegram: { status: 'ok' },
+      },
+    };
+    const patchRecord = patch as Record<string, unknown>;
+    const patchExecution = patchRecord.execution;
+    const invalidJob = {
+      ...job,
+      ...patch,
+      execution: {
+        ...(job.execution as Record<string, unknown>),
+        ...(
+          typeof patchExecution === 'object' && patchExecution !== null && !Array.isArray(patchExecution)
+            ? patchExecution as Record<string, unknown>
+            : {}
+        ),
+      },
+    };
+
+    await fs.writeFile(
+      path.join(jobsDirectory, `${TEST_ID_1}.json`),
+      `${JSON.stringify(invalidJob)}\n`,
+      'utf8',
+    );
+
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
   });
 });
