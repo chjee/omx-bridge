@@ -492,6 +492,12 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
       },
     });
 
+    await waitFor(
+      () => controller.getJob(jobId),
+      (currentJob) => currentJob.notifyOutcome !== undefined,
+      5_000,
+    );
+
     const trace = await fs.readFile(traceFile, 'utf8');
     expect(trace.trim().split(os.EOL)).toEqual([
       'omx:Andy asks Codex for bridge verification',
