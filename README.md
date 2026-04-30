@@ -38,6 +38,7 @@ Install dependencies:
 ```bash
 npm install
 cd omx-dispatch && npm install
+cd ../omx-bridge-plugin && npm ci
 ```
 
 Create local env files from the examples:
@@ -53,11 +54,12 @@ Run the bridge service in development:
 npm run start:dev
 ```
 
-Build both packages:
+Build all packages:
 
 ```bash
 npm run build
 cd omx-dispatch && npm run build
+cd ../omx-bridge-plugin && npm run build
 ```
 
 ## Bridge Service Configuration
