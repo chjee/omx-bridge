@@ -257,18 +257,22 @@ describe('JobQueueRepository', () => {
   });
 
   it('handles malformed job files predictably', async () => {
-    // 파일 이름에 UUID가 아닌 값은 getById에서 BadRequestException이 발생함
-    // listAll()은 파일명에서 직접 jobId를 추출하므로 UUID 검증 없이 파싱 시도
     const brokenId = '11111111-1111-4111-b111-111111111111';
-    await fs.writeFile(path.join(jobsDirectory, `${brokenId}.json`), '{not-json', 'utf8');
+    const brokenPath = path.join(jobsDirectory, `${brokenId}.json`);
+    await fs.writeFile(brokenPath, '{not-json', 'utf8');
 
     await expect(repository.getById(brokenId)).resolves.toBeNull();
+    await expect(fs.stat(brokenPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const invalidEntries = await fs.readdir(path.join(jobsDirectory, 'invalid'));
+    expect(invalidEntries).toHaveLength(1);
+    expect(invalidEntries[0]).toMatch(new RegExp(`^${brokenId}\\.malformed\\..+\\.json$`));
     await expect(repository.listAll()).resolves.toEqual([]);
   });
 
   it('skips structurally invalid job files without breaking cleanup', async () => {
+    const invalidPath = path.join(jobsDirectory, `${TEST_ID_1}.json`);
     await fs.writeFile(
-      path.join(jobsDirectory, `${TEST_ID_1}.json`),
+      invalidPath,
       `${JSON.stringify({
         ...createJob({
           id: 'not-a-job-id',
@@ -280,6 +284,10 @@ describe('JobQueueRepository', () => {
     );
 
     await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+    await expect(fs.stat(invalidPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const invalidEntries = await fs.readdir(path.join(jobsDirectory, 'invalid'));
+    expect(invalidEntries).toHaveLength(1);
+    expect(invalidEntries[0]).toMatch(new RegExp(`^${TEST_ID_1}\\.invalid\\..+\\.json$`));
     await expect(repository.listAll()).resolves.toEqual([]);
     await expect(
       repository.cleanupTerminalJobs({
@@ -288,6 +296,26 @@ describe('JobQueueRepository', () => {
         now: new Date('2026-04-27T00:00:00.000Z'),
       }),
     ).resolves.toEqual({ deleted: 0, retained: 0 });
+  });
+
+  it('continues skipping invalid job files when quarantine fails', async () => {
+    const invalidPath = path.join(jobsDirectory, `${TEST_ID_1}.json`);
+    await fs.writeFile(
+      invalidPath,
+      `${JSON.stringify({ ...createJob({ id: 'not-a-job-id' }) })}\n`,
+      'utf8',
+    );
+    const renameSpy = jest
+      .spyOn(fs, 'rename')
+      .mockRejectedValueOnce(new Error('quarantine failed'));
+
+    try {
+      await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+      await expect(fs.stat(invalidPath)).resolves.toBeDefined();
+      await expect(repository.listAll()).resolves.toEqual([]);
+    } finally {
+      renameSpy.mockRestore();
+    }
   });
 
   it.each([

@@ -17,6 +17,7 @@ const EXECUTION_ERROR_TYPES = [
 const NOTIFY_MODES = ['openclaw', 'claude'] as const;
 const NOTIFY_TRIGGERS = ['auto', 'manual'] as const;
 const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
+const INVALID_JOBS_DIRECTORY = 'invalid';
 
 export interface CleanupTerminalJobsOptions {
   retentionDays: number;
@@ -47,9 +48,10 @@ export class JobQueueRepository {
   }
 
   async getById(id: string): Promise<BridgeJob | null> {
+    const jobPath = this.jobPath(id);
     try {
-      const raw = await fs.readFile(this.jobPath(id), 'utf8');
-      return this.parseJob(raw, id);
+      const raw = await fs.readFile(jobPath, 'utf8');
+      return await this.parseJob(raw, id, jobPath);
     } catch (error) {
       if (this.isMissingFile(error)) {
         return null;
@@ -66,9 +68,10 @@ export class JobQueueRepository {
         .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
         .map(async (entry) => {
           const jobId = entry.name.replace(/\.json$/, '');
+          const filePath = path.join(this.config.jobsDirectory, entry.name);
           try {
-            const raw = await fs.readFile(this.jobPath(jobId), 'utf8');
-            return this.parseJob(raw, jobId);
+            const raw = await fs.readFile(filePath, 'utf8');
+            return await this.parseJob(raw, jobId, filePath);
           } catch (error) {
             this.logger.warn(
               `Skipping unreadable job file ${entry.name}: ${this.describeError(error)}`,
@@ -153,11 +156,12 @@ export class JobQueueRepository {
     await fs.rename(tempPath, targetPath);
   }
 
-  private parseJob(raw: string, jobId: string): BridgeJob | null {
+  private async parseJob(raw: string, jobId: string, filePath: string): Promise<BridgeJob | null> {
     try {
       const parsed = JSON.parse(raw) as unknown;
       if (!this.isBridgeJob(parsed, jobId)) {
         this.logger.warn(`Skipping invalid job file for ${jobId}`);
+        await this.quarantineInvalidJobFile(filePath, jobId, 'invalid');
         return null;
       }
       return parsed;
@@ -165,7 +169,31 @@ export class JobQueueRepository {
       this.logger.warn(
         `Skipping malformed job file for ${jobId}: ${this.describeError(error)}`,
       );
+      await this.quarantineInvalidJobFile(filePath, jobId, 'malformed');
       return null;
+    }
+  }
+
+  private async quarantineInvalidJobFile(
+    filePath: string,
+    jobId: string,
+    reason: 'invalid' | 'malformed',
+  ): Promise<void> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const quarantineDir = path.join(this.config.jobsDirectory, INVALID_JOBS_DIRECTORY);
+    const quarantinePath = path.join(quarantineDir, `${jobId}.${reason}.${stamp}.json`);
+
+    try {
+      await fs.mkdir(quarantineDir, { recursive: true });
+      await fs.rename(filePath, quarantinePath);
+      this.logger.warn(`Quarantined ${reason} job file for ${jobId} at ${quarantinePath}`);
+    } catch (error) {
+      if (this.isMissingFile(error)) {
+        return;
+      }
+      this.logger.warn(
+        `Failed to quarantine ${reason} job file for ${jobId}: ${this.describeError(error)}`,
+      );
     }
   }
 
