@@ -212,11 +212,11 @@ export class JobQueueRepository {
   }
 
   private terminalSortKey(job: BridgeJob): string {
-    return `${job.finishedAt ?? job.createdAt}:${job.queueOrder ?? ''}:${job.id}`;
+    return `${job.finishedAt || job.createdAt}:${job.queueOrder ?? ''}:${job.id}`;
   }
 
   private terminalTimestampMs(job: BridgeJob): number {
-    return Date.parse(job.finishedAt ?? job.createdAt);
+    return Date.parse(job.finishedAt || job.createdAt);
   }
 
   private isBridgeJob(value: unknown, jobId: string): value is BridgeJob {
