@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { createHmac, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -24,11 +23,16 @@ import {
   createDispatchToolHandlers,
   JOB_STATUS_VALUES,
   type BridgeJob,
-  type BridgeJobExecution,
-  type JobSource,
   type JobStatus,
 } from "./tool-handlers.js";
 import { JobOperations } from "./job-operations.js";
+import {
+  buildCallbackSignatureHeader,
+  extractWebhookJobId,
+  normalizeNotification,
+  normalizeWebhookJob,
+  verifyWebhookSignature,
+} from "./webhook-codec.js";
 
 // ---------------------------------------------------------------------------
 // 설정
@@ -103,134 +107,11 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-// ---------------------------------------------------------------------------
-// Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
-//
-// All three implementations must stay byte-for-byte equivalent:
-//   - src/jobs/callback-signature.ts        (server, source of truth)
-//   - omx-dispatch/index.ts                 (this file)
-//   - omx-bridge-plugin/index.ts
-//
-// Protocol contract:
-//   header  = X-Callback-Signature
-//   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
-//
-// If you change anything here, update the other two and the vectors in
-// test/unit/callback-signature.spec.ts in the same change.
-// ---------------------------------------------------------------------------
-function buildCallbackSignatureHeader(jobId: string, body: string): string {
-  const message = `${jobId}:${body}`;
-  const hex = createHmac("sha256", BRIDGE_CALLBACK_SECRET).update(message).digest("hex");
-  return `sha256=${hex}`;
-}
-
-function verifyWebhookSignature(jobId: string, rawBody: string, signature: string): boolean {
-  if (!BRIDGE_CALLBACK_SECRET) return true; // secret 미설정 시 검증 생략
-  if (!signature.startsWith("sha256=")) return false;
-  const expected = buildCallbackSignatureHeader(jobId, rawBody);
-  try {
-    return timingSafeEqual(
-      Buffer.from(expected.slice("sha256=".length), "hex"),
-      Buffer.from(signature.slice("sha256=".length), "hex"),
-    );
-  } catch {
-    return false;
-  }
-}
-
 const bridgeClient = new BridgeClient({
   baseUrl: BRIDGE_URL,
   apiToken: BRIDGE_API_TOKEN,
   timeoutMs: BRIDGE_REQUEST_TIMEOUT_MS,
 });
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getStringField(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function extractWebhookJobId(payload: unknown): string | undefined {
-  if (!isRecord(payload)) return undefined;
-  return getStringField(payload, "id") ?? getStringField(payload, "jobId");
-}
-
-function isJobStatus(value: unknown): value is JobStatus {
-  return typeof value === "string" && JOB_STATUS_VALUES.includes(value as JobStatus);
-}
-
-function isTerminalJobStatus(value: JobStatus): boolean {
-  return value === "succeeded" || value === "failed" || value === "cancelled";
-}
-
-function isJobSource(value: unknown): value is JobSource {
-  return value === "dispatch" || value === "channel" || value === "synapse" || value === "openclaw";
-}
-
-function normalizeWebhookJob(payload: unknown): BridgeJob | null {
-  if (!isRecord(payload)) return null;
-
-  const id = extractWebhookJobId(payload);
-  if (!id || !isJobStatus(payload["status"])) {
-    return null;
-  }
-
-  const execution = isRecord(payload["execution"]) ? payload["execution"] : {};
-  const rawSource = payload["source"];
-
-  return {
-    id,
-    prompt: getStringField(payload, "prompt") ?? "",
-    cwd: getStringField(payload, "cwd"),
-    queueOrder: getStringField(payload, "queueOrder") ?? "",
-    requestId: getStringField(payload, "requestId"),
-    originRoutingKey: getStringField(payload, "originRoutingKey"),
-    source: isJobSource(rawSource) ? rawSource : undefined,
-    sourceName: getStringField(payload, "sourceName"),
-    notifyUrl: getStringField(payload, "notifyUrl"),
-    metadata: isRecord(payload["metadata"]) ? payload["metadata"] : undefined,
-    status: payload["status"],
-    createdAt: getStringField(payload, "createdAt") ?? "",
-    startedAt: getStringField(payload, "startedAt"),
-    finishedAt: getStringField(payload, "finishedAt"),
-    exitCode: typeof payload["exitCode"] === "number" || payload["exitCode"] === null
-      ? payload["exitCode"]
-      : undefined,
-    stdout: getStringField(payload, "stdout") ?? "",
-    stderr: getStringField(payload, "stderr") ?? "",
-    execution: {
-      command: getStringField(execution, "command") ?? "",
-      timeoutMs: typeof execution["timeoutMs"] === "number" ? execution["timeoutMs"] : 0,
-      maxOutputChars: typeof execution["maxOutputChars"] === "number" ? execution["maxOutputChars"] : 0,
-      durationMs: typeof execution["durationMs"] === "number" ? execution["durationMs"] : undefined,
-      timedOut: typeof execution["timedOut"] === "boolean" ? execution["timedOut"] : undefined,
-      outputTruncated: typeof execution["outputTruncated"] === "boolean"
-        ? execution["outputTruncated"]
-        : undefined,
-      errorType: typeof execution["errorType"] === "string"
-        && ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error"].includes(execution["errorType"])
-        ? execution["errorType"] as BridgeJobExecution["errorType"]
-        : undefined,
-      recoveredFromRestart: typeof execution["recoveredFromRestart"] === "boolean"
-        ? execution["recoveredFromRestart"]
-        : undefined,
-    },
-  };
-}
-
-function normalizeNotification(payload: unknown): JobNotification<BridgeJob> | null {
-  if (!isRecord(payload)) return null;
-  const receivedAt = getStringField(payload, "receivedAt");
-  const job = normalizeWebhookJob(payload["job"]);
-  if (!receivedAt || !job) {
-    return null;
-  }
-
-  return { receivedAt, job };
-}
 
 async function sendClaudeChannelNotification(
   server: OmxBridgeMcpServer,
@@ -301,7 +182,8 @@ async function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
     bodyLimitBytes: WEBHOOK_BODY_LIMIT_BYTES,
     signatureRequired: !!BRIDGE_CALLBACK_SECRET,
     extractJobId: extractWebhookJobId,
-    verifySignature: verifyWebhookSignature,
+    verifySignature: (jobId, rawBody, signature) =>
+      verifyWebhookSignature(jobId, rawBody, signature, BRIDGE_CALLBACK_SECRET),
     normalizeJob: normalizeWebhookJob,
     enqueueNotification,
     getNotificationStats,
@@ -363,7 +245,8 @@ const jobOperations = new JobOperations(
     bridgeClient,
     getNotificationStats,
     drainNotificationForJob,
-    buildCallbackSignatureHeader,
+    buildCallbackSignatureHeader: (jobId, body) =>
+      buildCallbackSignatureHeader(jobId, body, BRIDGE_CALLBACK_SECRET),
     describeError,
   },
 );

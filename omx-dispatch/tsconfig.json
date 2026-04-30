@@ -19,6 +19,7 @@
     "./job-operations.ts",
     "./notification-store.ts",
     "./tool-handlers.ts",
+    "./webhook-codec.ts",
     "./webhook-server.ts"
   ]
 }
