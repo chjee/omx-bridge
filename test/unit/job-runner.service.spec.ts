@@ -637,7 +637,7 @@ describe('JobRunnerService', () => {
     }
   });
 
-  it('reconciles terminal jobs with missing or failed notification outcomes', async () => {
+  it('reconciles only terminal jobs with missing notification outcomes', async () => {
     const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
     const runner = new JobRunnerService(
       repository,
@@ -660,7 +660,13 @@ describe('JobRunnerService', () => {
         claudeWebhook: { status: 'failed', error: 'fetch_error' },
         telegram: { status: 'skipped', skippedReason: 'per_job_webhook_failed' },
       },
-});
+      notifyHistory: Array.from({ length: 10 }, (_, index) => ({
+        attemptedAt: `2026-04-02T00:00:${String(index).padStart(2, '0')}.000Z`,
+        mode: 'claude' as const,
+        claudeWebhook: { status: 'failed' as const, error: 'fetch_error' },
+        attemptIndex: index,
+      })),
+    });
     await repository.save(missingNotify);
     await repository.save(failedNotify);
     await repository.save(createJob({
@@ -690,11 +696,11 @@ describe('JobRunnerService', () => {
       status: 'queued',
     }));
 
-    await expect(runner.reconcileTerminalNotifications()).resolves.toBe(2);
+    await expect(runner.reconcileTerminalNotifications()).resolves.toBe(1);
 
-    expect(notifyJobComplete).toHaveBeenCalledTimes(2);
+    expect(notifyJobComplete).toHaveBeenCalledTimes(1);
     expect(notifyJobComplete).toHaveBeenNthCalledWith(1, missingNotify);
-    expect(notifyJobComplete).toHaveBeenNthCalledWith(2, failedNotify);
+    expect(notifyJobComplete).not.toHaveBeenCalledWith(failedNotify);
   });
 
   it('starts notification reconciliation during module initialization', async () => {
