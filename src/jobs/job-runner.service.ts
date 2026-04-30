@@ -3,7 +3,7 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { JobQueueRepository } from './job-queue.repository';
 import { OmxExecService } from './omx-exec.service';
 import { JobNotifyService } from './job-notify.service';
-import type { BridgeJob } from './job.types';
+import type { BridgeJob, NotifyChannelResult, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
 @Injectable()
@@ -31,6 +31,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     await this.repository.ensureReady();
     await this.recoverInterruptedJobs();
     await this.cleanupTerminalJobs();
+    void this.reconcileTerminalNotifications().catch((error) => {
+      this.logger.warn(`Failed to reconcile terminal job notifications: ${String(error)}`);
+    });
     this.cleanupIntervalHandle = setInterval(
       () => void this.cleanupTerminalJobs(),
       this.config.jobCleanupIntervalMs,
@@ -89,6 +92,30 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         `Cleaned up ${result.deleted} terminal job file(s); retained ${result.retained}`,
       );
     }
+  }
+
+  async reconcileTerminalNotifications(): Promise<number> {
+    const terminalJobs = (await this.repository.listAll())
+      .filter((job) => this.isTerminal(job.status))
+      .filter((job) => this.shouldReconcileNotification(job.notifyOutcome));
+
+    let attempted = 0;
+    for (const job of terminalJobs) {
+      if (this.shuttingDown) {
+        break;
+      }
+      try {
+        await this.jobNotify.notifyJobComplete(job);
+        attempted += 1;
+      } catch (error) {
+        this.logger.warn(`Failed to reconcile completion notification for ${job.id}: ${String(error)}`);
+      }
+    }
+
+    if (attempted > 0) {
+      this.logger.log(`Reconciled ${attempted} terminal job notification(s)`);
+    }
+    return attempted;
   }
 
   async runOnce(): Promise<boolean> {
@@ -157,6 +184,34 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     } finally {
       release();
     }
+  }
+
+  private isTerminal(status: BridgeJob['status']): boolean {
+    return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+  }
+
+  private shouldReconcileNotification(outcome: NotifyOutcome | undefined): boolean {
+    if (!outcome) {
+      return true;
+    }
+
+    const channelResults = this.notifyChannelResults(outcome);
+    if (channelResults.length === 0) {
+      return true;
+    }
+    if (channelResults.some((result) => result.status === 'ok')) {
+      return false;
+    }
+    if (channelResults.some((result) => result.status === 'failed')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private notifyChannelResults(outcome: NotifyOutcome): NotifyChannelResult[] {
+    return [outcome.claudeWebhook, outcome.openclaw, outcome.telegram]
+      .filter((result): result is NotifyChannelResult => result !== undefined);
   }
 
   private async executeJob(job: BridgeJob): Promise<void> {
