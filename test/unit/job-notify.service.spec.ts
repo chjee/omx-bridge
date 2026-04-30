@@ -155,6 +155,26 @@ describe('JobNotifyService', () => {
     expect(repoMock.current.notifyOutcome).toEqual(secondOutcome);
   });
 
+  it('serializes concurrent notify outcome persistence for the same job', async () => {
+    const job = createJob();
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(
+      createConfig({ notifyMode: 'openclaw', telegram: undefined }),
+      repoMock.repo,
+    );
+
+    const [autoOutcome, manualOutcome] = await Promise.all([
+      service.notifyJobComplete(job),
+      service.notifyJobComplete(job, { trigger: 'manual' }),
+    ]);
+
+    expect(repoMock.current.notifyHistory).toHaveLength(2);
+    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([0, 1]);
+    expect(repoMock.current.notifyHistory?.map((entry) => entry.trigger)).toEqual(['auto', 'manual']);
+    expect(repoMock.current.notifyHistory).toEqual([autoOutcome, manualOutcome]);
+    expect(repoMock.current.notifyOutcome).toEqual(manualOutcome);
+  });
+
   it('marks manually triggered notify outcomes', async () => {
     const job = createJob();
     const repoMock = createRepoMock(job);

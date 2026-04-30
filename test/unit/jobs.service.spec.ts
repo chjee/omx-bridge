@@ -1,4 +1,6 @@
 import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import type { JobCallbackDto } from '../../src/jobs/dto/job-callback.dto';
@@ -92,6 +94,23 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
+  it('stores a request fingerprint when requestId is provided', async () => {
+    const { service, repository } = createService();
+
+    const job = await service.createJob({
+      prompt: 'fingerprinted',
+      requestId: 'req-fingerprint',
+      source: 'dispatch',
+      metadata: { nested: { b: 2, a: 1 } },
+    });
+
+    expect(job.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: 'req-fingerprint',
+      requestFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }));
+  });
+
   it('preserves channel sourceName on queued jobs', async () => {
     const { service, repository } = createService();
 
@@ -114,6 +133,7 @@ describe('JobsService.createJob', () => {
 
   it('returns an existing job for repeated source-scoped requestId submissions', async () => {
     const existingJob = createJob({
+      prompt: 'same request retry',
       requestId: 'req-1',
       source: 'dispatch',
       status: 'running',
@@ -130,6 +150,49 @@ describe('JobsService.createJob', () => {
     expect(result).toBe(existingJob);
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('treats metadata key order as the same request fingerprint', async () => {
+    const jobs = new Map<string, BridgeJob>();
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    const first = await service.createJob({
+      prompt: 'same metadata',
+      requestId: 'req-stable',
+      source: 'dispatch',
+      metadata: { b: 2, a: { y: true, x: false } },
+    });
+    const second = await service.createJob({
+      prompt: 'same metadata',
+      requestId: 'req-stable',
+      source: 'dispatch',
+      metadata: { a: { x: false, y: true }, b: 2 },
+    });
+
+    expect(second).toBe(first);
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects repeated source-scoped requestId submissions with a different payload', async () => {
+    const jobs = new Map<string, BridgeJob>();
+    const { service, repository, jobRunnerService } = createService(jobs);
+    await service.createJob({
+      prompt: 'original prompt',
+      requestId: 'req-conflict',
+      source: 'dispatch',
+      notifyUrl: 'http://127.0.0.1:12000/notify',
+    });
+
+    await expect(service.createJob({
+      prompt: 'changed prompt',
+      requestId: 'req-conflict',
+      source: 'dispatch',
+      notifyUrl: 'http://127.0.0.1:12000/notify',
+    })).rejects.toThrow(ConflictException);
+
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
   it('treats the same requestId from a different source as a new job', async () => {
@@ -167,22 +230,46 @@ describe('JobsService.createJob', () => {
   });
 
   it('accepts cwd values inside an allowed prefix', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const project = path.join(root, 'project');
+    await fs.mkdir(project);
     const { service, repository } = createService(new Map(), {
-      allowedCwdPrefixes: [path.resolve('/workspace')],
+      allowedCwdPrefixes: [root],
     });
 
-    const job = await service.createJob({ prompt: 'inside', cwd: '/workspace/project' });
+    const job = await service.createJob({ prompt: 'inside', cwd: project });
 
-    expect(job.cwd).toBe('/workspace/project');
+    await expect(fs.realpath(project)).resolves.toBe(job.cwd);
     expect(repository.save).toHaveBeenCalledTimes(1);
   });
 
   it('rejects cwd values outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-outside-'));
     const { service, repository, jobRunnerService } = createService(new Map(), {
-      allowedCwdPrefixes: [path.resolve('/workspace')],
+      allowedCwdPrefixes: [root],
     });
 
-    await expect(service.createJob({ prompt: 'outside', cwd: '/etc' })).rejects.toThrow(
+    await expect(service.createJob({ prompt: 'outside', cwd: outside })).rejects.toThrow(
+      HttpException,
+    );
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('rejects cwd symlinks that resolve outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-cwd-'));
+    const allowed = path.join(root, 'allowed');
+    const outside = path.join(root, 'outside');
+    const link = path.join(allowed, 'link-outside');
+    await fs.mkdir(allowed);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, link, 'dir');
+    const { service, repository, jobRunnerService } = createService(new Map(), {
+      allowedCwdPrefixes: [allowed],
+    });
+
+    await expect(service.createJob({ prompt: 'outside symlink', cwd: link })).rejects.toThrow(
       HttpException,
     );
     expect(repository.save).not.toHaveBeenCalled();

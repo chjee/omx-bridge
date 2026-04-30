@@ -38,6 +38,7 @@ async function fetchWithTimeout(
 @Injectable()
 export class JobNotifyService {
   private readonly logger = new Logger(JobNotifyService.name);
+  private readonly persistLocks = new Map<string, Promise<void>>();
 
   constructor(
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
@@ -67,21 +68,41 @@ export class JobNotifyService {
   }
 
   private async persistOutcome(jobId: string, outcome: NotifyOutcome): Promise<NotifyOutcome> {
-    const latest = await this.repository.getById(jobId);
-    if (!latest) return outcome;
-    const attemptIndex = latest.notifyHistory?.length ?? 0;
-    const outcomeWithIndex = { ...outcome, attemptIndex };
-    const updatedHistory = [...(latest.notifyHistory ?? []), outcomeWithIndex].slice(-10);
+    return this.withPersistLock(jobId, async () => {
+      const latest = await this.repository.getById(jobId);
+      if (!latest) return outcome;
+      const attemptIndex = latest.notifyHistory?.length ?? 0;
+      const outcomeWithIndex = { ...outcome, attemptIndex };
+      const updatedHistory = [...(latest.notifyHistory ?? []), outcomeWithIndex].slice(-10);
+      try {
+        await this.repository.save({
+          ...latest,
+          notifyOutcome: outcomeWithIndex,
+          notifyHistory: updatedHistory,
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to persist notifyOutcome for ${jobId}: ${String(err)}`);
+      }
+      return outcomeWithIndex;
+    });
+  }
+
+  private async withPersistLock<T>(jobId: string, operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = this.persistLocks.get(jobId) ?? Promise.resolve();
+    this.persistLocks.set(jobId, next);
+    await previous;
     try {
-      await this.repository.save({
-        ...latest,
-        notifyOutcome: outcomeWithIndex,
-        notifyHistory: updatedHistory,
-      });
-    } catch (err) {
-      this.logger.warn(`Failed to persist notifyOutcome for ${jobId}: ${String(err)}`);
+      return await operation();
+    } finally {
+      release();
+      if (this.persistLocks.get(jobId) === next) {
+        this.persistLocks.delete(jobId);
+      }
     }
-    return outcomeWithIndex;
   }
 
   private async _notifyClaudeWebhook(job: BridgeJob): Promise<NotifyChannelResult> {

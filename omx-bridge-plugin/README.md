@@ -21,7 +21,7 @@ OpenClaw plugin that exposes the local `omx-bridge` NestJS service as agent tool
 2. Install dependencies inside the plugin directory:
 
 ```bash
-npm install
+npm ci
 ```
 
 3. Enable the plugin in your OpenClaw config:
@@ -85,6 +85,7 @@ The plugin accepts these config fields:
 - `bridgeUrl`: Base URL for the bridge service. Default: `http://localhost:3992`
 - `callbackSecret`: HMAC secret for signing callback requests. Must match `BRIDGE_CALLBACK_SECRET` when configured.
 - `apiToken`: Bearer token for non-callback bridge routes. Must match `BRIDGE_API_TOKEN` when configured.
+- `requestTimeoutMs`: Timeout in milliseconds for each bridge HTTP request. Default: `10000`
 
 ## Bridge API mapping
 
@@ -97,3 +98,5 @@ The plugin accepts these config fields:
 
 - OpenClaw can load TypeScript extension entries directly from `openclaw.extensions`.
 - The plugin also ships `openclaw.plugin.json`, which current native plugin discovery uses for config validation.
+- Dependencies are pinned with `package-lock.json`; use `npm install` only when
+  intentionally updating the locked OpenClaw SDK version.

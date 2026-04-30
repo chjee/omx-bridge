@@ -1,5 +1,9 @@
 import { validate } from 'class-validator';
-import { CreateJobDto, MAX_PROMPT_LENGTH } from '../../src/jobs/dto/create-job.dto';
+import {
+  CreateJobDto,
+  MAX_METADATA_BYTES,
+  MAX_PROMPT_LENGTH,
+} from '../../src/jobs/dto/create-job.dto';
 
 describe('CreateJobDto', () => {
   it('rejects an empty prompt', async () => {
@@ -39,6 +43,16 @@ describe('CreateJobDto', () => {
 
     expect(errors).toHaveLength(0);
     expect(dto.metadata).toEqual({ source: 'openclaw', chatId: 1234 });
+  });
+
+  it('rejects oversized metadata payloads', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    dto.metadata = { payload: 'x'.repeat(MAX_METADATA_BYTES) };
+
+    const errors = await validate(dto);
+
+    expect(errors.some((error) => error.property === 'metadata')).toBe(true);
   });
 
   it('accepts channel source with sourceName', async () => {

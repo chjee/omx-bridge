@@ -24,6 +24,10 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
     stderr: overrides.stderr ?? '',
     metadata: overrides.metadata,
     requestId: overrides.requestId,
+    notifyUrl: overrides.notifyUrl,
+    source: overrides.source,
+    notifyOutcome: overrides.notifyOutcome,
+    notifyHistory: overrides.notifyHistory,
     execution: overrides.execution ?? {
       command: 'omx',
       timeoutMs: 1000,
@@ -53,6 +57,7 @@ describe('JobRunnerService', () => {
   let config: BridgeConfig;
 
   beforeEach(async () => {
+    jest.mocked(mockJobNotify.notifyJobComplete).mockClear();
     config = {
       host: '127.0.0.1',
       jobsDirectory: await createTempDir('runner-jobs'),
@@ -290,6 +295,105 @@ describe('JobRunnerService', () => {
     });
   });
 
+  it('waits for completion notifications to flush during module destroy', async () => {
+    let abortSignal: AbortSignal | undefined;
+    let resolveNotification: (() => void) | undefined;
+    const notifyJobComplete = jest.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNotification = resolve;
+        }),
+    );
+    const runner = new JobRunnerService(
+      repository,
+      {
+        execute: jest.fn().mockImplementation(
+          (_prompt: string, options?: { signal?: AbortSignal }) =>
+            new Promise<OmxExecutionResult>((resolve) => {
+              abortSignal = options?.signal;
+              options?.signal?.addEventListener('abort', () => {
+                resolve(
+                  createExecutionResult({
+                    status: 'cancelled',
+                    stderr: 'Command cancelled',
+                    exitCode: null,
+                    execution: {
+                      command: 'omx',
+                      timeoutMs: 1000,
+                      maxOutputChars: 1000,
+                      errorType: 'cancelled',
+                    },
+                  }),
+                );
+              }, { once: true });
+            }),
+        ),
+      } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+
+    await repository.save(createJob());
+
+    const runPromise = runner.runOnce();
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000001'),
+      (job) => job?.status === 'running',
+    );
+
+    let destroySettled = false;
+    const destroyPromise = runner.onModuleDestroy().then(() => {
+      destroySettled = true;
+    });
+    await waitFor(
+      () => Promise.resolve(notifyJobComplete.mock.calls.length),
+      (callCount) => callCount === 1,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(abortSignal?.aborted).toBe(true);
+    expect(destroySettled).toBe(false);
+
+    resolveNotification?.();
+    await destroyPromise;
+    await runPromise;
+
+    expect(destroySettled).toBe(true);
+  });
+
+  it('stops waiting for stuck completion notifications after the shutdown grace timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      const notifyJobComplete = jest.fn().mockReturnValue(new Promise<void>(() => undefined));
+      const runner = new JobRunnerService(
+        repository,
+        {
+          execute: jest.fn().mockResolvedValue(createExecutionResult()),
+        } as unknown as OmxExecService,
+        { notifyJobComplete } as unknown as JobNotifyService,
+        config,
+      );
+
+      await repository.save(createJob());
+      await runner.runOnce();
+
+      let destroySettled = false;
+      const destroyPromise = runner.onModuleDestroy().then(() => {
+        destroySettled = true;
+      });
+      await Promise.resolve();
+
+      expect(destroySettled).toBe(false);
+
+      jest.advanceTimersByTime(config.sigkillGraceMs + 2_000);
+      await destroyPromise;
+
+      expect(destroySettled).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('runs up to maxConcurrency jobs in parallel and respects the cap', async () => {
     config.maxConcurrency = 2;
 
@@ -407,5 +511,89 @@ describe('JobRunnerService', () => {
     });
     expect(recovered?.startedAt).toBeUndefined();
     expect(recovered?.stderr).toContain('Recovered after process restart');
+  });
+
+  it('reconciles terminal jobs with missing or failed notification outcomes', async () => {
+    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+    const missingNotify = createJob({
+      id: '00000000-0000-4000-a000-000000000001',
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:00:05.000Z',
+    });
+    const failedNotify = createJob({
+      id: '00000000-0000-4000-a000-000000000002',
+      status: 'failed',
+      finishedAt: '2026-04-02T00:00:06.000Z',
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:00:07.000Z',
+        mode: 'claude',
+        claudeWebhook: { status: 'failed', error: 'fetch_error' },
+        telegram: { status: 'skipped', skippedReason: 'per_job_webhook_failed' },
+      },
+});
+    await repository.save(missingNotify);
+    await repository.save(failedNotify);
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000003',
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:00:08.000Z',
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:00:09.000Z',
+        mode: 'claude',
+        claudeWebhook: { status: 'ok' },
+        telegram: { status: 'skipped', skippedReason: 'webhook_ok' },
+      },
+    }));
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000004',
+      status: 'cancelled',
+      finishedAt: '2026-04-02T00:00:10.000Z',
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:00:11.000Z',
+        mode: 'openclaw',
+        openclaw: { status: 'skipped', skippedReason: 'not_configured' },
+        telegram: { status: 'skipped', skippedReason: 'not_configured' },
+      },
+    }));
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000005',
+      status: 'queued',
+    }));
+
+    await expect(runner.reconcileTerminalNotifications()).resolves.toBe(2);
+
+    expect(notifyJobComplete).toHaveBeenCalledTimes(2);
+    expect(notifyJobComplete).toHaveBeenNthCalledWith(1, missingNotify);
+    expect(notifyJobComplete).toHaveBeenNthCalledWith(2, failedNotify);
+  });
+
+  it('starts notification reconciliation during module initialization', async () => {
+    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+    await repository.save(createJob({
+      status: 'succeeded',
+      finishedAt: new Date().toISOString(),
+    }));
+
+    try {
+      await runner.onModuleInit();
+      await waitFor(
+        () => Promise.resolve(notifyJobComplete.mock.calls.length),
+        (callCount) => callCount === 1,
+      );
+    } finally {
+      await runner.onModuleDestroy();
+    }
   });
 });

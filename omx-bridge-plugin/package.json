@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",
-    "openclaw": "*"
+    "openclaw": "2026.4.25"
   },
   "openclaw": {
     "extensions": [

@@ -6,9 +6,9 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
-import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { CreateJobDto } from './dto/create-job.dto';
 import type { JobCallbackDto } from './dto/job-callback.dto';
 import { JobQueueRepository } from './job-queue.repository';
@@ -40,9 +40,14 @@ export class JobsService {
 
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
-      this.assertAllowedCwd(input.cwd);
-      const existingJob = await this.findExistingRequestJob(input);
+      const normalizedInput = {
+        ...input,
+        cwd: await this.assertAllowedCwd(input.cwd),
+      };
+      const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
+      const existingJob = await this.findExistingRequestJob(normalizedInput);
       if (existingJob) {
+        this.assertRequestFingerprintMatches(existingJob, requestFingerprint);
         return existingJob;
       }
 
@@ -56,15 +61,16 @@ export class JobsService {
 
       const job: BridgeJob = {
         id: randomUUID(),
-        prompt: input.prompt,
-        cwd: input.cwd,
+        prompt: normalizedInput.prompt,
+        cwd: normalizedInput.cwd,
         queueOrder: this.nextQueueOrder(),
-        requestId: input.requestId,
-        originRoutingKey: input.originRoutingKey,
-        source: input.source,
-        sourceName: input.sourceName,
-        metadata: input.metadata,
-        notifyUrl: input.notifyUrl,
+        requestId: normalizedInput.requestId,
+        requestFingerprint,
+        originRoutingKey: normalizedInput.originRoutingKey,
+        source: normalizedInput.source,
+        sourceName: normalizedInput.sourceName,
+        metadata: normalizedInput.metadata,
+        notifyUrl: normalizedInput.notifyUrl,
         status: 'queued',
         createdAt: new Date().toISOString(),
         exitCode: null,
@@ -210,6 +216,68 @@ export class JobsService {
     ) ?? null;
   }
 
+  private buildRequestFingerprint(input: CreateJobDto): string | undefined {
+    if (!input.requestId) {
+      return undefined;
+    }
+
+    return this.hashStableJson({
+      prompt: input.prompt,
+      cwd: input.cwd,
+      notifyUrl: input.notifyUrl,
+      originRoutingKey: input.originRoutingKey,
+      source: input.source,
+      sourceName: input.sourceName,
+      metadata: input.metadata,
+    });
+  }
+
+  private assertRequestFingerprintMatches(
+    existingJob: BridgeJob,
+    incomingFingerprint: string | undefined,
+  ): void {
+    if (!existingJob.requestId || !incomingFingerprint) {
+      return;
+    }
+
+    const existingFingerprint = existingJob.requestFingerprint ?? this.hashStableJson({
+      prompt: existingJob.prompt,
+      cwd: existingJob.cwd,
+      notifyUrl: existingJob.notifyUrl,
+      originRoutingKey: existingJob.originRoutingKey,
+      source: existingJob.source,
+      sourceName: existingJob.sourceName,
+      metadata: existingJob.metadata,
+    });
+    if (existingFingerprint !== incomingFingerprint) {
+      throw new ConflictException(
+        `requestId ${existingJob.requestId} for source ${existingJob.source ?? 'default'} ` +
+          'already belongs to a different job payload',
+      );
+    }
+  }
+
+  private hashStableJson(value: unknown): string {
+    return createHash('sha256')
+      .update(this.stableStringify(value))
+      .digest('hex');
+  }
+
+  private stableStringify(value: unknown): string {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.stableStringify(item)).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      const entries = Object.keys(record)
+        .filter((key) => record[key] !== undefined)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${this.stableStringify(record[key])}`);
+      return `{${entries.join(',')}}`;
+    }
+    return JSON.stringify(value) ?? 'null';
+  }
+
   private nextQueueOrder(): string {
     // {ms}-{seq}: ms는 unix epoch millis(현재 13자리), seq는 동일 ms 내 tie-breaker.
     // 프로세스 재시작 시 seq가 0으로 리셋되지만 listAll의 createdAt/id 보조 정렬이
@@ -218,21 +286,15 @@ export class JobsService {
     return `${Date.now()}-${this.queueSequence.toString().padStart(6, '0')}`;
   }
 
-  private assertAllowedCwd(cwd: string | undefined): void {
-    if (!cwd) {
-      return;
-    }
-
-    const resolvedCwd = path.resolve(cwd);
-    const allowed = this.config.allowedCwdPrefixes.some((prefix) => {
-      const resolvedPrefix = path.resolve(prefix);
-      const relative = path.relative(resolvedPrefix, resolvedCwd);
-      return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
-    });
-
-    if (!allowed) {
+  private async assertAllowedCwd(cwd: string | undefined): Promise<string | undefined> {
+    try {
+      return await resolveAllowedExecutionCwd(cwd, this.config.allowedCwdPrefixes);
+    } catch (error) {
+      if (!(error instanceof CwdBoundaryError)) {
+        throw error;
+      }
       throw new HttpException(
-        `cwd is outside allowed prefixes: ${cwd}`,
+        error.message,
         HttpStatus.BAD_REQUEST,
       );
     }

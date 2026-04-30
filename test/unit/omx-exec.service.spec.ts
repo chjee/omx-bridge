@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { BridgeConfig } from '../../src/config/bridge-config';
@@ -38,8 +41,11 @@ function createService(
 }
 
 describe('OmxExecService', () => {
+  const originalEnv = process.env;
+
   afterEach(() => {
     jest.useRealTimers();
+    process.env = originalEnv;
   });
 
   it('invokes omx exec and maps a successful result', async () => {
@@ -91,10 +97,93 @@ describe('OmxExecService', () => {
     });
   });
 
+  it('passes only allowlisted environment variables to omx exec', async () => {
+    process.env = {
+      PATH: '/usr/bin',
+      HOME: '/home/tester',
+      OPENAI_API_KEY: 'model-key',
+      BRIDGE_API_TOKEN: 'bridge-token',
+      BRIDGE_CALLBACK_SECRET: 'callback-secret',
+      TELEGRAM_BOT_TOKEN: 'telegram-token',
+      CUSTOM_ALLOWED: 'custom-value',
+    };
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(
+      () => child as unknown as ChildProcessWithoutNullStreams,
+    );
+    const service = createService(spawnFn, {
+      omxEnvAllowlist: ['PATH', 'HOME', 'OPENAI_API_KEY', 'CUSTOM_ALLOWED'],
+      maxOutputChars: 100,
+    });
+
+    const pending = service.execute('check env');
+    child.emit('close', 0);
+    await pending;
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      'omx',
+      ['exec', '--full-auto', '-s', 'danger-full-access', 'check env'],
+      expect.objectContaining({
+        env: {
+          PATH: '/usr/bin',
+          HOME: '/home/tester',
+          OPENAI_API_KEY: 'model-key',
+          CUSTOM_ALLOWED: 'custom-value',
+        },
+      }),
+    );
+  });
+
+  it('passes a realpath-normalized cwd when it is inside an allowed prefix', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
+    const project = path.join(root, 'project');
+    await fs.mkdir(project);
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = createService(spawnFn, {
+      allowedCwdPrefixes: [root],
+      maxOutputChars: 100,
+    });
+
+    await service.execute('with cwd', { cwd: project });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      'omx',
+      ['exec', '--full-auto', '-s', 'danger-full-access', 'with cwd'],
+      expect.objectContaining({ cwd: await fs.realpath(project) }),
+    );
+  });
+
+  it('fails without spawning when cwd resolves outside allowed prefixes', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
+    const allowed = path.join(root, 'allowed');
+    const outside = path.join(root, 'outside');
+    const link = path.join(allowed, 'link-outside');
+    await fs.mkdir(allowed);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, link, 'dir');
+    const spawnFn = jest.fn();
+    const service = createService(spawnFn as unknown as SpawnFunction, {
+      allowedCwdPrefixes: [allowed],
+    });
+
+    await expect(service.execute('blocked cwd', { cwd: link })).resolves.toMatchObject({
+      status: 'failed',
+      stderr: `cwd is outside allowed prefixes: ${link}`,
+      exitCode: null,
+      execution: { errorType: 'invalid_cwd' },
+    });
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
   it('maps spawn errors into failed results', async () => {
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 100 },
     );
 
     const pending = service.execute('missing');
@@ -131,24 +220,50 @@ describe('OmxExecService', () => {
     expect(child.kill).toHaveBeenCalledWith('SIGTERM');
   });
 
-  it('truncates captured output when it exceeds the limit', async () => {
+  it('keeps head and tail when captured output exceeds the limit', async () => {
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
       {
-        maxOutputChars: 4,
+        maxOutputChars: 40,
       },
     );
 
     const pending = service.execute('truncate');
-    child.stdout.write('abcdef');
+    child.stdout.write('HEAD-1234567890-MIDDLE-abcdefghijklmnopqrstuvwxyz-TAIL');
     child.emit('close', 0);
 
-    await expect(pending).resolves.toMatchObject({
-      status: 'succeeded',
-      stdout: 'abcd',
-      execution: { outputTruncated: true },
-    });
+    const result = await pending;
+
+    expect(result.status).toBe('succeeded');
+    expect(result.stdout).toHaveLength(40);
+    expect(result.stdout).toContain('...[truncated ');
+    expect(result.stdout).toContain(' chars]...');
+    expect(result.stdout.startsWith('HEAD')).toBe(true);
+    expect(result.stdout.endsWith('TAIL')).toBe(true);
+    expect(result.execution.outputTruncated).toBe(true);
+  });
+
+  it('keeps the latest output tail across multiple chunks', async () => {
+    const child = new MockChildProcess();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 80 },
+    );
+
+    const pending = service.execute('streaming output');
+    child.stderr.write(`BEGIN-${'x'.repeat(60)}-MIDDLE-`);
+    child.stderr.write('error: final failure details');
+    child.emit('close', 1);
+
+    const result = await pending;
+
+    expect(result.status).toBe('failed');
+    expect(result.stderr).toHaveLength(80);
+    expect(result.stderr).toContain('...[truncated ');
+    expect(result.stderr.startsWith('BEGIN')).toBe(true);
+    expect(result.stderr).toContain('failure details');
+    expect(result.execution.outputTruncated).toBe(true);
   });
 
   it('preserves stderr chunks arriving after stdout reaches the limit', async () => {
@@ -165,7 +280,7 @@ describe('OmxExecService', () => {
 
     await expect(pending).resolves.toMatchObject({
       status: 'failed',
-      stdout: 'abcd',
+      stdout: 'cdef',
       stderr: 'ERR',
       execution: { outputTruncated: true },
     });

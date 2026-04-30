@@ -38,6 +38,7 @@ Install dependencies:
 ```bash
 npm install
 cd omx-dispatch && npm install
+cd ../omx-bridge-plugin && npm ci
 ```
 
 Create local env files from the examples:
@@ -53,11 +54,12 @@ Run the bridge service in development:
 npm run start:dev
 ```
 
-Build both packages:
+Build all packages:
 
 ```bash
 npm run build
 cd omx-dispatch && npm run build
+cd ../omx-bridge-plugin && npm run build
 ```
 
 ## Bridge Service Configuration
@@ -67,10 +69,24 @@ Important root `.env` values:
 ```env
 PORT=3992
 BRIDGE_HOST=127.0.0.1
+BRIDGE_REQUEST_BODY_LIMIT=1mb
 BRIDGE_JOBS_DIR=.omx/state/bridge-jobs
 OMX_COMMAND=omx
 NOTIFY_MODE=openclaw
 ```
+
+Idempotent submissions:
+
+- `requestId` is scoped by `source`. Repeating the same `source + requestId`
+  with the same payload returns the existing job instead of creating another one.
+- When `requestId` is present, the bridge stores a request fingerprint over the
+  routing-sensitive payload (`prompt`, `cwd`, `notifyUrl`, `originRoutingKey`,
+  `source`, `sourceName`, and stable `metadata`). Reusing the same `source +
+  requestId` with a different payload is rejected with `409 Conflict`.
+
+Request bodies are bounded by `BRIDGE_REQUEST_BODY_LIMIT` (default: `1mb`).
+`metadata` is intended for small routing/context fields and must serialize to
+8192 bytes or less.
 
 Notification modes:
 
@@ -95,6 +111,12 @@ Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAY
 fetch attempt is bounded by `BRIDGE_NOTIFY_TIMEOUT_MS` (default: `5000`); this is
 separate from `BRIDGE_JOB_TIMEOUT_MS`.
 
+On startup, the runner also reconciles retained terminal jobs whose completion
+notification was never recorded, or whose latest notification attempt has no
+successful channel and at least one failed channel. Terminal jobs whose channels
+were only skipped, such as an intentionally unconfigured delivery target, are not
+retried repeatedly.
+
 For Claude mode:
 
 ```env
@@ -114,6 +136,21 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 The bridge runs requested work through `omx exec --full-auto -s danger-full-access`,
 so bind and working-directory settings are part of the safety boundary.
 
+The `omx exec` child process receives only an environment-variable allowlist,
+configured by `BRIDGE_OMX_ENV_ALLOWLIST`. By default this keeps common shell,
+Codex/OMX, XDG, SSH agent, and model-provider variables, while excluding bridge
+delivery secrets such as `BRIDGE_API_TOKEN`, `BRIDGE_CALLBACK_SECRET`,
+`TELEGRAM_BOT_TOKEN`, and `OPENCLAW_HOOKS_TOKEN`. Add any required local runtime
+variable explicitly:
+
+```env
+BRIDGE_OMX_ENV_ALLOWLIST=PATH,HOME,CODEX_HOME,OPENAI_API_KEY,CUSTOM_TOOL_ENV
+```
+
+Captured stdout/stderr are bounded by `BRIDGE_MAX_OUTPUT_CHARS` per stream. When
+output exceeds the limit, the bridge keeps both the beginning and the end with a
+truncation marker in the middle so late build/test failures remain visible.
+
 `BRIDGE_HOST` defaults to `127.0.0.1`. If it is set to a non-loopback host
 such as `0.0.0.0`, startup requires both:
 
@@ -126,7 +163,9 @@ BRIDGE_CALLBACK_SECRET=<shared-secret>
 comma-separated list; `~` expands to the service user's home directory. When
 unset, the bridge allows cwd values under the service user's home directory.
 Jobs that omit `cwd` keep the existing behavior and run from the service
-working directory.
+working directory. Provided `cwd` values must resolve via `realpath` under an
+allowed prefix; symlinks that point outside the allowed tree are rejected at
+submission time and again immediately before `omx exec` starts.
 
 ```env
 BRIDGE_ALLOWED_CWD_PREFIXES=~/workspace,/srv/projects
@@ -150,6 +189,17 @@ terminal jobs (`succeeded`, `failed`, `cancelled`) are eligible for deletion;
 BRIDGE_JOB_RETENTION_DAYS=7
 BRIDGE_MAX_TERMINAL_JOBS=1000
 BRIDGE_JOB_CLEANUP_INTERVAL_MS=3600000
+```
+
+Job files are stored as JSON under `BRIDGE_JOBS_DIR` and include the submitted
+`prompt`, captured `stdout`, captured `stderr`, routing fields, and notification
+history in plain text. Treat the directory as sensitive local state. If prompts
+or command output may contain tokens, customer data, or private paths, restrict
+filesystem access and shorten retention for the deployment:
+
+```env
+BRIDGE_JOB_RETENTION_DAYS=1
+BRIDGE_MAX_TERMINAL_JOBS=100
 ```
 
 ### API token guard
@@ -286,6 +336,7 @@ Important `omx-dispatch/.env` values:
 ```env
 BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
+BRIDGE_REQUEST_TIMEOUT_MS=10000
 # WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
 ENABLE_CLAUDE_CHANNEL=true  # required for callback-to-CLI continuation; false only queues for polling
 MAX_NOTIFICATION_QUEUE_SIZE=200
@@ -374,6 +425,7 @@ cd omx-dispatch && npm run build
 - The bridge creates `.omx-bridge-instance.lock` in `BRIDGE_JOBS_DIR` on startup and refuses to run a second live instance against the same job directory. Stale lock files are recovered automatically when the recorded process is no longer alive.
 - New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
 - Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
+- Job files retain prompts and captured output in plain text until cleanup removes them.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.

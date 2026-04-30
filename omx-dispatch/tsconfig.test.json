@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist-test"
+  },
+  "include": [
+    "./bridge-client.ts",
+    "./bridge-client.test.ts",
+    "./job-operations.ts",
+    "./job-operations.test.ts",
+    "./notification-store.ts",
+    "./notification-store.test.ts",
+    "./runtime-config.ts",
+    "./runtime-config.test.ts",
+    "./tool-handlers.ts",
+    "./tool-handlers.test.ts",
+    "./webhook-codec.ts",
+    "./webhook-codec.test.ts",
+    "./webhook-server.ts",
+    "./webhook-server.test.ts"
+  ]
+}

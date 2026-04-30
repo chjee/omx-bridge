@@ -6,8 +6,12 @@ export type NotifyMode = 'openclaw' | 'claude';
 
 export interface BridgeConfig {
   host: string;
+  /** Express JSON/urlencoded body parser limit. */
+  requestBodyLimit?: string;
   jobsDirectory: string;
   omxCommand: string;
+  /** `omx exec` 자식 프로세스에 전달할 환경 변수 이름 allowlist. */
+  omxEnvAllowlist?: string[];
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
@@ -59,6 +63,32 @@ export interface BridgeConfig {
 }
 
 export const BRIDGE_CONFIG = Symbol('BRIDGE_CONFIG');
+export const DEFAULT_REQUEST_BODY_LIMIT = '1mb';
+
+export const DEFAULT_OMX_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'TMPDIR',
+  'CODEX_HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'SSH_AUTH_SOCK',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OMX_DEFAULT_FRONTIER_MODEL',
+  'OMX_DEFAULT_SPARK_MODEL',
+  'OMX_DEFAULT_STANDARD_MODEL',
+];
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   if (!value) {
@@ -67,6 +97,15 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBodyLimit(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  return /^\d+(?:b|kb|mb)?$/i.test(trimmed) ? trimmed : fallback;
 }
 
 function parsePositiveIntList(value: string | undefined, fallback: number[]): number[] {
@@ -96,6 +135,18 @@ function parseAllowedCwdPrefixes(
   });
 
   return [...new Set(prefixes)];
+}
+
+function parseStringList(value: string | undefined, fallback: string[]): string[] {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parsed.length > 0 ? [...new Set(parsed)] : fallback;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -131,11 +182,19 @@ export function buildBridgeConfig(
 
   return {
     host,
+    requestBodyLimit: parseBodyLimit(
+      configService.get<string>('BRIDGE_REQUEST_BODY_LIMIT'),
+      DEFAULT_REQUEST_BODY_LIMIT,
+    ),
     jobsDirectory: configService.get<string>(
       'BRIDGE_JOBS_DIR',
       path.join(cwd, '.omx', 'state', 'bridge-jobs'),
     ),
     omxCommand: configService.get<string>('OMX_COMMAND', 'omx'),
+    omxEnvAllowlist: parseStringList(
+      configService.get<string>('BRIDGE_OMX_ENV_ALLOWLIST'),
+      DEFAULT_OMX_ENV_ALLOWLIST,
+    ),
     jobPollIntervalMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_POLL_INTERVAL_MS'),
       500,

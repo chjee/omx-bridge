@@ -434,6 +434,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
     process.env.BRIDGE_API_TOKEN = '';
     process.env.OMX_COMMAND = fakeOmxPath;
+    process.env.BRIDGE_OMX_ENV_ALLOWLIST = 'PATH,BRIDGE_TRACE_FILE,FAKE_CODEX_PATH';
     process.env.BRIDGE_TRACE_FILE = traceFile;
     process.env.FAKE_CODEX_PATH = fakeCodexPath;
 
@@ -455,6 +456,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     delete process.env.BRIDGE_MAX_CONCURRENCY;
     delete process.env.BRIDGE_API_TOKEN;
     delete process.env.OMX_COMMAND;
+    delete process.env.BRIDGE_OMX_ENV_ALLOWLIST;
     delete process.env.BRIDGE_TRACE_FILE;
     delete process.env.FAKE_CODEX_PATH;
   });

@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import { BRIDGE_CONFIG, DEFAULT_OMX_ENV_ALLOWLIST, type BridgeConfig } from '../config/bridge-config';
+import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { JobExecutionMetadata, OmxExecutionResult, TerminalJobStatus } from './job.types';
 
 export type SpawnFunction = (
@@ -16,6 +17,13 @@ export interface ExecuteOmxOptions {
   cwd?: string;
 }
 
+interface OutputCapture {
+  head: string;
+  tail: string;
+  length: number;
+  truncated: boolean;
+}
+
 @Injectable()
 export class OmxExecService {
   constructor(
@@ -25,12 +33,17 @@ export class OmxExecService {
 
   async execute(prompt: string, options: ExecuteOmxOptions = {}): Promise<OmxExecutionResult> {
     const startedAt = Date.now();
+    const cwdResolution = options.cwd
+      ? await this.resolveExecutionCwd(options.cwd, startedAt)
+      : undefined;
+    if (cwdResolution && typeof cwdResolution !== 'string') {
+      return cwdResolution;
+    }
+    const executionCwd = cwdResolution;
 
     return new Promise<OmxExecutionResult>((resolve) => {
-      let stdout = '';
-      let stderr = '';
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
+      let stdoutCapture = this.emptyOutputCapture();
+      let stderrCapture = this.emptyOutputCapture();
       let settled = false;
       let timedOut = false;
       let cancelled = false;
@@ -39,22 +52,16 @@ export class OmxExecService {
 
       const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', '-s', 'danger-full-access', prompt], {
         stdio: 'pipe',
-        env: process.env,
-        ...(options.cwd ? { cwd: options.cwd } : {}),
+        env: this.buildChildEnv(),
+        ...(executionCwd ? { cwd: executionCwd } : {}),
       });
       child.stdin.end();
 
       const appendOutput = (chunk: string, target: 'stdout' | 'stderr'): void => {
         if (target === 'stdout') {
-          if (stdoutTruncated) return;
-          const next = stdout + chunk;
-          stdout = next.slice(0, this.config.maxOutputChars);
-          if (stdout.length < next.length) stdoutTruncated = true;
+          stdoutCapture = this.appendCapturedOutput(stdoutCapture, chunk);
         } else {
-          if (stderrTruncated) return;
-          const next = stderr + chunk;
-          stderr = next.slice(0, this.config.maxOutputChars);
-          if (stderr.length < next.length) stderrTruncated = true;
+          stderrCapture = this.appendCapturedOutput(stderrCapture, chunk);
         }
       };
 
@@ -72,15 +79,15 @@ export class OmxExecService {
 
         resolve({
           status,
-          stdout,
-          stderr,
+          stdout: this.renderCapturedOutput(stdoutCapture),
+          stderr: this.renderCapturedOutput(stderrCapture),
           exitCode,
           execution: {
             command: this.config.omxCommand,
             timeoutMs: this.config.jobTimeoutMs,
             maxOutputChars: this.config.maxOutputChars,
             durationMs: Date.now() - startedAt,
-            outputTruncated: stdoutTruncated || stderrTruncated,
+            outputTruncated: stdoutCapture.truncated || stderrCapture.truncated,
             timedOut,
             ...overrides,
           },
@@ -95,7 +102,9 @@ export class OmxExecService {
       });
 
       child.once('error', (error: NodeJS.ErrnoException) => {
-        stderr = stderr || error.message;
+        if (stderrCapture.length === 0) {
+          stderrCapture = this.appendCapturedOutput(stderrCapture, error.message);
+        }
         finish('failed', {
           errorType: 'spawn_error',
         });
@@ -130,14 +139,21 @@ export class OmxExecService {
 
       const timeoutHandle = setTimeout(() => {
         timedOut = true;
-        stderr = stderr || `Command timed out after ${this.config.jobTimeoutMs}ms`;
+        if (stderrCapture.length === 0) {
+          stderrCapture = this.appendCapturedOutput(
+            stderrCapture,
+            `Command timed out after ${this.config.jobTimeoutMs}ms`,
+          );
+        }
         child.kill('SIGTERM');
         sendSigkillAfterDelay();
       }, this.config.jobTimeoutMs);
 
       const handleAbort = (): void => {
         cancelled = true;
-        stderr = stderr || 'Command cancelled';
+        if (stderrCapture.length === 0) {
+          stderrCapture = this.appendCapturedOutput(stderrCapture, 'Command cancelled');
+        }
         child.kill('SIGTERM');
         sendSigkillAfterDelay();
       };
@@ -150,6 +166,140 @@ export class OmxExecService {
         }
       }
     });
+  }
+
+  private buildChildEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    const allowlist = this.config.omxEnvAllowlist ?? DEFAULT_OMX_ENV_ALLOWLIST;
+    for (const key of allowlist) {
+      const value = process.env[key];
+      if (value !== undefined) {
+        env[key] = value;
+      }
+    }
+    return env;
+  }
+
+  private async resolveExecutionCwd(
+    cwd: string | undefined,
+    startedAt: number,
+  ): Promise<string | OmxExecutionResult | undefined> {
+    try {
+      return await resolveAllowedExecutionCwd(cwd, this.config.allowedCwdPrefixes);
+    } catch (error) {
+      if (!(error instanceof CwdBoundaryError)) {
+        throw error;
+      }
+      return {
+        status: 'failed',
+        stdout: '',
+        stderr: error.message,
+        exitCode: null,
+        execution: {
+          command: this.config.omxCommand,
+          timeoutMs: this.config.jobTimeoutMs,
+          maxOutputChars: this.config.maxOutputChars,
+          durationMs: Date.now() - startedAt,
+          errorType: 'invalid_cwd',
+        },
+      };
+    }
+  }
+
+  private emptyOutputCapture(): OutputCapture {
+    return {
+      head: '',
+      tail: '',
+      length: 0,
+      truncated: false,
+    };
+  }
+
+  private appendCapturedOutput(current: OutputCapture, chunk: string): OutputCapture {
+    if (chunk.length === 0) {
+      return current;
+    }
+
+    const limit = this.config.maxOutputChars;
+    const nextLength = current.length + chunk.length;
+    if (limit <= 0) {
+      return {
+        head: '',
+        tail: '',
+        length: nextLength,
+        truncated: true,
+      };
+    }
+
+    if (!current.truncated && nextLength <= limit) {
+      return {
+        head: current.head + chunk,
+        tail: '',
+        length: nextLength,
+        truncated: false,
+      };
+    }
+
+    const marker = this.buildTruncationMarker(nextLength, limit);
+    if (marker.length >= limit) {
+      return {
+        head: '',
+        tail: this.appendTail(current, chunk, limit),
+        length: nextLength,
+        truncated: true,
+      };
+    }
+
+    const remaining = limit - marker.length;
+    const headLength = Math.ceil(remaining / 2);
+    const tailLength = Math.floor(remaining / 2);
+    const sourceForHead = current.truncated ? current.head : current.head + chunk;
+
+    return {
+      head: sourceForHead.slice(0, headLength),
+      tail: this.appendTail(current, chunk, tailLength),
+      length: nextLength,
+      truncated: true,
+    };
+  }
+
+  private appendTail(current: OutputCapture, chunk: string, tailLength: number): string {
+    if (tailLength <= 0) {
+      return '';
+    }
+
+    const source = current.truncated ? current.tail + chunk : current.head + chunk;
+    return source.slice(-tailLength);
+  }
+
+  private renderCapturedOutput(capture: OutputCapture): string {
+    if (!capture.truncated) {
+      return capture.head;
+    }
+
+    const limit = this.config.maxOutputChars;
+    if (limit <= 0) {
+      return '';
+    }
+
+    const marker = this.buildTruncationMarker(capture.length, limit);
+    if (marker.length >= limit) {
+      return capture.tail.slice(-limit);
+    }
+
+    return `${capture.head}${marker}${capture.tail}`;
+  }
+
+  private buildTruncationMarker(totalLength: number, limit: number): string {
+    let omitted = Math.max(0, totalLength - limit);
+    while (true) {
+      const marker = `\n...[truncated ${omitted} chars]...\n`;
+      const markerAwareOmitted = Math.max(0, totalLength - (limit - marker.length));
+      if (markerAwareOmitted === omitted) {
+        return marker;
+      }
+      omitted = markerAwareOmitted;
+    }
   }
 }
 

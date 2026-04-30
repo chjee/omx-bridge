@@ -8,6 +8,7 @@ import {
 
 const PLUGIN_ID = "omx-bridge-plugin";
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
 
 const pluginConfigSchema = Type.Object(
@@ -26,6 +27,13 @@ const pluginConfigSchema = Type.Object(
     apiToken: Type.Optional(
       Type.String({
         description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN on the server when set.",
+      }),
+    ),
+    requestTimeoutMs: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        default: DEFAULT_REQUEST_TIMEOUT_MS,
+        description: "Timeout in milliseconds for each omx-bridge HTTP request.",
       }),
     ),
   },
@@ -139,6 +147,13 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
     return { bridgeUrl: DEFAULT_BRIDGE_URL };
   }
 
+  const requestTimeoutMs =
+    typeof pluginConfig.requestTimeoutMs === "number" &&
+    Number.isFinite(pluginConfig.requestTimeoutMs) &&
+    pluginConfig.requestTimeoutMs > 0
+      ? Math.floor(pluginConfig.requestTimeoutMs)
+      : DEFAULT_REQUEST_TIMEOUT_MS;
+
   return {
     bridgeUrl:
       typeof pluginConfig.bridgeUrl === "string" && pluginConfig.bridgeUrl.length > 0
@@ -152,6 +167,7 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
       typeof pluginConfig.apiToken === "string" && pluginConfig.apiToken.length > 0
         ? pluginConfig.apiToken
         : undefined,
+    requestTimeoutMs,
   };
 }
 
@@ -193,23 +209,45 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+async function fetchWithTimeout(
+  url: URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 async function requestJson<T>(
   api: OpenClawPluginApi,
   path: string,
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
-  const apiToken = getPluginConfig(api).apiToken;
-  const response = await fetch(buildBridgeUrl(api, path), {
+  const pluginConfig = getPluginConfig(api);
+  const response = await fetchWithTimeout(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
+      ...(pluginConfig.apiToken ? { Authorization: `Bearer ${pluginConfig.apiToken}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
-  });
+  }, pluginConfig.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
   const text = await response.text();
   const data = text.length > 0 ? safeJsonParse(text) : null;
@@ -229,6 +267,15 @@ function safeJsonParse(value: string): unknown {
   } catch {
     return value;
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
 }
 
 function toTextResult(payload: unknown) {
