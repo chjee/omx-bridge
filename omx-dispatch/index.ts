@@ -25,16 +25,10 @@ import {
   JOB_STATUS_VALUES,
   type BridgeJob,
   type BridgeJobExecution,
-  type BridgeJobStats,
-  type CallbackJobInput,
-  type CreateJobResponse,
-  type DispatchHealthResult,
   type JobSource,
   type JobStatus,
-  type SubmitJobInput,
-  type WaitForJobOptions,
-  type WaitForJobResult,
 } from "./tool-handlers.js";
+import { JobOperations } from "./job-operations.js";
 
 // ---------------------------------------------------------------------------
 // 설정
@@ -109,13 +103,6 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function clampNumber(value: number | undefined, fallback: number, min: number, max: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return Math.max(min, Math.min(max, fallback));
-  }
-  return Math.max(min, Math.min(max, Math.floor(value)));
-}
-
 // ---------------------------------------------------------------------------
 // Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
 //
@@ -156,14 +143,6 @@ const bridgeClient = new BridgeClient({
   apiToken: BRIDGE_API_TOKEN,
   timeoutMs: BRIDGE_REQUEST_TIMEOUT_MS,
 });
-
-async function requestJson<T>(
-  path: string,
-  init?: RequestInit,
-  signatureHeader?: string,
-): Promise<T> {
-  return bridgeClient.requestJson<T>(path, init, signatureHeader);
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -283,10 +262,6 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 const notificationStore = new NotificationStore<BridgeJob>({
   storePath: NOTIFICATION_STORE_PATH,
   maxQueueSize: MAX_NOTIFICATION_QUEUE_SIZE,
@@ -316,171 +291,6 @@ async function drainNotificationForJob(jobId: string): Promise<JobNotification<B
 
 async function drainNotifications(): Promise<Array<JobNotification<BridgeJob>>> {
   return notificationStore.drainAll();
-}
-
-async function submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse> {
-  const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source, sourceName } = input;
-  return requestJson<CreateJobResponse>("jobs", {
-    method: "POST",
-    body: JSON.stringify({
-      prompt,
-      ...(cwd ? { cwd } : {}),
-      ...(requestId ? { requestId } : {}),
-      ...(originRoutingKey ? { originRoutingKey } : {}),
-      ...(metadata ? { metadata } : {}),
-      ...(source ? { source } : {}),
-      ...(sourceName ? { sourceName } : {}),
-      notifyUrl: notifyUrl ?? SELF_NOTIFY_URL,
-    }),
-  });
-}
-
-async function getBridgeJob(jobId: string): Promise<BridgeJob> {
-  return requestJson<BridgeJob>(
-    `jobs/${encodeURIComponent(jobId)}`,
-    { method: "GET" },
-  );
-}
-
-async function getBridgeJobStats(): Promise<BridgeJobStats> {
-  return requestJson<BridgeJobStats>("jobs/stats", { method: "GET" });
-}
-
-async function listBridgeJobs(status?: JobStatus): Promise<BridgeJob[]> {
-  const search = new URLSearchParams();
-  if (status) search.set("status", status);
-  const suffix = search.size > 0 ? `?${search.toString()}` : "";
-  return requestJson<BridgeJob[]>(`jobs${suffix}`, { method: "GET" });
-}
-
-async function cancelBridgeJob(jobId: string): Promise<BridgeJob> {
-  return requestJson<BridgeJob>(
-    `jobs/${encodeURIComponent(jobId)}/cancel`,
-    { method: "POST" },
-  );
-}
-
-async function callbackBridgeJob(input: CallbackJobInput): Promise<BridgeJob> {
-  const { jobId, status, stdout, stderr, exitCode } = input;
-  const body = {
-    status,
-    ...(stdout !== undefined ? { stdout } : {}),
-    ...(stderr !== undefined ? { stderr } : {}),
-    ...(exitCode !== undefined ? { exitCode } : {}),
-  };
-  const bodyText = JSON.stringify(body);
-  const signatureHeader = BRIDGE_CALLBACK_SECRET
-    ? buildCallbackSignatureHeader(jobId, bodyText)
-    : undefined;
-  return requestJson<BridgeJob>(
-    `jobs/${encodeURIComponent(jobId)}/callback`,
-    { method: "POST", body: bodyText },
-    signatureHeader,
-  );
-}
-
-async function getDispatchHealth(): Promise<DispatchHealthResult> {
-  const notifications = await getNotificationStats();
-  try {
-    const stats = await getBridgeJobStats();
-    return {
-      bridge: {
-        reachable: true,
-        url: BRIDGE_URL,
-        stats,
-      },
-      notifications,
-    };
-  } catch (error) {
-    return {
-      bridge: {
-        reachable: false,
-        url: BRIDGE_URL,
-        error: describeError(error),
-      },
-      notifications,
-    };
-  }
-}
-
-function resolveWaitOptions(options: WaitForJobOptions): {
-  waitTimeoutMs: number;
-  pollIntervalMs: number;
-} {
-  return {
-    waitTimeoutMs: clampNumber(
-      options.waitTimeoutMs,
-      DEFAULT_WAIT_TIMEOUT_MS,
-      1,
-      MAX_WAIT_TIMEOUT_MS,
-    ),
-    pollIntervalMs: clampNumber(
-      options.pollIntervalMs,
-      DEFAULT_WAIT_POLL_INTERVAL_MS,
-      MIN_WAIT_POLL_INTERVAL_MS,
-      MAX_WAIT_POLL_INTERVAL_MS,
-    ),
-  };
-}
-
-async function waitForJobCompletion(
-  jobId: string,
-  options: WaitForJobOptions = {},
-): Promise<WaitForJobResult> {
-  const { waitTimeoutMs, pollIntervalMs } = resolveWaitOptions(options);
-  const deadline = Date.now() + waitTimeoutMs;
-  let latestJob = await getBridgeJob(jobId);
-  let terminalObservedAt: number | undefined;
-
-  while (true) {
-    const notification = await drainNotificationForJob(jobId);
-    if (notification) {
-      return {
-        jobId,
-        status: notification.job.status,
-        completed: isTerminalJobStatus(notification.job.status),
-        timedOut: false,
-        notification,
-        job: notification.job,
-      };
-    }
-
-    latestJob = await getBridgeJob(jobId);
-    if (isTerminalJobStatus(latestJob.status)) {
-      terminalObservedAt ??= Date.now();
-      if (Date.now() - terminalObservedAt >= TERMINAL_NOTIFICATION_GRACE_MS) {
-        return {
-          jobId,
-          status: latestJob.status,
-          completed: true,
-          timedOut: false,
-          notification: null,
-          job: latestJob,
-          notificationMissing: true,
-        };
-      }
-    } else {
-      terminalObservedAt = undefined;
-    }
-
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      return {
-        jobId,
-        status: latestJob.status,
-        completed: isTerminalJobStatus(latestJob.status),
-        timedOut: !isTerminalJobStatus(latestJob.status),
-        notification: null,
-        job: latestJob,
-        ...(isTerminalJobStatus(latestJob.status) ? { notificationMissing: true } : {}),
-      };
-    }
-
-    const nextDelay = terminalObservedAt
-      ? Math.min(remainingMs, MIN_WAIT_POLL_INTERVAL_MS)
-      : Math.min(remainingMs, pollIntervalMs);
-    await sleep(nextDelay);
-  }
 }
 
 async function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
@@ -537,6 +347,27 @@ const server = new Server<Request, ClaudeChannelNotification, Result>(
   },
 );
 
+const jobOperations = new JobOperations(
+  {
+    bridgeUrl: BRIDGE_URL,
+    callbackSecret: BRIDGE_CALLBACK_SECRET,
+    defaultNotifyUrl: () => SELF_NOTIFY_URL,
+    defaultWaitTimeoutMs: DEFAULT_WAIT_TIMEOUT_MS,
+    defaultWaitPollIntervalMs: DEFAULT_WAIT_POLL_INTERVAL_MS,
+    maxWaitTimeoutMs: MAX_WAIT_TIMEOUT_MS,
+    minWaitPollIntervalMs: MIN_WAIT_POLL_INTERVAL_MS,
+    maxWaitPollIntervalMs: MAX_WAIT_POLL_INTERVAL_MS,
+    terminalNotificationGraceMs: TERMINAL_NOTIFICATION_GRACE_MS,
+  },
+  {
+    bridgeClient,
+    getNotificationStats,
+    drainNotificationForJob,
+    buildCallbackSignatureHeader,
+    describeError,
+  },
+);
+
 const toolHandlers = createDispatchToolHandlers({
   config: {
     jobStatusValues: JOB_STATUS_VALUES,
@@ -545,14 +376,14 @@ const toolHandlers = createDispatchToolHandlers({
     maxWaitPollIntervalMs: MAX_WAIT_POLL_INTERVAL_MS,
     notificationPreviewMax: NOTIFICATION_PREVIEW_MAX,
   },
-  submitBridgeJob,
-  getBridgeJob,
-  waitForJobCompletion,
-  listBridgeJobs,
-  cancelBridgeJob,
-  callbackBridgeJob,
+  submitBridgeJob: (input) => jobOperations.submitBridgeJob(input),
+  getBridgeJob: (jobId) => jobOperations.getBridgeJob(jobId),
+  waitForJobCompletion: (jobId, options) => jobOperations.waitForJobCompletion(jobId, options),
+  listBridgeJobs: (status) => jobOperations.listBridgeJobs(status),
+  cancelBridgeJob: (jobId) => jobOperations.cancelBridgeJob(jobId),
+  callbackBridgeJob: (input) => jobOperations.callbackBridgeJob(input),
   drainNotifications,
-  getDispatchHealth,
+  getDispatchHealth: () => jobOperations.getDispatchHealth(),
   getNotificationStats,
 });
 

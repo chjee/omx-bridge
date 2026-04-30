@@ -16,6 +16,7 @@
   "include": [
     "./bridge-client.ts",
     "./index.ts",
+    "./job-operations.ts",
     "./notification-store.ts",
     "./tool-handlers.ts",
     "./webhook-server.ts"
