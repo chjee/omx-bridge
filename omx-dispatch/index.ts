@@ -28,6 +28,10 @@ const BRIDGE_CALLBACK_SECRET = process.env["BRIDGE_CALLBACK_SECRET"] ?? "";
 // header (matches bridge default-allow). Must match BRIDGE_API_TOKEN on
 // the server when set.
 const BRIDGE_API_TOKEN = process.env["BRIDGE_API_TOKEN"] ?? "";
+const BRIDGE_REQUEST_TIMEOUT_MS = parsePositiveInt(
+  process.env["BRIDGE_REQUEST_TIMEOUT_MS"],
+  10_000,
+);
 const WEBHOOK_PORT = parseInt(process.env["WEBHOOK_PORT"] ?? "0", 10); // 0 = dynamic range
 const WEBHOOK_PORT_MIN = 12000;
 const WEBHOOK_PORT_MAX = 12999;
@@ -267,12 +271,34 @@ function safeJsonParse(value: string): unknown {
   }
 }
 
+async function fetchWithTimeout(
+  url: URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 async function requestJson<T>(
   path: string,
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
-  const response = await fetch(buildBridgeUrl(path), {
+  const response = await fetchWithTimeout(buildBridgeUrl(path), {
     ...init,
     headers: {
       Accept: "application/json",
@@ -281,7 +307,7 @@ async function requestJson<T>(
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
-  });
+  }, BRIDGE_REQUEST_TIMEOUT_MS);
 
   const text = await response.text();
   const data = text.length > 0 ? safeJsonParse(text) : null;
@@ -301,6 +327,15 @@ function toTextResult(payload: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
   };
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
