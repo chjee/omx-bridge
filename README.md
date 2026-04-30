@@ -191,6 +191,17 @@ BRIDGE_MAX_TERMINAL_JOBS=1000
 BRIDGE_JOB_CLEANUP_INTERVAL_MS=3600000
 ```
 
+Job files are stored as JSON under `BRIDGE_JOBS_DIR` and include the submitted
+`prompt`, captured `stdout`, captured `stderr`, routing fields, and notification
+history in plain text. Treat the directory as sensitive local state. If prompts
+or command output may contain tokens, customer data, or private paths, restrict
+filesystem access and shorten retention for the deployment:
+
+```env
+BRIDGE_JOB_RETENTION_DAYS=1
+BRIDGE_MAX_TERMINAL_JOBS=100
+```
+
 ### API token guard
 
 `BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. When unset, the guard is disabled and these routes accept all requests — appropriate for the default `BRIDGE_HOST=127.0.0.1` localhost-only deployment.
@@ -414,6 +425,7 @@ cd omx-dispatch && npm run build
 - The bridge creates `.omx-bridge-instance.lock` in `BRIDGE_JOBS_DIR` on startup and refuses to run a second live instance against the same job directory. Stale lock files are recovered automatically when the recorded process is no longer alive.
 - New job submissions are rejected with `429 Too Many Requests` when `queued + running` jobs reach `BRIDGE_MAX_ACTIVE_JOBS`.
 - Terminal job files are cleaned up by age and maximum-count retention; active jobs are not deleted by cleanup.
+- Job files retain prompts and captured output in plain text until cleanup removes them.
 - Webhook payloads use `id` as the canonical job identifier. The MCP webhook accepts legacy `jobId` and normalizes it to `id`.
 - The MCP webhook exits on bind failure so port conflicts are visible instead of silently routing notifications to another session.
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
