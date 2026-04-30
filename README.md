@@ -69,6 +69,7 @@ Important root `.env` values:
 ```env
 PORT=3992
 BRIDGE_HOST=127.0.0.1
+BRIDGE_REQUEST_BODY_LIMIT=1mb
 BRIDGE_JOBS_DIR=.omx/state/bridge-jobs
 OMX_COMMAND=omx
 NOTIFY_MODE=openclaw
@@ -82,6 +83,10 @@ Idempotent submissions:
   routing-sensitive payload (`prompt`, `cwd`, `notifyUrl`, `originRoutingKey`,
   `source`, `sourceName`, and stable `metadata`). Reusing the same `source +
   requestId` with a different payload is rejected with `409 Conflict`.
+
+Request bodies are bounded by `BRIDGE_REQUEST_BODY_LIMIT` (default: `1mb`).
+`metadata` is intended for small routing/context fields and must serialize to
+8192 bytes or less.
 
 Notification modes:
 
