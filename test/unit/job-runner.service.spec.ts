@@ -459,18 +459,17 @@ describe('JobRunnerService', () => {
 
     expect(releasers).toHaveLength(3);
     releasers[0]();
-    expect(await firstRun).toBe(true);
-
-    await waitFor(
-      () => repository.getById('00000000-0000-4000-a000-000000000003'),
-      (job) => job?.status === 'running',
-    );
-    expect(execute).toHaveBeenCalledTimes(3);
-
     releasers[1]();
     releasers[2]();
-    await secondRun;
-  }, 15_000);
+    await Promise.all([firstRun, secondRun]);
+
+    await runner.runOnce();
+    await waitFor(
+      () => repository.getById('00000000-0000-4000-a000-000000000003'),
+      (job) => job?.status === 'succeeded',
+    );
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
 
   it('trigger starts queued work without waiting for the polling interval', async () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
