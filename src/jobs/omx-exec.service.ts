@@ -11,6 +11,8 @@ export type SpawnFunction = (
 ) => ChildProcessWithoutNullStreams;
 
 export const OMX_SPAWN = Symbol('OMX_SPAWN');
+// Codex exec treats "-" as the prompt-from-stdin marker; OMX passes this through.
+const OMX_STDIN_PROMPT_ARG = '-';
 
 export interface ExecuteOmxOptions {
   signal?: AbortSignal;
@@ -47,15 +49,26 @@ export class OmxExecService {
       let settled = false;
       let timedOut = false;
       let cancelled = false;
+      let stdinWriteFailed = false;
       let exitCode: number | null = null;
       let sigkillHandle: NodeJS.Timeout | undefined;
 
-      const child = this.spawnFn(this.config.omxCommand, ['exec', '--full-auto', '-s', 'danger-full-access', prompt], {
-        stdio: 'pipe',
-        env: this.buildChildEnv(),
-        ...(executionCwd ? { cwd: executionCwd } : {}),
+      const child = this.spawnFn(
+        this.config.omxCommand,
+        ['exec', '--full-auto', '-s', 'danger-full-access', OMX_STDIN_PROMPT_ARG],
+        {
+          stdio: 'pipe',
+          env: this.buildChildEnv(),
+          ...(executionCwd ? { cwd: executionCwd } : {}),
+        },
+      );
+      child.stdin.once('error', (error: NodeJS.ErrnoException) => {
+        stdinWriteFailed = true;
+        if (stderrCapture.length === 0) {
+          stderrCapture = this.appendCapturedOutput(stderrCapture, error.message);
+        }
       });
-      child.stdin.end();
+      child.stdin.end(prompt);
 
       const appendOutput = (chunk: string, target: 'stdout' | 'stderr'): void => {
         if (target === 'stdout') {
@@ -118,6 +131,10 @@ export class OmxExecService {
         }
         if (timedOut) {
           finish('failed', { errorType: 'timeout' });
+          return;
+        }
+        if (stdinWriteFailed) {
+          finish('failed', { errorType: 'execution_error' });
           return;
         }
 
