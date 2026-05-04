@@ -2,6 +2,8 @@
 
 Use this checklist after changing bridge runtime code, dispatch tooling, OpenClaw plugin config, auth settings, or systemd service wiring.
 
+For merge/release gate selection, start with [release-verification-checklist.md](release-verification-checklist.md). This document contains the detailed runtime smoke procedures.
+
 The checks assume the default local bridge URL:
 
 ```bash
