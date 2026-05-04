@@ -279,6 +279,37 @@ describe('Jobs API (e2e)', () => {
     expect(fakeTmuxSessionRunner.startedJobIds).toContain(response.jobId);
   });
 
+  it('returns compact session details for tmux and exec jobs', async () => {
+    const tmuxResponse = await controller.createJob({
+      prompt: 'inspect tmux session',
+      executionMode: 'tmux',
+    });
+    await waitFor(
+      () => repository.getById(tmuxResponse.jobId),
+      (currentJob) => currentJob?.status === 'running' && currentJob.session?.status === 'running',
+    );
+
+    await expect(controller.getJobSession(tmuxResponse.jobId)).resolves.toMatchObject({
+      jobId: tmuxResponse.jobId,
+      jobStatus: 'running',
+      executionMode: 'tmux',
+      attachCommand: expect.stringContaining('tmux attach -t fake-'),
+      session: {
+        backend: 'tmux',
+        status: 'running',
+      },
+    });
+
+    const execResponse = await controller.createJob({ prompt: 'inspect exec job' });
+    await expect(controller.getJobSession(execResponse.jobId)).resolves.toEqual({
+      jobId: execResponse.jobId,
+      jobStatus: 'queued',
+      executionMode: 'exec',
+      attachCommand: null,
+      session: null,
+    });
+  });
+
   it('processes jobs in FIFO order with only one running at a time', async () => {
     const submissions = [];
     for (const prompt of ['first', 'second', 'third']) {

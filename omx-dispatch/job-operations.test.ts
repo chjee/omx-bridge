@@ -102,6 +102,7 @@ test("submits jobs with the session notify URL when no explicit notify URL is su
 
   await operations.submitBridgeJob({
     prompt: "build",
+    executionMode: "tmux",
     cwd: "/workspace/project",
     requestId: "req-1",
     originRoutingKey: "telegram:direct:123",
@@ -114,6 +115,7 @@ test("submits jobs with the session notify URL when no explicit notify URL is su
   assert.equal(requests[0]?.init?.method, "POST");
   assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
     prompt: "build",
+    executionMode: "tmux",
     cwd: "/workspace/project",
     requestId: "req-1",
     originRoutingKey: "telegram:direct:123",
@@ -137,13 +139,14 @@ test("uses explicit notify URL instead of the session default", async () => {
   assert.equal(JSON.parse(String(requests[0]?.init?.body)).notifyUrl, "http://127.0.0.1:3994/notify");
 });
 
-test("builds bridge job list, cancel, and callback requests", async () => {
+test("builds bridge job list, session, cancel, and callback requests", async () => {
   const { operations, requests } = createOperations({
     callbackSecret: "secret",
     requestJson: async () => createJob({ status: "cancelled" }),
   });
 
   await operations.listBridgeJobs("failed");
+  await operations.getBridgeJobSession("job/1");
   await operations.cancelBridgeJob("job/1");
   await operations.callbackBridgeJob({
     jobId: "job/1",
@@ -154,13 +157,18 @@ test("builds bridge job list, cancel, and callback requests", async () => {
 
   assert.equal(requests[0]?.path, "jobs?status=failed");
   assert.deepEqual(requests[1], {
+    path: "jobs/job%2F1/session",
+    init: { method: "GET" },
+    signatureHeader: undefined,
+  });
+  assert.deepEqual(requests[2], {
     path: "jobs/job%2F1/cancel",
     init: { method: "POST" },
     signatureHeader: undefined,
   });
-  assert.equal(requests[2]?.path, "jobs/job%2F1/callback");
-  assert.equal(requests[2]?.signatureHeader, "sig:job/1:{\"status\":\"cancelled\",\"stdout\":\"stopped\",\"exitCode\":null}");
-  assert.deepEqual(JSON.parse(String(requests[2]?.init?.body)), {
+  assert.equal(requests[3]?.path, "jobs/job%2F1/callback");
+  assert.equal(requests[3]?.signatureHeader, "sig:job/1:{\"status\":\"cancelled\",\"stdout\":\"stopped\",\"exitCode\":null}");
+  assert.deepEqual(JSON.parse(String(requests[3]?.init?.body)), {
     status: "cancelled",
     stdout: "stopped",
     exitCode: null,

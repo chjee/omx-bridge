@@ -254,6 +254,7 @@ Confirm tool allowlists include either `omx-bridge-plugin` or the concrete tools
 ```text
 omx_submit_job
 omx_get_job
+omx_get_job_session
 omx_list_jobs
 omx_cancel_job
 ```

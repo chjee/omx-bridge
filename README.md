@@ -323,9 +323,10 @@ Available tools:
 
 | Tool | Description |
 |------|-------------|
-| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey`, `notifyUrl`, `source`, and `sourceName` for callback routing. |
+| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `executionMode`, `originRoutingKey`, `notifyUrl`, `source`, and `sourceName` for backend selection and callback routing. |
 | `omx_submit_job_and_wait` | Submit a prompt, then wait for that specific job to complete in the same tool call |
 | `omx_get_job` | Fetch status and result for a specific job |
+| `omx_get_job_session` | Fetch compact tmux session status and attach command details for a specific job |
 | `omx_wait_for_job` | Wait for an existing job to complete without draining other pending notifications |
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |

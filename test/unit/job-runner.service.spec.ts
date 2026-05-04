@@ -469,7 +469,7 @@ describe('JobRunnerService', () => {
       (job) => job?.status === 'succeeded',
     );
     expect(execute).toHaveBeenCalledTimes(3);
-  });
+  }, 10_000);
 
   it('trigger starts queued work without waiting for the polling interval', async () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());

@@ -54,6 +54,12 @@ const submitJobParameters = Type.Object(
       maxLength: 4000,
       description: "Prompt to submit to the omx-bridge service.",
     }),
+    executionMode: Type.Optional(
+      Type.Union(
+        [Type.Literal("exec"), Type.Literal("tmux")],
+        { description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs." },
+      ),
+    ),
     cwd: Type.Optional(
       Type.String({
         maxLength: 500,
@@ -140,9 +146,21 @@ interface BridgeJobExecution {
   recoveredFromRestart?: boolean;
 }
 
+interface TmuxSessionState {
+  backend: "tmux";
+  sessionName: string;
+  status: "starting" | "running" | "exited" | "cancelled" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
+
 interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: "exec" | "tmux";
   cwd?: string;
   originRoutingKey?: string;
   source?: (typeof JOB_SOURCE_VALUES)[number];
@@ -159,6 +177,15 @@ interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: BridgeJobExecution;
+  session?: TmuxSessionState;
+}
+
+interface BridgeJobSession {
+  jobId: string;
+  jobStatus: BridgeJob["status"];
+  executionMode: "exec" | "tmux";
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
 }
 
 interface CreateJobResponse {
@@ -338,6 +365,7 @@ export default definePluginEntry({
           body: JSON.stringify({
             prompt: input.prompt,
             source: "openclaw",
+            ...(input.executionMode ? { executionMode: input.executionMode } : {}),
             ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(input.requestId ? { requestId: input.requestId } : {}),
             ...(input.originRoutingKey ? { originRoutingKey: input.originRoutingKey } : {}),
@@ -361,6 +389,25 @@ export default definePluginEntry({
         const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(input.jobId)}`, {
           method: "GET",
         });
+
+        return toTextResult(result);
+      },
+    });
+
+    api.registerTool({
+      name: "omx_get_job_session",
+      label: "Get OMX Job Session",
+      description: "Fetch compact tmux session status and attach command details for a specific omx-bridge job.",
+      parameters: jobIdParameters,
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
+        const result = await requestJson<BridgeJobSession>(
+          api,
+          `jobs/${encodeURIComponent(input.jobId)}/session`,
+          {
+            method: "GET",
+          },
+        );
 
         return toTextResult(result);
       },

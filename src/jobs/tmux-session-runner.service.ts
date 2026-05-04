@@ -40,6 +40,8 @@ const STDERR_FILE = 'stderr.log';
 const EXIT_CODE_FILE = 'exit-code';
 const RUNNER_FILE = 'run.sh';
 const SESSION_FILE = 'session.json';
+const EXIT_CODE_GRACE_MS = 100;
+const EXIT_CODE_GRACE_INTERVAL_MS = 10;
 
 @Injectable()
 export class TmuxSessionRunnerService {
@@ -166,6 +168,11 @@ export class TmuxSessionRunnerService {
       return null;
     }
 
+    const lateExitCode = await this.waitForExitCode(job.id);
+    if (lateExitCode !== undefined) {
+      return this.collect(job);
+    }
+
     const stdout = await this.readCapturedFile(this.stdoutFile(job.id));
     const stderr = await this.readCapturedFile(this.stderrFile(job.id));
     const message = 'tmux session exited before writing an exit code';
@@ -285,6 +292,29 @@ export class TmuxSessionRunnerService {
       }
       throw error;
     }
+  }
+
+  private async waitForExitCode(jobId: string): Promise<number | undefined> {
+    const deadline = Date.now() + EXIT_CODE_GRACE_MS;
+
+    while (Date.now() <= deadline) {
+      const exitCode = await this.readExitCode(jobId);
+      if (exitCode !== undefined) {
+        return exitCode;
+      }
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      await this.sleep(Math.min(EXIT_CODE_GRACE_INTERVAL_MS, remainingMs));
+    }
+
+    return undefined;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async readCapturedFile(filePath: string): Promise<CapturedFile> {

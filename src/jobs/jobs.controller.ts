@@ -43,6 +43,12 @@ export class JobsController {
     return this.jobsService.getStats();
   }
 
+  @Get(':id/session')
+  @UseGuards(ApiTokenGuard)
+  async getJobSession(@Param('id') id: string) {
+    return this.jobsService.getJobSessionOrThrow(id);
+  }
+
   @Get(':id')
   @UseGuards(ApiTokenGuard)
   async getJob(@Param('id') id: string) {

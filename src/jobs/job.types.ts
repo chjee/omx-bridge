@@ -31,6 +31,14 @@ export interface TmuxSessionState {
   lastExitCode?: number | null;
 }
 
+export interface JobSessionSummary {
+  jobId: string;
+  jobStatus: JobStatus;
+  executionMode: JobExecutionMode;
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
+}
+
 export type NotifyChannelStatus = 'ok' | 'failed' | 'skipped';
 
 export interface NotifyChannelResult {

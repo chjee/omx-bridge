@@ -14,11 +14,25 @@ export interface BridgeJobExecution {
   recoveredFromRestart?: boolean;
 }
 
+export type TmuxSessionStatus = "starting" | "running" | "exited" | "cancelled" | "failed";
+
+export interface TmuxSessionState {
+  backend: "tmux";
+  sessionName: string;
+  status: TmuxSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
+
 export type JobSource = "dispatch" | "channel" | "synapse" | "openclaw";
 
 export interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: "exec" | "tmux";
   cwd?: string;
   queueOrder: string;
   requestId?: string;
@@ -35,6 +49,15 @@ export interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: BridgeJobExecution;
+  session?: TmuxSessionState;
+}
+
+export interface BridgeJobSession {
+  jobId: string;
+  jobStatus: JobStatus;
+  executionMode: "exec" | "tmux";
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
 }
 
 export interface CreateJobResponse {
@@ -54,6 +77,7 @@ export interface BridgeJobStats {
 
 export interface SubmitJobInput {
   prompt: string;
+  executionMode?: "exec" | "tmux";
   cwd?: string;
   requestId?: string;
   originRoutingKey?: string;
@@ -108,6 +132,7 @@ export interface DispatchToolDependencies {
   config: DispatchToolConfig;
   submitBridgeJob: (input: SubmitJobInput) => Promise<CreateJobResponse>;
   getBridgeJob: (jobId: string) => Promise<BridgeJob>;
+  getBridgeJobSession: (jobId: string) => Promise<BridgeJobSession>;
   waitForJobCompletion: (jobId: string, options?: WaitForJobOptions) => Promise<WaitForJobResult>;
   listBridgeJobs: (status?: JobStatus) => Promise<BridgeJob[]>;
   cancelBridgeJob: (jobId: string) => Promise<BridgeJob>;
@@ -167,6 +192,22 @@ function buildTools(config: DispatchToolConfig): unknown[] {
     {
       name: "omx_get_job",
       description: "Fetch the full status and result payload for a specific omx-bridge job.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          jobId: {
+            type: "string",
+            minLength: 1,
+            description: "Bridge job identifier.",
+          },
+        },
+        required: ["jobId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "omx_get_job_session",
+      description: "Fetch compact tmux session status and attach command details for a specific omx-bridge job.",
       inputSchema: {
         type: "object",
         properties: {
@@ -333,6 +374,11 @@ function submitJobInputSchema(notifyUrlDescription: string): {
         type: "string",
         description: "Working directory for the job (absolute path).",
       },
+      executionMode: {
+        type: "string",
+        enum: ["exec", "tmux"],
+        description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs.",
+      },
       requestId: {
         type: "string",
         maxLength: 200,
@@ -393,6 +439,12 @@ async function callTool(
     case "omx_get_job": {
       const { jobId } = args as { jobId: string };
       const result = await deps.getBridgeJob(jobId);
+      return toTextResult(result);
+    }
+
+    case "omx_get_job_session": {
+      const { jobId } = args as { jobId: string };
+      const result = await deps.getBridgeJobSession(jobId);
       return toTextResult(result);
     }
 

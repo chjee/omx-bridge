@@ -7,7 +7,7 @@ import type { JobCallbackDto } from './dto/job-callback.dto';
 import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
 import { JobNotifyService } from './job-notify.service';
-import type { BridgeJob, JobExecutionMetadata, JobStatus } from './job.types';
+import type { BridgeJob, JobExecutionMetadata, JobSessionSummary, JobStatus } from './job.types';
 
 export interface JobStats {
   queuedCount: number;
@@ -119,6 +119,17 @@ export class JobsService {
     }
 
     return job;
+  }
+
+  async getJobSessionOrThrow(id: string): Promise<JobSessionSummary> {
+    const job = await this.getJobOrThrow(id);
+    return {
+      jobId: job.id,
+      jobStatus: job.status,
+      executionMode: job.executionMode ?? 'exec',
+      attachCommand: job.session?.attachCommand ?? null,
+      session: job.session ?? null,
+    };
   }
 
   async completeJobFromCallback(id: string, input: JobCallbackDto): Promise<BridgeJob> {

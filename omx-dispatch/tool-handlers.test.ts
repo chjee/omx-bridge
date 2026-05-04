@@ -7,6 +7,7 @@ import {
   type CallbackJobInput,
   type DispatchToolDependencies,
   type JobStatus,
+  type BridgeJobSession,
   type SubmitJobInput,
   type WaitForJobOptions,
 } from "./tool-handlers.js";
@@ -31,6 +32,23 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   };
 }
 
+function createJobSession(overrides: Partial<BridgeJobSession> = {}): BridgeJobSession {
+  return {
+    jobId: overrides.jobId ?? "job-1",
+    jobStatus: overrides.jobStatus ?? "running",
+    executionMode: overrides.executionMode ?? "tmux",
+    attachCommand: overrides.attachCommand ?? "tmux attach -t omx-bridge-job-1",
+    session: overrides.session ?? {
+      backend: "tmux",
+      sessionName: "omx-bridge-job-1",
+      status: "running",
+      createdAt: "2026-04-30T00:00:00.000Z",
+      updatedAt: "2026-04-30T00:00:01.000Z",
+      attachCommand: "tmux attach -t omx-bridge-job-1",
+    },
+  };
+}
+
 function parseTextResult(result: { content: Array<{ type: "text"; text: string }> }): unknown {
   assert.equal(result.content[0]?.type, "text");
   return JSON.parse(result.content[0]?.text ?? "");
@@ -46,6 +64,7 @@ function createDeps(): {
     submitted: SubmitJobInput[];
     waited: Array<{ jobId: string; options?: WaitForJobOptions }>;
     listed: Array<JobStatus | undefined>;
+    sessions: string[];
     callbacks: CallbackJobInput[];
     statsPreviewCounts: Array<number | undefined>;
   };
@@ -54,6 +73,7 @@ function createDeps(): {
     submitted: [] as SubmitJobInput[],
     waited: [] as Array<{ jobId: string; options?: WaitForJobOptions }>,
     listed: [] as Array<JobStatus | undefined>,
+    sessions: [] as string[],
     callbacks: [] as CallbackJobInput[],
     statsPreviewCounts: [] as Array<number | undefined>,
   };
@@ -73,6 +93,10 @@ function createDeps(): {
         return { jobId: "job-1", status: "queued" };
       },
       getBridgeJob: async (jobId) => createJob({ id: jobId }),
+      getBridgeJobSession: async (jobId) => {
+        calls.sessions.push(jobId);
+        return createJobSession({ jobId });
+      },
       waitForJobCompletion: async (jobId, options) => {
         calls.waited.push({ jobId, options });
         const job = createJob({ id: jobId });
@@ -144,6 +168,7 @@ test("lists dispatch MCP tools with configured bounds", async () => {
     "omx_submit_job",
     "omx_submit_job_and_wait",
     "omx_get_job",
+    "omx_get_job_session",
     "omx_wait_for_job",
     "omx_list_jobs",
     "omx_cancel_job",
@@ -168,6 +193,7 @@ test("submits a job and waits without leaking wait options into the submit paylo
 
   const result = await handlers.callTool(toolRequest("omx_submit_job_and_wait", {
     prompt: "build it",
+    executionMode: "tmux",
     cwd: "/workspace/project",
     source: "dispatch",
     waitTimeoutMs: 1234,
@@ -177,6 +203,7 @@ test("submits a job and waits without leaking wait options into the submit paylo
   assert.deepEqual(calls.submitted, [
     {
       prompt: "build it",
+      executionMode: "tmux",
       cwd: "/workspace/project",
       source: "dispatch",
     },
@@ -193,9 +220,15 @@ test("submits a job and waits without leaking wait options into the submit paylo
   assert.equal((parseTextResult(result) as { jobId: string }).jobId, "job-1");
 });
 
-test("routes list, callback, notifications, and stats tools through injected dependencies", async () => {
+test("routes session, list, callback, notifications, and stats tools through injected dependencies", async () => {
   const { deps, calls } = createDeps();
   const handlers = createDispatchToolHandlers(deps);
+
+  assert.deepEqual(
+    parseTextResult(await handlers.callTool(toolRequest("omx_get_job_session", { jobId: "job-session" }))),
+    asJsonValue(createJobSession({ jobId: "job-session" })),
+  );
+  assert.deepEqual(calls.sessions, ["job-session"]);
 
   assert.deepEqual(
     parseTextResult(await handlers.callTool(toolRequest("omx_list_jobs", { status: "failed" }))),

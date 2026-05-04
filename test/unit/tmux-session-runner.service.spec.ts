@@ -131,6 +131,49 @@ describe('TmuxSessionRunnerService', () => {
     });
   });
 
+  it('collects a late exit code after observing a dead session', async () => {
+    const config = await createConfig({ jobTimeoutMs: 60 * 60 * 1000 });
+    const job = createJob({
+      startedAt: new Date().toISOString(),
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      },
+    });
+    const sessionDirectory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(sessionDirectory, { recursive: true });
+    await fs.writeFile(path.join(sessionDirectory, 'stdout.log'), 'done late', 'utf8');
+    await fs.writeFile(path.join(sessionDirectory, 'stderr.log'), '', 'utf8');
+
+    const hasSession = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => {
+        hasSession.emit('close', 1);
+        setTimeout(() => {
+          void fs.writeFile(path.join(sessionDirectory, 'exit-code'), '0\n', 'utf8');
+        }, 20);
+      });
+      return hasSession as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      session: {
+        status: 'exited',
+        lastExitCode: 0,
+      },
+      result: {
+        status: 'succeeded',
+        stdout: 'done late',
+        exitCode: 0,
+      },
+    });
+  });
+
   it('fails a dead session that did not write an exit code', async () => {
     const config = await createConfig({ jobTimeoutMs: 60 * 60 * 1000 });
     const hasSession = new MockChildProcess();

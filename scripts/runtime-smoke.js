@@ -1256,7 +1256,7 @@ async function smokeOpenClawPluginDiscovery() {
   }
   const info = await runCommand(openclawPath, ['plugins', 'info', 'omx-bridge-plugin'], { timeoutMs: 15_000 });
   assert(info.stdout.includes('Status: loaded'), 'OpenClaw plugin is not loaded');
-  for (const tool of ['omx_submit_job', 'omx_get_job', 'omx_list_jobs', 'omx_cancel_job']) {
+  for (const tool of ['omx_submit_job', 'omx_get_job', 'omx_get_job_session', 'omx_list_jobs', 'omx_cancel_job']) {
     assert(info.stdout.includes(tool), `OpenClaw plugin info did not include ${tool}`);
   }
   log('OpenClaw plugin discovery passed');

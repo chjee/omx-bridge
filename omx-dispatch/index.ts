@@ -201,6 +201,7 @@ const toolHandlers = createDispatchToolHandlers({
   },
   submitBridgeJob: (input) => jobOperations.submitBridgeJob(input),
   getBridgeJob: (jobId) => jobOperations.getBridgeJob(jobId),
+  getBridgeJobSession: (jobId) => jobOperations.getBridgeJobSession(jobId),
   waitForJobCompletion: (jobId, options) => jobOperations.waitForJobCompletion(jobId, options),
   listBridgeJobs: (status) => jobOperations.listBridgeJobs(status),
   cancelBridgeJob: (jobId) => jobOperations.cancelBridgeJob(jobId),
