@@ -63,6 +63,91 @@ function assert(condition, message) {
   }
 }
 
+function captureFailureMessage(callback) {
+  try {
+    callback();
+  } catch (error) {
+    return String(error?.message ?? error);
+  }
+  fail('expected diagnostic assertion to fail');
+}
+
+function diagnosticValue(value, maxChars = 1_500) {
+  let rendered;
+  try {
+    rendered = JSON.stringify(value, null, 2);
+  } catch {
+    rendered = String(value);
+  }
+  return truncateForDiagnostic(redactDiagnosticText(rendered), maxChars);
+}
+
+function assertEqual(actual, expected, message, context = undefined) {
+  if (actual === expected) {
+    return;
+  }
+  const details = {
+    expected,
+    actual,
+    ...(context === undefined ? {} : { context }),
+  };
+  fail(`${message}: ${diagnosticValue(details)}`);
+}
+
+function assertIncludes(text, expected, message, context = undefined) {
+  if (typeof text === 'string' && text.includes(expected)) {
+    return;
+  }
+  const details = {
+    expectedSubstring: expected,
+    text: typeof text === 'string' ? text : `<${typeof text}>`,
+    ...(context === undefined ? {} : { context }),
+  };
+  fail(`${message}: ${diagnosticValue(details, 2_500)}`);
+}
+
+function compactJobDiagnostic(job) {
+  if (!job || typeof job !== 'object') {
+    return job;
+  }
+  return {
+    id: job.id,
+    status: job.status,
+    executionMode: job.executionMode,
+    source: job.source,
+    sourceName: job.sourceName,
+    originRoutingKey: job.originRoutingKey,
+    notifyUrl: job.notifyUrl ? '<redacted>' : undefined,
+    stdout: summarizeTextField(job.stdout),
+    stderr: summarizeTextField(job.stderr),
+    execution: executionSummary(job.execution),
+    session: job.session,
+    notifyOutcome: notifyOutcomeSummary(job.notifyOutcome),
+  };
+}
+
+function compactNotifyRequests(requests) {
+  return requests.map((request) => ({
+    method: request.method,
+    url: request.url ? redactDiagnosticText(request.url) : request.url,
+    jobId: request.json?.id,
+    status: request.json?.status,
+    source: request.json?.source,
+    sourceName: request.json?.sourceName,
+    notifyUrl: request.json?.notifyUrl ? '<redacted>' : undefined,
+  }));
+}
+
+function assertNotifyRequestReceived(requests, jobId, label) {
+  if (requests.some((request) => request.json?.id === jobId)) {
+    return;
+  }
+  fail(`${label} callback was not received: ${diagnosticValue({
+    expectedJobId: jobId,
+    receivedRequests: compactNotifyRequests(requests),
+  })}`);
+}
+
 function truncateForDiagnostic(value, maxChars = 4_000) {
   if (!value) {
     return '';
@@ -479,6 +564,30 @@ async function smokeDiagnosticsFixture() {
   assert(result.stderr.includes('"command": "<redacted>"'), 'diagnostics fixture did not redact execution command');
   assert(result.stderr.includes('token=<redacted>'), 'diagnostics fixture did not redact token-like bridge output');
   assert(!result.stderr.includes('super-secret'), 'diagnostics fixture leaked secret metadata/output');
+
+  const equalityMessage = captureFailureMessage(() => {
+    assertEqual('actual token=super-secret', 'expected', 'diagnostic equality fixture');
+  });
+  assert(equalityMessage.includes('"expected": "expected"'), 'diagnostic equality helper omitted expected value');
+  assert(equalityMessage.includes('"actual": "actual token=<redacted>"'), 'diagnostic equality helper omitted redacted actual value');
+  assert(!equalityMessage.includes('super-secret'), 'diagnostic equality helper leaked secret text');
+
+  const includesMessage = captureFailureMessage(() => {
+    assertIncludes('Status: unloaded', 'Status: loaded', 'OpenClaw plugin fixture');
+  });
+  assert(includesMessage.includes('"expectedSubstring": "Status: loaded"'), 'diagnostic include helper omitted expected substring');
+  assert(includesMessage.includes('"text": "Status: unloaded"'), 'diagnostic include helper omitted actual text');
+
+  const notifyMessage = captureFailureMessage(() => {
+    assertNotifyRequestReceived(
+      [{ method: 'POST', url: '/notify?token=super-secret', json: { id: 'other-job', notifyUrl: 'http://127.0.0.1:1/notify?token=super-secret' } }],
+      'expected-job',
+      'diagnostic notify fixture',
+    );
+  });
+  assert(notifyMessage.includes('"expectedJobId": "expected-job"'), 'diagnostic notify helper omitted expected job id');
+  assert(notifyMessage.includes('"jobId": "other-job"'), 'diagnostic notify helper omitted received request summary');
+  assert(!notifyMessage.includes('super-secret'), 'diagnostic notify helper leaked secret text');
 
   const preservedMatch = result.stdout.match(/preserved failed runtime smoke temp dir: (.+)$/m);
   assert(preservedMatch, 'diagnostics fixture did not preserve the temp dir with KEEP_RUNTIME_SMOKE_DIR=1');
@@ -909,14 +1018,14 @@ async function smokeBridgeApi() {
       metadata: { smoke: 'runtime' },
     });
     const dispatchJob = await waitForNotifyOutcome(port, dispatchSubmit.jobId);
-    assert(dispatchJob.status === 'succeeded', `dispatch job status was ${dispatchJob.status}`);
-    assert(dispatchJob.stdout === 'OK\n', 'dispatch job stdout was not captured');
-    assert(dispatchJob.originRoutingKey === 'telegram:direct:123', 'originRoutingKey was not preserved');
-    assert(dispatchJob.sourceName === 'omx-dispatch', 'sourceName was not preserved');
-    assert(dispatchJob.metadata?.smoke === 'runtime', 'metadata was not preserved');
-    assert(dispatchJob.notifyOutcome?.claudeWebhook?.status === 'ok', 'per-job notifyUrl did not report ok');
-    assert(dispatchJob.notifyOutcome?.telegram?.skippedReason === 'webhook_ok', 'telegram was not skipped after webhook ok');
-    assert(notify.requests.some((request) => request.json?.id === dispatchSubmit.jobId), 'local notify server did not receive dispatch callback');
+    assertEqual(dispatchJob.status, 'succeeded', 'dispatch job status mismatch', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.stdout, 'OK\n', 'dispatch job stdout mismatch', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.originRoutingKey, 'telegram:direct:123', 'dispatch originRoutingKey was not preserved', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.sourceName, 'omx-dispatch', 'dispatch sourceName was not preserved', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.metadata?.smoke, 'runtime', 'dispatch metadata was not preserved', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.notifyOutcome?.claudeWebhook?.status, 'ok', 'per-job notifyUrl did not report ok', compactJobDiagnostic(dispatchJob));
+    assertEqual(dispatchJob.notifyOutcome?.telegram?.skippedReason, 'webhook_ok', 'telegram was not skipped after webhook ok', compactJobDiagnostic(dispatchJob));
+    assertNotifyRequestReceived(notify.requests, dispatchSubmit.jobId, 'dispatch notifyUrl');
 
     const openclawSubmit = await requestJson(port, 'POST', '/jobs', {
       prompt: 'runtime smoke openclaw fields',
@@ -927,13 +1036,13 @@ async function smokeBridgeApi() {
       metadata: { channel: 'openclaw' },
     });
     const openclawJob = await waitForNotifyOutcome(port, openclawSubmit.jobId);
-    assert(openclawJob.status === 'succeeded', `openclaw job status was ${openclawJob.status}`);
-    assert(openclawJob.source === 'openclaw', 'openclaw source was not preserved');
-    assert(openclawJob.sourceName === 'openclaw-telegram', 'openclaw sourceName was not preserved');
-    assert(openclawJob.originRoutingKey === 'telegram:direct:456', 'openclaw originRoutingKey was not preserved');
-    assert(openclawJob.metadata?.channel === 'openclaw', 'openclaw metadata was not preserved');
-    assert(openclawJob.notifyOutcome?.claudeWebhook?.skippedReason === 'no_notify_url', 'missing CLAUDE_NOTIFY_URL was not recorded');
-    assert(openclawJob.notifyOutcome?.telegram?.skippedReason === 'not_configured', 'unconfigured Telegram fallback was not recorded');
+    assertEqual(openclawJob.status, 'succeeded', 'openclaw job status mismatch', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.source, 'openclaw', 'openclaw source was not preserved', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.sourceName, 'openclaw-telegram', 'openclaw sourceName was not preserved', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.originRoutingKey, 'telegram:direct:456', 'openclaw originRoutingKey was not preserved', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.metadata?.channel, 'openclaw', 'openclaw metadata was not preserved', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.notifyOutcome?.claudeWebhook?.skippedReason, 'no_notify_url', 'missing CLAUDE_NOTIFY_URL was not recorded', compactJobDiagnostic(openclawJob));
+    assertEqual(openclawJob.notifyOutcome?.telegram?.skippedReason, 'not_configured', 'unconfigured Telegram fallback was not recorded', compactJobDiagnostic(openclawJob));
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('bridge API submit/get/notifyUrl and OpenClaw field preservation', tempDir, [bridge].filter(Boolean));
@@ -1017,23 +1126,23 @@ async function smokeTmuxRuntime() {
       metadata: { smoke: 'tmux' },
     });
     const job = await waitForTerminalJob(port, submit.jobId, 10_000);
-    assert(job.status === 'succeeded', `tmux job status was ${job.status}; stderr=${job.stderr || '<empty>'}`);
-    assert(job.executionMode === 'tmux', 'tmux job did not preserve executionMode');
-    assert(job.stdout.includes('TMUX_OK:runtime smoke tmux'), `tmux job stdout was not captured: ${job.stdout || '<empty>'}`);
-    assert(job.session?.backend === 'tmux', 'tmux job did not persist session backend');
-    assert(job.session?.status === 'exited', `tmux session status was ${job.session?.status}`);
-    assert(job.session?.lastExitCode === 0, `tmux session lastExitCode was ${job.session?.lastExitCode}`);
-    assert(job.session?.attachCommand?.includes('attach -t'), 'tmux attachCommand was not persisted');
+    assertEqual(job.status, 'succeeded', 'tmux job status mismatch', compactJobDiagnostic(job));
+    assertEqual(job.executionMode, 'tmux', 'tmux job did not preserve executionMode', compactJobDiagnostic(job));
+    assertIncludes(job.stdout, 'TMUX_OK:runtime smoke tmux', 'tmux job stdout was not captured', compactJobDiagnostic(job));
+    assertEqual(job.session?.backend, 'tmux', 'tmux session backend mismatch', compactJobDiagnostic(job));
+    assertEqual(job.session?.status, 'exited', 'tmux persisted session status mismatch', compactJobDiagnostic(job));
+    assertEqual(job.session?.lastExitCode, 0, 'tmux persisted session lastExitCode mismatch', compactJobDiagnostic(job));
+    assertIncludes(job.session?.attachCommand, 'attach -t', 'tmux attachCommand was not persisted', compactJobDiagnostic(job));
 
     const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
-    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux prompt file was not created');
-    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux runner script was not created');
-    assert(fs.existsSync(path.join(sessionDir, 'session.json')), 'tmux session file was not created');
-    assert(fs.existsSync(path.join(sessionDir, 'exit-code')), 'tmux exit-code file was not created');
-    assert(fs.readFileSync(path.join(sessionDir, 'prompt.txt'), 'utf8') === 'runtime smoke tmux', 'tmux prompt file did not preserve prompt');
-    assert(fs.readFileSync(path.join(sessionDir, 'exit-code'), 'utf8').trim() === '0', 'tmux exit-code file was not zero');
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), `tmux prompt file was not created in ${sessionDir}`);
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), `tmux runner script was not created in ${sessionDir}`);
+    assert(fs.existsSync(path.join(sessionDir, 'session.json')), `tmux session file was not created in ${sessionDir}`);
+    assert(fs.existsSync(path.join(sessionDir, 'exit-code')), `tmux exit-code file was not created in ${sessionDir}`);
+    assertEqual(fs.readFileSync(path.join(sessionDir, 'prompt.txt'), 'utf8'), 'runtime smoke tmux', 'tmux prompt file did not preserve prompt', { sessionDir });
+    assertEqual(fs.readFileSync(path.join(sessionDir, 'exit-code'), 'utf8').trim(), '0', 'tmux exit-code file was not zero', { sessionDir });
     const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
-    assert(sessionFile.status === 'exited', `session.json status was ${sessionFile.status}`);
+    assertEqual(sessionFile.status, 'exited', 'tmux session.json status mismatch', { sessionDir, sessionFile });
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('tmux session runtime smoke', tempDir, [bridge].filter(Boolean));
@@ -1086,21 +1195,21 @@ async function smokeTmuxCancelRuntime() {
     const tmuxPid = readFakeTmuxPid(fakeTmuxStateDir, sessionName);
 
     const cancelResponse = await requestJson(port, 'POST', `/jobs/${encodeURIComponent(submit.jobId)}/cancel`);
-    assert(cancelResponse.status === 'cancelled', `tmux cancel response status was ${cancelResponse.status}`);
-    assert(cancelResponse.session?.status === 'cancelled', `tmux cancel response session status was ${cancelResponse.session?.status}`);
-    assert(cancelResponse.execution?.errorType === 'cancelled', 'tmux cancel response did not record errorType=cancelled');
+    assertEqual(cancelResponse.status, 'cancelled', 'tmux cancel response status mismatch', compactJobDiagnostic(cancelResponse));
+    assertEqual(cancelResponse.session?.status, 'cancelled', 'tmux cancel response session status mismatch', compactJobDiagnostic(cancelResponse));
+    assertEqual(cancelResponse.execution?.errorType, 'cancelled', 'tmux cancel response did not record errorType=cancelled', compactJobDiagnostic(cancelResponse));
     await waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, tmuxPid);
 
     const cancelledJob = await waitForNotifyOutcome(port, submit.jobId);
-    assert(cancelledJob.status === 'cancelled', `tmux cancelled job status was ${cancelledJob.status}`);
-    assert(cancelledJob.session?.status === 'cancelled', `tmux cancelled session status was ${cancelledJob.session?.status}`);
-    assert(cancelledJob.execution?.errorType === 'cancelled', 'tmux cancelled job did not record errorType=cancelled');
+    assertEqual(cancelledJob.status, 'cancelled', 'tmux cancelled job status mismatch', compactJobDiagnostic(cancelledJob));
+    assertEqual(cancelledJob.session?.status, 'cancelled', 'tmux cancelled persisted session status mismatch', compactJobDiagnostic(cancelledJob));
+    assertEqual(cancelledJob.execution?.errorType, 'cancelled', 'tmux cancelled job did not record errorType=cancelled', compactJobDiagnostic(cancelledJob));
 
     const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
-    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux cancel prompt file was not created');
-    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux cancel runner script was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), `tmux cancel prompt file was not created in ${sessionDir}`);
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), `tmux cancel runner script was not created in ${sessionDir}`);
     const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
-    assert(sessionFile.status === 'cancelled', `tmux cancel session.json status was ${sessionFile.status}`);
+    assertEqual(sessionFile.status, 'cancelled', 'tmux cancel session.json status mismatch', { sessionDir, sessionFile });
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('tmux session cancel smoke', tempDir, [bridge].filter(Boolean));
@@ -1153,21 +1262,21 @@ async function smokeTmuxTimeoutRuntime() {
     const sessionName = runningJob.session.sessionName;
     const tmuxPid = readFakeTmuxPid(fakeTmuxStateDir, sessionName);
     const job = await waitForNotifyOutcome(port, submit.jobId, 10_000);
-    assert(job.status === 'failed', `tmux timeout job status was ${job.status}`);
-    assert(job.session?.status === 'failed', `tmux timeout session status was ${job.session?.status}`);
-    assert(job.session?.lastExitCode === null, `tmux timeout session lastExitCode was ${job.session?.lastExitCode}`);
-    assert(job.exitCode === null, `tmux timeout exitCode was ${job.exitCode}`);
-    assert(job.execution?.errorType === 'timeout', `tmux timeout errorType was ${job.execution?.errorType}`);
-    assert(job.execution?.timedOut === true, 'tmux timeout did not record timedOut=true');
-    assert(job.stderr.includes(`Command timed out after ${timeoutMs}ms`), `tmux timeout stderr was ${job.stderr || '<empty>'}`);
+    assertEqual(job.status, 'failed', 'tmux timeout job status mismatch', compactJobDiagnostic(job));
+    assertEqual(job.session?.status, 'failed', 'tmux timeout persisted session status mismatch', compactJobDiagnostic(job));
+    assertEqual(job.session?.lastExitCode, null, 'tmux timeout persisted session lastExitCode mismatch', compactJobDiagnostic(job));
+    assertEqual(job.exitCode, null, 'tmux timeout exitCode mismatch', compactJobDiagnostic(job));
+    assertEqual(job.execution?.errorType, 'timeout', 'tmux timeout errorType mismatch', compactJobDiagnostic(job));
+    assertEqual(job.execution?.timedOut, true, 'tmux timeout did not record timedOut=true', compactJobDiagnostic(job));
+    assertIncludes(job.stderr, `Command timed out after ${timeoutMs}ms`, 'tmux timeout stderr mismatch', compactJobDiagnostic(job));
     await waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, tmuxPid);
 
     const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
-    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux timeout prompt file was not created');
-    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux timeout runner script was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), `tmux timeout prompt file was not created in ${sessionDir}`);
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), `tmux timeout runner script was not created in ${sessionDir}`);
     const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
-    assert(sessionFile.status === 'failed', `tmux timeout session.json status was ${sessionFile.status}`);
-    assert(sessionFile.lastExitCode === null, `tmux timeout session.json lastExitCode was ${sessionFile.lastExitCode}`);
+    assertEqual(sessionFile.status, 'failed', 'tmux timeout session.json status mismatch', { sessionDir, sessionFile });
+    assertEqual(sessionFile.lastExitCode, null, 'tmux timeout session.json lastExitCode mismatch', { sessionDir, sessionFile });
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('tmux session timeout smoke', tempDir, [bridge].filter(Boolean));
@@ -1226,10 +1335,23 @@ async function smokeDispatchMcp() {
         pollIntervalMs: 100,
       },
     }));
-    assert(wait.completed === true, 'omx_submit_job_and_wait did not complete');
-    assert(wait.status === 'succeeded', `dispatch wait status was ${wait.status}`);
-    assert(wait.notification?.job?.notifyUrl === `http://127.0.0.1:${webhookPort}/notify`, 'dispatch notifyUrl was not the session webhook');
-    assert(wait.job?.stdout === 'OK\n', 'dispatch MCP job stdout was not captured');
+    assertEqual(wait.completed, true, 'omx_submit_job_and_wait did not complete', wait);
+    assertEqual(wait.status, 'succeeded', 'dispatch wait status mismatch', wait);
+    assertEqual(
+      wait.notification?.job?.notifyUrl,
+      `http://127.0.0.1:${webhookPort}/notify`,
+      'dispatch MCP notifyUrl was not the session webhook',
+      {
+        webhookPort,
+        wait: {
+          completed: wait.completed,
+          status: wait.status,
+          notificationJob: compactJobDiagnostic(wait.notification?.job),
+          job: compactJobDiagnostic(wait.job),
+        },
+      },
+    );
+    assertEqual(wait.job?.stdout, 'OK\n', 'dispatch MCP job stdout mismatch', compactJobDiagnostic(wait.job));
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('omx-dispatch MCP health and submit-and-wait', tempDir, [bridge].filter(Boolean));
@@ -1255,9 +1377,15 @@ async function smokeOpenClawPluginDiscovery() {
     return;
   }
   const info = await runCommand(openclawPath, ['plugins', 'info', 'omx-bridge-plugin'], { timeoutMs: 15_000 });
-  assert(info.stdout.includes('Status: loaded'), 'OpenClaw plugin is not loaded');
+  assertIncludes(info.stdout, 'Status: loaded', 'OpenClaw plugin is not loaded', {
+    command: openclawPath,
+    stderr: info.stderr,
+  });
   for (const tool of ['omx_submit_job', 'omx_get_job', 'omx_get_job_session', 'omx_list_jobs', 'omx_cancel_job']) {
-    assert(info.stdout.includes(tool), `OpenClaw plugin info did not include ${tool}`);
+    assertIncludes(info.stdout, tool, `OpenClaw plugin info did not include ${tool}`, {
+      command: openclawPath,
+      stderr: info.stderr,
+    });
   }
   log('OpenClaw plugin discovery passed');
 }
@@ -1324,14 +1452,11 @@ async function smokeLiveOmxExec({ fake = false } = {}) {
       metadata: { smoke: 'live-omx' },
     });
     const job = await waitForNotifyOutcome(port, submit.jobId, timeoutMs + 15_000);
-    assert(job.status === 'succeeded', `live OMX job status was ${job.status}; stderr=${job.stderr || '<empty>'}`);
-    assert(
-      job.stdout.includes(marker),
-      `live OMX job output did not include ${marker}; stdout=${job.stdout || '<empty>'}`,
-    );
-    assert(job.execution?.command === omxCommand, 'live OMX job did not record the selected OMX command');
-    assert(job.notifyOutcome?.claudeWebhook?.status === 'ok', 'live OMX notifyUrl did not report ok');
-    assert(notify.requests.some((request) => request.json?.id === submit.jobId), 'local notify server did not receive live OMX callback');
+    assertEqual(job.status, 'succeeded', 'live OMX job status mismatch', compactJobDiagnostic(job));
+    assertIncludes(job.stdout, marker, 'live OMX job output did not include expected marker', compactJobDiagnostic(job));
+    assertEqual(job.execution?.command, omxCommand, 'live OMX job did not record the selected OMX command', compactJobDiagnostic(job));
+    assertEqual(job.notifyOutcome?.claudeWebhook?.status, 'ok', 'live OMX notifyUrl did not report ok', compactJobDiagnostic(job));
+    assertNotifyRequestReceived(notify.requests, submit.jobId, 'live OMX notifyUrl');
   } catch (error) {
     failed = true;
     printSmokeDiagnostics(`${fake ? 'fake ' : ''}live OMX exec smoke`, tempDir, [bridge].filter(Boolean));
