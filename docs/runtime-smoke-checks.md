@@ -43,9 +43,38 @@ This starts temporary loopback bridge instances from build artifacts with isolat
 - OpenClaw `source`, `sourceName`, `originRoutingKey`, and `metadata` preservation
 - cancellation terminal state and notification persistence
 - `omx-dispatch` MCP `omx_health` and `omx_submit_job_and_wait`
+- live OMX smoke wiring with a fake OMX command
 - optional OpenClaw plugin discovery when the `openclaw` CLI is installed
 
 The automated smoke does not run the real OMX CLI and does not contact live Telegram or OpenClaw hooks. Keep the manual checks below for deployed service wiring, real OMX execution, and external notification delivery.
+
+Run the opt-in live OMX execution smoke only when local model credentials and `omx` are configured:
+
+```bash
+npm run verify:runtime:live
+```
+
+This starts a temporary loopback bridge and submits one job through the real `omx exec` command. It still uses a local callback webhook and does not contact live Telegram or OpenClaw hooks.
+
+Treat this as an operator smoke, not a deterministic CI/release gate. It uses local provider credentials, may consume model quota, and can fail because of local `omx` installation, account state, model routing, or model output variability rather than a bridge regression.
+
+Optional knobs:
+
+```bash
+OMX_LIVE_SMOKE_COMMAND=/path/to/omx npm run verify:runtime:live
+OMX_LIVE_SMOKE_TIMEOUT_MS=600000 npm run verify:runtime:live
+```
+
+Expected:
+
+- job status is `succeeded`
+- job output includes `OMX_BRIDGE_LIVE_SMOKE_OK`
+- completion reaches the local callback webhook
+
+If the live smoke fails, first separate bridge failures from local OMX/model failures:
+
+- Bridge likely failed if `/jobs` submission, job polling, cwd validation, or local callback delivery fails.
+- Local OMX/model likely failed if the job reaches `failed`, times out, lacks provider credentials, exhausts quota, or omits the expected marker.
 
 ## 2. Build Artifacts
 
