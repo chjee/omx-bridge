@@ -14,6 +14,14 @@ class MockChildProcess extends EventEmitter {
   kill = jest.fn(() => true);
 }
 
+function captureStdin(child: MockChildProcess): () => string {
+  const chunks: string[] = [];
+  child.stdin.on('data', (chunk: Buffer | string) => {
+    chunks.push(chunk.toString());
+  });
+  return () => chunks.join('');
+}
+
 function createService(
   spawnFn: SpawnFunction,
   overrides: Partial<BridgeConfig> = {},
@@ -54,6 +62,7 @@ describe('OmxExecService', () => {
       () => child as unknown as ChildProcessWithoutNullStreams,
     );
     const service = createService(spawnFn, { maxOutputChars: 100 });
+    const readStdin = captureStdin(child);
 
     const pending = service.execute('hello world');
     child.stdout.write('ok');
@@ -64,9 +73,10 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', 'hello world'],
+      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
+    expect(readStdin()).toBe('hello world');
     expect(child.stdin.writableEnded).toBe(true);
     expect(result).toMatchObject({
       status: 'succeeded',
@@ -97,6 +107,25 @@ describe('OmxExecService', () => {
     });
   });
 
+  it('fails when prompt stdin delivery errors even if the child exits cleanly', async () => {
+    const child = new MockChildProcess();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 100 },
+    );
+
+    const pending = service.execute('lost prompt');
+    child.stdin.emit('error', Object.assign(new Error('stdin EPIPE'), { code: 'EPIPE' }));
+    child.emit('close', 0);
+
+    await expect(pending).resolves.toMatchObject({
+      status: 'failed',
+      stderr: 'stdin EPIPE',
+      exitCode: 0,
+      execution: { errorType: 'execution_error' },
+    });
+  });
+
   it('passes only allowlisted environment variables to omx exec', async () => {
     process.env = {
       PATH: '/usr/bin',
@@ -115,6 +144,7 @@ describe('OmxExecService', () => {
       omxEnvAllowlist: ['PATH', 'HOME', 'OPENAI_API_KEY', 'CUSTOM_ALLOWED'],
       maxOutputChars: 100,
     });
+    const readStdin = captureStdin(child);
 
     const pending = service.execute('check env');
     child.emit('close', 0);
@@ -122,7 +152,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', 'check env'],
+      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({
         env: {
           PATH: '/usr/bin',
@@ -132,6 +162,7 @@ describe('OmxExecService', () => {
         },
       }),
     );
+    expect(readStdin()).toBe('check env');
   });
 
   it('passes a realpath-normalized cwd when it is inside an allowed prefix', async () => {
@@ -152,7 +183,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', 'with cwd'],
+      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ cwd: await fs.realpath(project) }),
     );
   });

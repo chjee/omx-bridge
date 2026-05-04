@@ -133,8 +133,9 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 ### Execution boundaries
 
-The bridge runs requested work through `omx exec --full-auto -s danger-full-access`,
-so bind and working-directory settings are part of the safety boundary.
+The bridge runs requested work through `omx exec --full-auto -s danger-full-access -`
+and writes the prompt to the child process stdin instead of passing it as an
+argv value. Bind and working-directory settings are part of the safety boundary.
 
 The `omx exec` child process receives only an environment-variable allowlist,
 configured by `BRIDGE_OMX_ENV_ALLOWLIST`. By default this keeps common shell,
