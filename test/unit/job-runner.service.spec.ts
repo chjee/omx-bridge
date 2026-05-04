@@ -637,7 +637,7 @@ describe('JobRunnerService', () => {
     }
   });
 
-  it('reconciles only terminal jobs with missing notification outcomes', async () => {
+  it('reconciles terminal jobs with missing or failed notification outcomes', async () => {
     const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
     const runner = new JobRunnerService(
       repository,
@@ -692,15 +692,26 @@ describe('JobRunnerService', () => {
       },
     }));
     await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000006',
+      status: 'succeeded',
+      finishedAt: '2026-04-02T00:00:12.000Z',
+      notifyOutcome: {
+        attemptedAt: '2026-04-02T00:00:13.000Z',
+        mode: 'claude',
+        claudeWebhook: { status: 'ok' },
+        telegram: { status: 'failed', error: 'fetch_error' },
+      },
+    }));
+    await repository.save(createJob({
       id: '00000000-0000-4000-a000-000000000005',
       status: 'queued',
     }));
 
-    await expect(runner.reconcileTerminalNotifications()).resolves.toBe(1);
+    await expect(runner.reconcileTerminalNotifications()).resolves.toBe(2);
 
-    expect(notifyJobComplete).toHaveBeenCalledTimes(1);
+    expect(notifyJobComplete).toHaveBeenCalledTimes(2);
     expect(notifyJobComplete).toHaveBeenNthCalledWith(1, missingNotify);
-    expect(notifyJobComplete).not.toHaveBeenCalledWith(failedNotify);
+    expect(notifyJobComplete).toHaveBeenNthCalledWith(2, failedNotify);
   });
 
   it('starts notification reconciliation during module initialization', async () => {
