@@ -46,8 +46,9 @@ telegram:group:-1001234567890
 The bridge stores this field and includes it in completion payloads. It does not parse the key for direct delivery. Channel brokers use it to route the callback result back to the correct chat.
 
 For `source: "openclaw"`, `originRoutingKey` is correlation context only. It does
-not make the job broker-owned and does not suppress Telegram fallback when no
-per-job `notifyUrl` was supplied.
+not make the job broker-owned and does not suppress configured Telegram fallback
+when no per-job `notifyUrl` was supplied. That fallback targets the configured
+Telegram chat, not the `originRoutingKey`.
 
 ### `sourceName`
 
@@ -108,7 +109,7 @@ The bridge sends completion notifications to:
 1. Per-job `notifyUrl`, when present.
 2. `CLAUDE_NOTIFY_URL`, when no per-job `notifyUrl` is present.
 
-Telegram fallback applies only when no per-job `notifyUrl` was supplied and the configured Claude webhook delivery fails.
+Configured Telegram fallback applies only when no per-job `notifyUrl` was supplied and `CLAUDE_NOTIFY_URL` is not configured or its webhook delivery fails. The bridge sends this fallback to the configured Telegram chat; it does not parse `originRoutingKey` for per-conversation delivery.
 
 ## Fallback Policy
 
