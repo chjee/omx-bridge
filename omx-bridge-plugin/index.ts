@@ -111,7 +111,7 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error";
+  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error" | "invalid_cwd";
   recoveredFromRestart?: boolean;
 }
 

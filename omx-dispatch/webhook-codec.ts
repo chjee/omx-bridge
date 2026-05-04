@@ -94,7 +94,7 @@ export function normalizeWebhookJob(payload: unknown): BridgeJob | null {
         ? execution["outputTruncated"]
         : undefined,
       errorType: typeof execution["errorType"] === "string"
-        && ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error"].includes(execution["errorType"])
+        && ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error", "invalid_cwd"].includes(execution["errorType"])
         ? execution["errorType"] as BridgeJobExecution["errorType"]
         : undefined,
       recoveredFromRestart: typeof execution["recoveredFromRestart"] === "boolean"
