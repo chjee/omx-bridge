@@ -30,6 +30,16 @@ This covers:
 - `omx-dispatch` typecheck, build, and tests
 - `omx-bridge-plugin` typecheck, build, and tests
 
+The root, dispatch, and plugin test suites also share
+`contracts/bridge-job.contract.json` as the representative bridge job/session
+contract. If job payload fields, session summary fields, status values,
+execution error types, or routing fields change, update that fixture and keep
+these companion tests in the same change:
+
+- `test/unit/bridge-contract.spec.ts`
+- `omx-dispatch/contract-fixtures.test.ts`
+- `omx-bridge-plugin/test/index.test.ts`
+
 Run the automated runtime smoke after build/test verification:
 
 ```bash
