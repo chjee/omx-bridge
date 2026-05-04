@@ -26,11 +26,18 @@ Main components:
 - `src/`: NestJS bridge service and file-backed job queue.
 - `omx-dispatch/`: Claude Code MCP server exposing `omx_submit_job`, job status tools, and a local `/notify` webhook.
 - `omx-bridge-plugin/`: OpenClaw plugin entry point.
+- `contracts/bridge-job.contract.json`: shared bridge job/session payload fixture used to catch server, dispatch, and plugin contract drift.
 - `.omx/state/bridge-jobs`: default job state directory.
 
 Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
 Runtime validation steps are documented in [docs/runtime-smoke-checks.md](docs/runtime-smoke-checks.md).
 Release verification gates are summarized in [docs/release-verification-checklist.md](docs/release-verification-checklist.md).
+
+When bridge job payload fields, session summary fields, status values, execution
+error types, or routing fields change, update
+`contracts/bridge-job.contract.json` in the same change. The fixture is exercised
+by the root bridge contract test, `omx-dispatch` contract test, and OpenClaw
+plugin tests so all three surfaces fail together when their contracts drift.
 
 ## Setup
 
