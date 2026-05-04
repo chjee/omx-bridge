@@ -399,12 +399,16 @@ describe('JobRunnerService', () => {
     config.maxConcurrency = 2;
 
     const releasers: Array<() => void> = [];
-    const execute = jest.fn().mockImplementation(
-      () =>
-        new Promise<OmxExecutionResult>((resolve) => {
-          releasers.push(() => resolve(createExecutionResult()));
-        }),
+    const pendingExecutions = Array.from({ length: 3 }, () =>
+      new Promise<OmxExecutionResult>((resolve) => {
+        releasers.push(() => resolve(createExecutionResult()));
+      }),
     );
+    const execute = jest
+      .fn()
+      .mockReturnValueOnce(pendingExecutions[0])
+      .mockReturnValueOnce(pendingExecutions[1])
+      .mockReturnValueOnce(pendingExecutions[2]);
     const runner = new JobRunnerService(
       repository,
       { execute } as unknown as OmxExecService,
@@ -453,20 +457,19 @@ describe('JobRunnerService', () => {
 
     expect(await thirdRun).toBe(false);
 
-    releasers[0]?.();
+    expect(releasers).toHaveLength(3);
+    releasers[0]();
     expect(await firstRun).toBe(true);
 
-    const fourthRun = runner.runOnce();
     await waitFor(
       () => repository.getById('00000000-0000-4000-a000-000000000003'),
       (job) => job?.status === 'running',
     );
     expect(execute).toHaveBeenCalledTimes(3);
 
-    releasers[1]?.();
-    releasers[2]?.();
+    releasers[1]();
+    releasers[2]();
     await secondRun;
-    await fourthRun;
   });
 
   it('trigger starts queued work without waiting for the polling interval', async () => {
