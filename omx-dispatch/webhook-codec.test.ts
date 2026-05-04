@@ -158,6 +158,20 @@ test("preserves invalid cwd execution error types", () => {
   assert.equal(job?.execution.errorType, "invalid_cwd");
 });
 
+test("drops malformed tmux session payloads instead of filling required fields with blanks", () => {
+  const job = normalizeWebhookJob({
+    id: "job-malformed-session",
+    status: "running",
+    session: {
+      backend: "tmux",
+      status: "running",
+      sessionName: "omx-bridge-job",
+    },
+  });
+
+  assert.equal(job?.session, undefined);
+});
+
 test("rejects invalid webhook job payloads", () => {
   assert.equal(normalizeWebhookJob(null), null);
   assert.equal(normalizeWebhookJob({ id: "job-1" }), null);

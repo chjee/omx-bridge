@@ -1,11 +1,28 @@
 export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
 export const JOB_EXECUTION_MODES = ['exec', 'tmux'] as const;
 export const TMUX_SESSION_STATUSES = ['starting', 'running', 'exited', 'cancelled', 'failed'] as const;
+export const EXECUTION_ERROR_TYPES = [
+  'spawn_error',
+  'timeout',
+  'non_zero_exit',
+  'cancelled',
+  'execution_error',
+  'invalid_cwd',
+] as const;
+export const JOB_SOURCE_VALUES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
+export const NOTIFY_MODE_VALUES = ['openclaw', 'claude'] as const;
+export const NOTIFY_TRIGGER_VALUES = ['auto', 'manual'] as const;
+export const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export type TerminalJobStatus = Extract<JobStatus, 'succeeded' | 'failed' | 'cancelled'>;
 export type JobExecutionMode = (typeof JOB_EXECUTION_MODES)[number];
 export type TmuxSessionStatus = (typeof TMUX_SESSION_STATUSES)[number];
+export type JobExecutionErrorType = (typeof EXECUTION_ERROR_TYPES)[number];
+export type JobSource = (typeof JOB_SOURCE_VALUES)[number];
+export type NotifyMode = (typeof NOTIFY_MODE_VALUES)[number];
+export type NotifyTrigger = (typeof NOTIFY_TRIGGER_VALUES)[number];
+export type NotifyChannelStatus = (typeof NOTIFY_CHANNEL_STATUSES)[number];
 
 export interface JobExecutionMetadata {
   command: string;
@@ -14,11 +31,9 @@ export interface JobExecutionMetadata {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: 'spawn_error' | 'timeout' | 'non_zero_exit' | 'cancelled' | 'execution_error' | 'invalid_cwd';
+  errorType?: JobExecutionErrorType;
   recoveredFromRestart?: boolean;
 }
-
-export type JobSource = 'dispatch' | 'channel' | 'synapse' | 'openclaw';
 
 export interface TmuxSessionState {
   backend: 'tmux';
@@ -39,8 +54,6 @@ export interface JobSessionSummary {
   session: TmuxSessionState | null;
 }
 
-export type NotifyChannelStatus = 'ok' | 'failed' | 'skipped';
-
 export interface NotifyChannelResult {
   status: NotifyChannelStatus;
   /** 'failed' 시 짧은 사유 코드(예: 'http_500', 'fetch_error') */
@@ -55,8 +68,8 @@ export interface NotifyChannelResult {
 
 export interface NotifyOutcome {
   attemptedAt: string;
-  mode: 'openclaw' | 'claude';
-  trigger?: 'auto' | 'manual';
+  mode: NotifyMode;
+  trigger?: NotifyTrigger;
   attemptIndex?: number;
   claudeWebhook?: NotifyChannelResult;
   openclaw?: NotifyChannelResult;

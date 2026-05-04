@@ -9,8 +9,21 @@ import {
 const PLUGIN_ID = "omx-bridge-plugin";
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
-const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_EXECUTION_MODE_VALUES = ["exec", "tmux"] as const;
+export const BRIDGE_EXECUTION_ERROR_TYPES = [
+  "spawn_error",
+  "timeout",
+  "non_zero_exit",
+  "cancelled",
+  "execution_error",
+  "invalid_cwd",
+] as const;
+export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
+export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
+export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;
 
 const pluginConfigSchema = Type.Object(
   {
@@ -56,7 +69,7 @@ const submitJobParameters = Type.Object(
     }),
     executionMode: Type.Optional(
       Type.Union(
-        [Type.Literal("exec"), Type.Literal("tmux")],
+        JOB_EXECUTION_MODE_VALUES.map((mode) => Type.Literal(mode)),
         { description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs." },
       ),
     ),
@@ -142,14 +155,14 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error" | "invalid_cwd";
+  errorType?: (typeof BRIDGE_EXECUTION_ERROR_TYPES)[number];
   recoveredFromRestart?: boolean;
 }
 
 interface TmuxSessionState {
   backend: "tmux";
   sessionName: string;
-  status: "starting" | "running" | "exited" | "cancelled" | "failed";
+  status: (typeof TMUX_SESSION_STATUS_VALUES)[number];
   createdAt: string;
   updatedAt: string;
   attachCommand: string;
@@ -157,10 +170,28 @@ interface TmuxSessionState {
   lastExitCode?: number | null;
 }
 
+interface NotifyChannelResult {
+  status: (typeof NOTIFY_CHANNEL_STATUS_VALUES)[number];
+  error?: string;
+  httpStatus?: number;
+  attempts?: number;
+  skippedReason?: string;
+}
+
+interface NotifyOutcome {
+  attemptedAt: string;
+  mode: (typeof NOTIFY_MODE_VALUES)[number];
+  trigger?: (typeof NOTIFY_TRIGGER_VALUES)[number];
+  attemptIndex?: number;
+  claudeWebhook?: NotifyChannelResult;
+  openclaw?: NotifyChannelResult;
+  telegram?: NotifyChannelResult;
+}
+
 interface BridgeJob {
   id: string;
   prompt: string;
-  executionMode?: "exec" | "tmux";
+  executionMode?: (typeof JOB_EXECUTION_MODE_VALUES)[number];
   cwd?: string;
   originRoutingKey?: string;
   source?: (typeof JOB_SOURCE_VALUES)[number];
@@ -168,6 +199,7 @@ interface BridgeJob {
   notifyUrl?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   metadata?: Record<string, unknown>;
   status: (typeof JOB_STATUS_VALUES)[number];
   createdAt: string;
@@ -178,12 +210,14 @@ interface BridgeJob {
   stderr: string;
   execution: BridgeJobExecution;
   session?: TmuxSessionState;
+  notifyOutcome?: NotifyOutcome;
+  notifyHistory?: NotifyOutcome[];
 }
 
 interface BridgeJobSession {
   jobId: string;
   jobStatus: BridgeJob["status"];
-  executionMode: "exec" | "tmux";
+  executionMode: (typeof JOB_EXECUTION_MODE_VALUES)[number];
   attachCommand: string | null;
   session: TmuxSessionState | null;
 }

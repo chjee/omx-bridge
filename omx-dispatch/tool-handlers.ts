@@ -1,7 +1,29 @@
 import type { JobNotification, NotificationStats } from "./notification-store.js";
 
 export const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_EXECUTION_MODE_VALUES = ["exec", "tmux"] as const;
+export const BRIDGE_EXECUTION_ERROR_TYPES = [
+  "spawn_error",
+  "timeout",
+  "non_zero_exit",
+  "cancelled",
+  "execution_error",
+  "invalid_cwd",
+] as const;
+export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
+export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
+export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;
+
 export type JobStatus = (typeof JOB_STATUS_VALUES)[number];
+export type JobExecutionMode = (typeof JOB_EXECUTION_MODE_VALUES)[number];
+export type BridgeExecutionErrorType = (typeof BRIDGE_EXECUTION_ERROR_TYPES)[number];
+export type TmuxSessionStatus = (typeof TMUX_SESSION_STATUS_VALUES)[number];
+export type JobSource = (typeof JOB_SOURCE_VALUES)[number];
+export type NotifyMode = (typeof NOTIFY_MODE_VALUES)[number];
+export type NotifyTrigger = (typeof NOTIFY_TRIGGER_VALUES)[number];
+export type NotifyChannelStatus = (typeof NOTIFY_CHANNEL_STATUS_VALUES)[number];
 
 export interface BridgeJobExecution {
   command: string;
@@ -10,11 +32,9 @@ export interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error" | "invalid_cwd";
+  errorType?: BridgeExecutionErrorType;
   recoveredFromRestart?: boolean;
 }
-
-export type TmuxSessionStatus = "starting" | "running" | "exited" | "cancelled" | "failed";
 
 export interface TmuxSessionState {
   backend: "tmux";
@@ -27,15 +47,32 @@ export interface TmuxSessionState {
   lastExitCode?: number | null;
 }
 
-export type JobSource = "dispatch" | "channel" | "synapse" | "openclaw";
+export interface NotifyChannelResult {
+  status: NotifyChannelStatus;
+  error?: string;
+  httpStatus?: number;
+  attempts?: number;
+  skippedReason?: string;
+}
+
+export interface NotifyOutcome {
+  attemptedAt: string;
+  mode: NotifyMode;
+  trigger?: NotifyTrigger;
+  attemptIndex?: number;
+  claudeWebhook?: NotifyChannelResult;
+  openclaw?: NotifyChannelResult;
+  telegram?: NotifyChannelResult;
+}
 
 export interface BridgeJob {
   id: string;
   prompt: string;
-  executionMode?: "exec" | "tmux";
+  executionMode?: JobExecutionMode;
   cwd?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   originRoutingKey?: string;
   source?: JobSource;
   sourceName?: string;
@@ -50,12 +87,14 @@ export interface BridgeJob {
   stderr: string;
   execution: BridgeJobExecution;
   session?: TmuxSessionState;
+  notifyOutcome?: NotifyOutcome;
+  notifyHistory?: NotifyOutcome[];
 }
 
 export interface BridgeJobSession {
   jobId: string;
   jobStatus: JobStatus;
-  executionMode: "exec" | "tmux";
+  executionMode: JobExecutionMode;
   attachCommand: string | null;
   session: TmuxSessionState | null;
 }
@@ -77,7 +116,7 @@ export interface BridgeJobStats {
 
 export interface SubmitJobInput {
   prompt: string;
-  executionMode?: "exec" | "tmux";
+  executionMode?: JobExecutionMode;
   cwd?: string;
   requestId?: string;
   originRoutingKey?: string;
@@ -376,7 +415,7 @@ function submitJobInputSchema(notifyUrlDescription: string): {
       },
       executionMode: {
         type: "string",
-        enum: ["exec", "tmux"],
+        enum: [...JOB_EXECUTION_MODE_VALUES],
         description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs.",
       },
       requestId: {
@@ -400,7 +439,7 @@ function submitJobInputSchema(notifyUrlDescription: string): {
       },
       source: {
         type: "string",
-        enum: ["dispatch", "channel", "synapse", "openclaw"],
+        enum: [...JOB_SOURCE_VALUES],
         description: "Caller class. Use 'dispatch' for Claude Code CLI sessions and 'channel' for broker-owned channel routing.",
       },
       sourceName: {

@@ -1,0 +1,95 @@
+{
+  "jobStatuses": ["queued", "running", "succeeded", "failed", "cancelled"],
+  "jobExecutionModes": ["exec", "tmux"],
+  "executionErrorTypes": ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error", "invalid_cwd"],
+  "tmuxSessionStatuses": ["starting", "running", "exited", "cancelled", "failed"],
+  "jobSources": ["dispatch", "channel", "synapse", "openclaw"],
+  "bridgeJob": {
+    "id": "00000000-0000-4000-a000-000000000123",
+    "prompt": "contract fixture prompt",
+    "executionMode": "tmux",
+    "cwd": "/workspace/project",
+    "queueOrder": "0000000000001-000123",
+    "requestId": "contract-request",
+    "requestFingerprint": "sha256:contract",
+    "originRoutingKey": "telegram:direct:123",
+    "source": "openclaw",
+    "sourceName": "openclaw-telegram",
+    "metadata": {
+      "chatId": 123,
+      "topic": "contract"
+    },
+    "notifyUrl": "http://127.0.0.1:3994/notify",
+    "status": "failed",
+    "createdAt": "2026-05-04T00:00:00.000Z",
+    "startedAt": "2026-05-04T00:00:01.000Z",
+    "finishedAt": "2026-05-04T00:00:02.000Z",
+    "exitCode": 1,
+    "stdout": "contract stdout",
+    "stderr": "contract stderr",
+    "execution": {
+      "command": "tmux",
+      "timeoutMs": 300000,
+      "maxOutputChars": 32000,
+      "durationMs": 1000,
+      "timedOut": false,
+      "outputTruncated": false,
+      "errorType": "non_zero_exit",
+      "recoveredFromRestart": true
+    },
+    "session": {
+      "backend": "tmux",
+      "sessionName": "omx-bridge-contract",
+      "status": "failed",
+      "createdAt": "2026-05-04T00:00:01.000Z",
+      "updatedAt": "2026-05-04T00:00:02.000Z",
+      "attachCommand": "tmux attach -t omx-bridge-contract",
+      "cwd": "/workspace/project",
+      "lastExitCode": 1
+    },
+    "notifyOutcome": {
+      "attemptedAt": "2026-05-04T00:00:03.000Z",
+      "mode": "openclaw",
+      "trigger": "auto",
+      "attemptIndex": 0,
+      "openclaw": {
+        "status": "failed",
+        "error": "http_500",
+        "httpStatus": 500,
+        "attempts": 1
+      },
+      "telegram": {
+        "status": "skipped",
+        "skippedReason": "webhook_failed"
+      }
+    },
+    "notifyHistory": [
+      {
+        "attemptedAt": "2026-05-04T00:00:04.000Z",
+        "mode": "claude",
+        "trigger": "manual",
+        "attemptIndex": 1,
+        "claudeWebhook": {
+          "status": "ok",
+          "attempts": 1
+        }
+      }
+    ]
+  },
+  "bridgeJobSession": {
+    "jobId": "00000000-0000-4000-a000-000000000123",
+    "jobStatus": "failed",
+    "executionMode": "tmux",
+    "attachCommand": "tmux attach -t omx-bridge-contract",
+    "session": {
+      "backend": "tmux",
+      "sessionName": "omx-bridge-contract",
+      "status": "failed",
+      "createdAt": "2026-05-04T00:00:01.000Z",
+      "updatedAt": "2026-05-04T00:00:02.000Z",
+      "attachCommand": "tmux attach -t omx-bridge-contract",
+      "cwd": "/workspace/project",
+      "lastExitCode": 1
+    }
+  }
+}

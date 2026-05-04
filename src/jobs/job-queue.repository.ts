@@ -4,26 +4,19 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import {
+  EXECUTION_ERROR_TYPES,
+  JOB_SOURCE_VALUES,
   JOB_EXECUTION_MODES,
   JOB_STATUSES,
+  NOTIFY_CHANNEL_STATUSES,
+  NOTIFY_MODE_VALUES,
+  NOTIFY_TRIGGER_VALUES,
   TMUX_SESSION_STATUSES,
   type BridgeJob,
   type JobStatus,
 } from './job.types';
 
 const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
-const JOB_SOURCES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
-const EXECUTION_ERROR_TYPES = [
-  'spawn_error',
-  'timeout',
-  'non_zero_exit',
-  'cancelled',
-  'execution_error',
-  'invalid_cwd',
-] as const;
-const NOTIFY_MODES = ['openclaw', 'claude'] as const;
-const NOTIFY_TRIGGERS = ['auto', 'manual'] as const;
-const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
 const INVALID_JOBS_DIRECTORY = 'invalid';
 
 export interface CleanupTerminalJobsOptions {
@@ -240,7 +233,7 @@ export class JobQueueRepository {
       (value.requestId === undefined || typeof value.requestId === 'string') &&
       (value.requestFingerprint === undefined || typeof value.requestFingerprint === 'string') &&
       (value.originRoutingKey === undefined || typeof value.originRoutingKey === 'string') &&
-      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCES)) &&
+      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCE_VALUES)) &&
       (value.sourceName === undefined || typeof value.sourceName === 'string') &&
       (value.metadata === undefined || this.isRecord(value.metadata)) &&
       (value.notifyUrl === undefined || typeof value.notifyUrl === 'string') &&
@@ -303,8 +296,8 @@ export class JobQueueRepository {
 
     return (
       typeof value.attemptedAt === 'string' &&
-      this.isOneOf(value.mode, NOTIFY_MODES) &&
-      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGERS)) &&
+      this.isOneOf(value.mode, NOTIFY_MODE_VALUES) &&
+      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGER_VALUES)) &&
       (value.attemptIndex === undefined || typeof value.attemptIndex === 'number') &&
       (value.claudeWebhook === undefined || this.isNotifyChannelResult(value.claudeWebhook)) &&
       (value.openclaw === undefined || this.isNotifyChannelResult(value.openclaw)) &&
