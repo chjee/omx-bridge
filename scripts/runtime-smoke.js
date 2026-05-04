@@ -154,6 +154,26 @@ function createTmuxOmxShim(dir) {
   return filePath;
 }
 
+function createTmuxWaitOmxShim(dir) {
+  const filePath = path.join(dir, 'fake-omx-tmux-wait.sh');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'if [ "${1-}" != "exec" ]; then',
+    '  echo "unexpected omx command: ${1-}" >&2',
+    '  exit 64',
+    'fi',
+    'prompt="$(cat)"',
+    'printf "TMUX_WAIT:%s\\n" "$prompt"',
+    'trap \'printf "TMUX_WAIT_CANCELLED\\n" >&2; exit 143\' TERM INT',
+    'while :; do',
+    '  sleep 1',
+    'done',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
 function createFakeTmuxShim(dir) {
   const filePath = path.join(dir, 'fake-tmux.sh');
   writeExecutable(filePath, [
@@ -182,14 +202,22 @@ function createFakeTmuxShim(dir) {
     '    fi',
     '    touch "$state_dir/$session.running"',
     '    (',
+    '      set +e',
     '      if [ -n "$workdir" ]; then',
     '        cd "$workdir"',
     '      fi',
-    '      bash -lc "$command"',
+    '      setsid bash -lc "$command" &',
+    '      child_pid=$!',
+    '      printf "%s\\n" "$child_pid" > "$state_dir/$session.pid"',
+    '      wait "$child_pid"',
     '      code=$?',
-    '      rm -f "$state_dir/$session.running"',
+    '      rm -f "$state_dir/$session.running" "$state_dir/$session.pid"',
     '      printf "%s\\n" "$code" > "$state_dir/$session.exit"',
-    '    ) &',
+    '    ) >/dev/null 2>/dev/null < /dev/null &',
+    '    for _ in $(seq 1 100); do',
+    '      [ -f "$state_dir/$session.pid" ] && break',
+    '      sleep 0.01',
+    '    done',
     '    exit 0',
     '    ;;',
     '  has-session)',
@@ -215,7 +243,20 @@ function createFakeTmuxShim(dir) {
     '      echo "no such fake session: $target" >&2',
     '      exit 1',
     '    fi',
-    '    rm -f "$state_dir/$target.running"',
+    '    pid_file="$state_dir/$target.pid"',
+    '    if [ ! -f "$pid_file" ]; then',
+    '      echo "missing fake session pid: $target" >&2',
+    '      exit 1',
+    '    fi',
+    '    pid="$(cat "$pid_file")"',
+    '    if [ -z "$pid" ]; then',
+    '      echo "empty fake session pid: $target" >&2',
+    '      exit 1',
+    '    fi',
+    '    if ! kill -TERM "-$pid" 2>/dev/null; then',
+    '      kill -TERM "$pid" 2>/dev/null || exit 1',
+    '    fi',
+    '    rm -f "$state_dir/$target.running" "$pid_file"',
     '    printf "143\\n" > "$state_dir/$target.exit"',
     '    exit 0',
     '    ;;',
@@ -685,6 +726,54 @@ async function waitForRunningJob(port, jobId) {
   throw new Error(`job ${jobId} did not enter running state; latest=${JSON.stringify(latest)}`);
 }
 
+async function waitForRunningTmuxJob(port, jobId) {
+  const deadline = Date.now() + 8_000;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await requestJson(port, 'GET', `/jobs/${encodeURIComponent(jobId)}`);
+    if (latest.status === 'running' && latest.session?.backend === 'tmux' && latest.session.status === 'running') {
+      return latest;
+    }
+    if (['succeeded', 'failed', 'cancelled'].includes(latest.status)) {
+      throw new Error(`tmux job ${jobId} became terminal before session was running: ${latest.status}`);
+    }
+    await delay(100);
+  }
+  throw new Error(`tmux job ${jobId} did not enter running session state; latest=${JSON.stringify(latest)}`);
+}
+
+function readFakeTmuxPid(fakeTmuxStateDir, sessionName) {
+  const raw = fs.readFileSync(path.join(fakeTmuxStateDir, `${sessionName}.pid`), 'utf8').trim();
+  const pid = Number.parseInt(raw, 10);
+  assert(Number.isFinite(pid) && pid > 0, `fake tmux pid was invalid for ${sessionName}: ${raw}`);
+  return pid;
+}
+
+function isProcessGroupAlive(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    if (error && (error.code === 'ESRCH' || error.code === 'EINVAL')) {
+      return false;
+    }
+    return true;
+  }
+}
+
+async function waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, pid) {
+  const deadline = Date.now() + 5_000;
+  const runningFile = path.join(fakeTmuxStateDir, `${sessionName}.running`);
+  const pidFile = path.join(fakeTmuxStateDir, `${sessionName}.pid`);
+  while (Date.now() < deadline) {
+    if (!fs.existsSync(runningFile) && !fs.existsSync(pidFile) && !isProcessGroupAlive(pid)) {
+      return;
+    }
+    await delay(50);
+  }
+  throw new Error(`fake tmux session ${sessionName} was not cleaned up; pid=${pid}`);
+}
+
 async function waitForNotifyOutcome(port, jobId, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs;
   let latest;
@@ -956,6 +1045,140 @@ async function smokeTmuxRuntime() {
   log('tmux session runtime smoke passed');
 }
 
+async function smokeTmuxCancelRuntime() {
+  const tempDir = makeTempDir('omx-bridge-smoke-tmux-cancel-');
+  let bridge;
+  let failed = false;
+  try {
+    const jobsDir = path.join(tempDir, 'jobs');
+    const tmuxSessionsDir = path.join(tempDir, 'sessions');
+    const fakeTmuxStateDir = path.join(tempDir, 'fake-tmux-state');
+    fs.mkdirSync(fakeTmuxStateDir, { recursive: true });
+
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir,
+      omxCommand: createTmuxWaitOmxShim(tempDir),
+      tmuxCommand: createFakeTmuxShim(tempDir),
+      tmuxSessionsDir,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR',
+      bridgeEnv: {
+        FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+        BRIDGE_JOB_TIMEOUT_MS: '10000',
+      },
+    });
+    await waitForBridge(port);
+
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke tmux cancel',
+      requestId: 'runtime-smoke-tmux-cancel',
+      source: 'dispatch',
+      sourceName: 'runtime-smoke-tmux-cancel',
+      originRoutingKey: 'runtime-smoke:tmux-cancel',
+      cwd: tempDir,
+      executionMode: 'tmux',
+      metadata: { smoke: 'tmux-cancel' },
+    });
+    const runningJob = await waitForRunningTmuxJob(port, submit.jobId);
+    const sessionName = runningJob.session.sessionName;
+    const tmuxPid = readFakeTmuxPid(fakeTmuxStateDir, sessionName);
+
+    const cancelResponse = await requestJson(port, 'POST', `/jobs/${encodeURIComponent(submit.jobId)}/cancel`);
+    assert(cancelResponse.status === 'cancelled', `tmux cancel response status was ${cancelResponse.status}`);
+    assert(cancelResponse.session?.status === 'cancelled', `tmux cancel response session status was ${cancelResponse.session?.status}`);
+    assert(cancelResponse.execution?.errorType === 'cancelled', 'tmux cancel response did not record errorType=cancelled');
+    await waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, tmuxPid);
+
+    const cancelledJob = await waitForNotifyOutcome(port, submit.jobId);
+    assert(cancelledJob.status === 'cancelled', `tmux cancelled job status was ${cancelledJob.status}`);
+    assert(cancelledJob.session?.status === 'cancelled', `tmux cancelled session status was ${cancelledJob.session?.status}`);
+    assert(cancelledJob.execution?.errorType === 'cancelled', 'tmux cancelled job did not record errorType=cancelled');
+
+    const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux cancel prompt file was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux cancel runner script was not created');
+    const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
+    assert(sessionFile.status === 'cancelled', `tmux cancel session.json status was ${sessionFile.status}`);
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('tmux session cancel smoke', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
+  log('tmux session cancel smoke passed');
+}
+
+async function smokeTmuxTimeoutRuntime() {
+  const tempDir = makeTempDir('omx-bridge-smoke-tmux-timeout-');
+  let bridge;
+  let failed = false;
+  try {
+    const jobsDir = path.join(tempDir, 'jobs');
+    const tmuxSessionsDir = path.join(tempDir, 'sessions');
+    const fakeTmuxStateDir = path.join(tempDir, 'fake-tmux-state');
+    fs.mkdirSync(fakeTmuxStateDir, { recursive: true });
+
+    const port = await getFreePort();
+    const timeoutMs = 1000;
+    bridge = startBridge({
+      port,
+      jobsDir,
+      omxCommand: createTmuxWaitOmxShim(tempDir),
+      tmuxCommand: createFakeTmuxShim(tempDir),
+      tmuxSessionsDir,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR',
+      bridgeEnv: {
+        FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+        BRIDGE_JOB_TIMEOUT_MS: String(timeoutMs),
+      },
+    });
+    await waitForBridge(port);
+
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke tmux timeout',
+      requestId: 'runtime-smoke-tmux-timeout',
+      source: 'dispatch',
+      sourceName: 'runtime-smoke-tmux-timeout',
+      originRoutingKey: 'runtime-smoke:tmux-timeout',
+      cwd: tempDir,
+      executionMode: 'tmux',
+      metadata: { smoke: 'tmux-timeout' },
+    });
+    const runningJob = await waitForRunningTmuxJob(port, submit.jobId);
+    const sessionName = runningJob.session.sessionName;
+    const tmuxPid = readFakeTmuxPid(fakeTmuxStateDir, sessionName);
+    const job = await waitForNotifyOutcome(port, submit.jobId, 10_000);
+    assert(job.status === 'failed', `tmux timeout job status was ${job.status}`);
+    assert(job.session?.status === 'failed', `tmux timeout session status was ${job.session?.status}`);
+    assert(job.session?.lastExitCode === null, `tmux timeout session lastExitCode was ${job.session?.lastExitCode}`);
+    assert(job.exitCode === null, `tmux timeout exitCode was ${job.exitCode}`);
+    assert(job.execution?.errorType === 'timeout', `tmux timeout errorType was ${job.execution?.errorType}`);
+    assert(job.execution?.timedOut === true, 'tmux timeout did not record timedOut=true');
+    assert(job.stderr.includes(`Command timed out after ${timeoutMs}ms`), `tmux timeout stderr was ${job.stderr || '<empty>'}`);
+    await waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, tmuxPid);
+
+    const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux timeout prompt file was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux timeout runner script was not created');
+    const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
+    assert(sessionFile.status === 'failed', `tmux timeout session.json status was ${sessionFile.status}`);
+    assert(sessionFile.lastExitCode === null, `tmux timeout session.json lastExitCode was ${sessionFile.lastExitCode}`);
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('tmux session timeout smoke', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
+  log('tmux session timeout smoke passed');
+}
+
 async function smokeDispatchMcp() {
   const tempDir = makeTempDir('omx-bridge-smoke-dispatch-');
   let bridge;
@@ -1127,6 +1350,8 @@ async function smokeLoopbackRuntime() {
   await smokeBridgeApi();
   await smokeCancelPath();
   await smokeTmuxRuntime();
+  await smokeTmuxCancelRuntime();
+  await smokeTmuxTimeoutRuntime();
   await smokeDispatchMcp();
   await smokeOpenClawPluginDiscovery();
   log('runtime smoke passed');

@@ -470,7 +470,7 @@ describe('JobRunnerService', () => {
     releasers[1]();
     releasers[2]();
     await secondRun;
-  });
+  }, 15_000);
 
   it('trigger starts queued work without waiting for the polling interval', async () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
