@@ -9,7 +9,21 @@ import {
 const PLUGIN_ID = "omx-bridge-plugin";
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_EXECUTION_MODE_VALUES = ["exec", "tmux"] as const;
+export const BRIDGE_EXECUTION_ERROR_TYPES = [
+  "spawn_error",
+  "timeout",
+  "non_zero_exit",
+  "cancelled",
+  "execution_error",
+  "invalid_cwd",
+] as const;
+export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
+export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
+export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;
 
 const pluginConfigSchema = Type.Object(
   {
@@ -53,10 +67,40 @@ const submitJobParameters = Type.Object(
       maxLength: 4000,
       description: "Prompt to submit to the omx-bridge service.",
     }),
+    executionMode: Type.Optional(
+      Type.Union(
+        JOB_EXECUTION_MODE_VALUES.map((mode) => Type.Literal(mode)),
+        { description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs." },
+      ),
+    ),
+    cwd: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Working directory for the job. Must be an absolute path when provided.",
+      }),
+    ),
     requestId: Type.Optional(
       Type.String({
         maxLength: 200,
         description: "Optional request correlation identifier.",
+      }),
+    ),
+    originRoutingKey: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Conversation key to preserve for correlation. For OpenClaw jobs, this is correlation-only; callback ownership is controlled by notifyUrl.",
+      }),
+    ),
+    notifyUrl: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Loopback webhook URL to receive job completion callbacks.",
+      }),
+    ),
+    sourceName: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Optional concrete OpenClaw integration name for routing diagnostics.",
       }),
     ),
     metadata: Type.Optional(
@@ -111,15 +155,51 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error";
+  errorType?: (typeof BRIDGE_EXECUTION_ERROR_TYPES)[number];
   recoveredFromRestart?: boolean;
+}
+
+interface TmuxSessionState {
+  backend: "tmux";
+  sessionName: string;
+  status: (typeof TMUX_SESSION_STATUS_VALUES)[number];
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
+
+interface NotifyChannelResult {
+  status: (typeof NOTIFY_CHANNEL_STATUS_VALUES)[number];
+  error?: string;
+  httpStatus?: number;
+  attempts?: number;
+  skippedReason?: string;
+}
+
+interface NotifyOutcome {
+  attemptedAt: string;
+  mode: (typeof NOTIFY_MODE_VALUES)[number];
+  trigger?: (typeof NOTIFY_TRIGGER_VALUES)[number];
+  attemptIndex?: number;
+  claudeWebhook?: NotifyChannelResult;
+  openclaw?: NotifyChannelResult;
+  telegram?: NotifyChannelResult;
 }
 
 interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: (typeof JOB_EXECUTION_MODE_VALUES)[number];
+  cwd?: string;
+  originRoutingKey?: string;
+  source?: (typeof JOB_SOURCE_VALUES)[number];
+  sourceName?: string;
+  notifyUrl?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   metadata?: Record<string, unknown>;
   status: (typeof JOB_STATUS_VALUES)[number];
   createdAt: string;
@@ -129,6 +209,17 @@ interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: BridgeJobExecution;
+  session?: TmuxSessionState;
+  notifyOutcome?: NotifyOutcome;
+  notifyHistory?: NotifyOutcome[];
+}
+
+interface BridgeJobSession {
+  jobId: string;
+  jobStatus: BridgeJob["status"];
+  executionMode: (typeof JOB_EXECUTION_MODE_VALUES)[number];
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
 }
 
 interface CreateJobResponse {
@@ -308,7 +399,12 @@ export default definePluginEntry({
           body: JSON.stringify({
             prompt: input.prompt,
             source: "openclaw",
+            ...(input.executionMode ? { executionMode: input.executionMode } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(input.requestId ? { requestId: input.requestId } : {}),
+            ...(input.originRoutingKey ? { originRoutingKey: input.originRoutingKey } : {}),
+            ...(input.notifyUrl ? { notifyUrl: input.notifyUrl } : {}),
+            ...(input.sourceName ? { sourceName: input.sourceName } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
           }),
         });
@@ -327,6 +423,25 @@ export default definePluginEntry({
         const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(input.jobId)}`, {
           method: "GET",
         });
+
+        return toTextResult(result);
+      },
+    });
+
+    api.registerTool({
+      name: "omx_get_job_session",
+      label: "Get OMX Job Session",
+      description: "Fetch compact tmux session status and attach command details for a specific omx-bridge job.",
+      parameters: jobIdParameters,
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
+        const result = await requestJson<BridgeJobSession>(
+          api,
+          `jobs/${encodeURIComponent(input.jobId)}/session`,
+          {
+            method: "GET",
+          },
+        );
 
         return toTextResult(result);
       },

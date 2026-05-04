@@ -7,6 +7,8 @@ function createConfig(apiToken: string | undefined): BridgeConfig {
     host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
+    tmuxCommand: 'tmux',
+    tmuxSessionsDirectory: '/tmp/sessions',
     jobPollIntervalMs: 100,
     jobTimeoutMs: 1000,
     maxOutputChars: 1000,

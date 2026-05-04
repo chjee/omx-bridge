@@ -14,6 +14,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? TEST_ID_1,
     prompt: overrides.prompt ?? 'hello',
+    executionMode: overrides.executionMode,
     queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
     createdAt: overrides.createdAt ?? '2026-04-02T00:00:00.000Z',
@@ -42,6 +43,8 @@ describe('JobQueueRepository', () => {
       host: '127.0.0.1',
       jobsDirectory,
       omxCommand: 'omx',
+      tmuxCommand: 'tmux',
+      tmuxSessionsDirectory: path.join(jobsDirectory, 'sessions'),
       jobPollIntervalMs: 10,
       jobTimeoutMs: 1000,
       maxOutputChars: 500,
@@ -138,11 +141,40 @@ describe('JobQueueRepository', () => {
           telegram: { status: 'skipped', skippedReason: 'per_job_webhook_failed' },
         },
       ],
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-0001',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:30.000Z',
+        updatedAt: '2026-04-02T00:00:31.000Z',
+        attachCommand: 'tmux attach-session -t omx-bridge-0001',
+        cwd: '/workspace/app',
+        lastExitCode: null,
+      },
     };
 
     await repository.save(persisted);
 
     await expect(repository.getById(job.id)).resolves.toEqual(persisted);
+  });
+
+  it('reads jobs with tmux execution contract fields', async () => {
+    const job = createJob({
+      executionMode: 'tmux',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-job-1',
+        status: 'starting',
+        createdAt: '2026-04-02T00:00:30.000Z',
+        updatedAt: '2026-04-02T00:00:30.000Z',
+        attachCommand: 'tmux attach-session -t omx-bridge-job-1',
+        cwd: '/workspace/app',
+      },
+    });
+
+    await repository.save(job);
+
+    await expect(repository.getById(job.id)).resolves.toEqual(job);
   });
 
   it('lists queued jobs in deterministic FIFO order', async () => {
@@ -351,6 +383,27 @@ describe('JobQueueRepository', () => {
     ['invalid execution durationMs', { execution: { durationMs: '250' } }],
     ['invalid notifyOutcome mode', { notifyOutcome: { mode: 'slack' } }],
     ['invalid notifyHistory entry', { notifyHistory: [{ mode: 'claude' }] }],
+    ['invalid executionMode', { executionMode: 'screen' }],
+    ['invalid tmux session backend', {
+      session: {
+        backend: 'screen',
+        sessionName: 'omx-bridge-job-1',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:30.000Z',
+        updatedAt: '2026-04-02T00:00:31.000Z',
+        attachCommand: 'tmux attach-session -t omx-bridge-job-1',
+      },
+    }],
+    ['invalid tmux session status', {
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-job-1',
+        status: 'paused',
+        createdAt: '2026-04-02T00:00:30.000Z',
+        updatedAt: '2026-04-02T00:00:31.000Z',
+        attachCommand: 'tmux attach-session -t omx-bridge-job-1',
+      },
+    }],
     ['invalid notify channel status', {
       notifyOutcome: {
         attemptedAt: '2026-04-02T00:01:01.000Z',

@@ -1,11 +1,25 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { JobNotification } from "./notification-store.js";
 import {
+  BRIDGE_EXECUTION_ERROR_TYPES,
+  JOB_EXECUTION_MODE_VALUES,
+  JOB_SOURCE_VALUES,
   JOB_STATUS_VALUES,
+  NOTIFY_CHANNEL_STATUS_VALUES,
+  NOTIFY_MODE_VALUES,
+  NOTIFY_TRIGGER_VALUES,
+  TMUX_SESSION_STATUS_VALUES,
   type BridgeJob,
-  type BridgeJobExecution,
+  type BridgeExecutionErrorType,
+  type JobExecutionMode,
   type JobSource,
   type JobStatus,
+  type NotifyChannelResult,
+  type NotifyMode,
+  type NotifyOutcome,
+  type NotifyTrigger,
+  type TmuxSessionState,
+  type TmuxSessionStatus,
 } from "./tool-handlers.js";
 
 // ---------------------------------------------------------------------------
@@ -63,13 +77,24 @@ export function normalizeWebhookJob(payload: unknown): BridgeJob | null {
 
   const execution = isRecord(payload["execution"]) ? payload["execution"] : {};
   const rawSource = payload["source"];
+  const session = normalizeTmuxSession(payload["session"]);
+  const notifyOutcome = normalizeNotifyOutcome(payload["notifyOutcome"]);
+  const notifyHistory = Array.isArray(payload["notifyHistory"])
+    ? payload["notifyHistory"]
+      .map((entry) => normalizeNotifyOutcome(entry))
+      .filter((entry): entry is NotifyOutcome => entry !== undefined)
+    : undefined;
 
   return {
     id,
     prompt: getStringField(payload, "prompt") ?? "",
+    ...(isJobExecutionMode(payload["executionMode"]) ? { executionMode: payload["executionMode"] } : {}),
     cwd: getStringField(payload, "cwd"),
     queueOrder: getStringField(payload, "queueOrder") ?? "",
     requestId: getStringField(payload, "requestId"),
+    ...(getStringField(payload, "requestFingerprint")
+      ? { requestFingerprint: getStringField(payload, "requestFingerprint") }
+      : {}),
     originRoutingKey: getStringField(payload, "originRoutingKey"),
     source: isJobSource(rawSource) ? rawSource : undefined,
     sourceName: getStringField(payload, "sourceName"),
@@ -94,13 +119,16 @@ export function normalizeWebhookJob(payload: unknown): BridgeJob | null {
         ? execution["outputTruncated"]
         : undefined,
       errorType: typeof execution["errorType"] === "string"
-        && ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error"].includes(execution["errorType"])
-        ? execution["errorType"] as BridgeJobExecution["errorType"]
+        && BRIDGE_EXECUTION_ERROR_TYPES.includes(execution["errorType"] as BridgeExecutionErrorType)
+        ? execution["errorType"] as BridgeExecutionErrorType
         : undefined,
       recoveredFromRestart: typeof execution["recoveredFromRestart"] === "boolean"
         ? execution["recoveredFromRestart"]
         : undefined,
     },
+    ...(session ? { session } : {}),
+    ...(notifyOutcome ? { notifyOutcome } : {}),
+    ...(notifyHistory ? { notifyHistory } : {}),
   };
 }
 
@@ -128,6 +156,85 @@ function isJobStatus(value: unknown): value is JobStatus {
   return typeof value === "string" && JOB_STATUS_VALUES.includes(value as JobStatus);
 }
 
+function isJobExecutionMode(value: unknown): value is JobExecutionMode {
+  return typeof value === "string" && JOB_EXECUTION_MODE_VALUES.includes(value as JobExecutionMode);
+}
+
 function isJobSource(value: unknown): value is JobSource {
-  return value === "dispatch" || value === "channel" || value === "synapse" || value === "openclaw";
+  return typeof value === "string" && JOB_SOURCE_VALUES.includes(value as JobSource);
+}
+
+function normalizeTmuxSession(payload: unknown): TmuxSessionState | undefined {
+  if (!isRecord(payload)) return undefined;
+  if (payload["backend"] !== "tmux" || !isTmuxSessionStatus(payload["status"])) {
+    return undefined;
+  }
+  const sessionName = getStringField(payload, "sessionName");
+  const createdAt = getStringField(payload, "createdAt");
+  const updatedAt = getStringField(payload, "updatedAt");
+  const attachCommand = getStringField(payload, "attachCommand");
+  if (!sessionName || !createdAt || !updatedAt || !attachCommand) {
+    return undefined;
+  }
+
+  return {
+    backend: "tmux",
+    sessionName,
+    status: payload["status"],
+    createdAt,
+    updatedAt,
+    attachCommand,
+    cwd: getStringField(payload, "cwd"),
+    lastExitCode: typeof payload["lastExitCode"] === "number" || payload["lastExitCode"] === null
+      ? payload["lastExitCode"]
+      : undefined,
+  };
+}
+
+function isTmuxSessionStatus(value: unknown): value is TmuxSessionStatus {
+  return typeof value === "string" && TMUX_SESSION_STATUS_VALUES.includes(value as TmuxSessionStatus);
+}
+
+function normalizeNotifyOutcome(payload: unknown): NotifyOutcome | undefined {
+  if (!isRecord(payload)) return undefined;
+  const attemptedAt = getStringField(payload, "attemptedAt");
+  if (!attemptedAt || !isNotifyMode(payload["mode"])) {
+    return undefined;
+  }
+
+  return {
+    attemptedAt,
+    mode: payload["mode"],
+    trigger: isNotifyTrigger(payload["trigger"]) ? payload["trigger"] : undefined,
+    attemptIndex: typeof payload["attemptIndex"] === "number" ? payload["attemptIndex"] : undefined,
+    claudeWebhook: normalizeNotifyChannelResult(payload["claudeWebhook"]),
+    openclaw: normalizeNotifyChannelResult(payload["openclaw"]),
+    telegram: normalizeNotifyChannelResult(payload["telegram"]),
+  };
+}
+
+function isNotifyMode(value: unknown): value is NotifyMode {
+  return typeof value === "string" && NOTIFY_MODE_VALUES.includes(value as NotifyMode);
+}
+
+function isNotifyTrigger(value: unknown): value is NotifyTrigger {
+  return typeof value === "string" && NOTIFY_TRIGGER_VALUES.includes(value as NotifyTrigger);
+}
+
+function normalizeNotifyChannelResult(payload: unknown): NotifyChannelResult | undefined {
+  if (!isRecord(payload) || !isNotifyChannelStatus(payload["status"])) {
+    return undefined;
+  }
+
+  return {
+    status: payload["status"],
+    error: getStringField(payload, "error"),
+    httpStatus: typeof payload["httpStatus"] === "number" ? payload["httpStatus"] : undefined,
+    attempts: typeof payload["attempts"] === "number" ? payload["attempts"] : undefined,
+    skippedReason: getStringField(payload, "skippedReason"),
+  };
+}
+
+function isNotifyChannelStatus(value: unknown): value is NotifyChannelResult["status"] {
+  return typeof value === "string" && NOTIFY_CHANNEL_STATUS_VALUES.includes(value as NotifyChannelResult["status"]);
 }

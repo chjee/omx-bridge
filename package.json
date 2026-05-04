@@ -15,10 +15,16 @@
     "test:watch": "jest --watch",
     "test:unit": "jest --runInBand test/unit",
     "test:e2e": "jest --runInBand --testPathPatterns=test/.*\\.e2e-spec\\.ts$",
+    "smoke:runtime": "npm run smoke:runtime:loopback",
+    "smoke:runtime:loopback": "npm run build && npm --prefix omx-dispatch run build && npm --prefix omx-bridge-plugin run build && node scripts/runtime-smoke.js --loopback && node scripts/runtime-smoke.js --live-omx-fake",
+    "smoke:runtime:live:fake": "npm run build && node scripts/runtime-smoke.js --live-omx-fake",
+    "smoke:runtime:live": "npm run build && node scripts/runtime-smoke.js --live-omx",
+    "verify:runtime": "npm run smoke:runtime",
+    "verify:runtime:live": "npm run smoke:runtime:live",
     "verify": "npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
     "verify:root": "npm test && npm run build",
     "verify:dispatch": "npm --prefix omx-dispatch run typecheck && npm --prefix omx-dispatch run build && npm --prefix omx-dispatch test",
-    "verify:plugin": "npm --prefix omx-bridge-plugin run typecheck && npm --prefix omx-bridge-plugin run build"
+    "verify:plugin": "npm --prefix omx-bridge-plugin run typecheck && npm --prefix omx-bridge-plugin run build && npm --prefix omx-bridge-plugin test"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",

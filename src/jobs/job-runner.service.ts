@@ -5,8 +5,10 @@ import { OmxExecService } from './omx-exec.service';
 import { JobNotifyService } from './job-notify.service';
 import type { BridgeJob, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
+import { TmuxSessionRunnerService } from './tmux-session-runner.service';
 
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
+const TMUX_RUNNER_UNAVAILABLE_MESSAGE = 'executionMode=tmux requires tmux session runner support.';
 
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -25,6 +27,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     private readonly omxExecService: OmxExecService,
     private readonly jobNotify: JobNotifyService,
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
+    @Optional() private readonly tmuxSessionRunner?: TmuxSessionRunnerService,
     @Optional() private readonly instanceLock?: BridgeInstanceLockService,
   ) {}
 
@@ -68,6 +71,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   async recoverInterruptedJobs(): Promise<void> {
     const runningJobs = await this.repository.listByStatus('running');
     for (const job of runningJobs) {
+      if (job.executionMode === 'tmux') {
+        const collected = await this.collectTmuxJob(job);
+        if (collected) {
+          continue;
+        }
+        if (job.session?.status === 'running') {
+          continue;
+        }
+      }
       await this.repository.save({
         ...job,
         status: 'failed',
@@ -121,9 +133,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runOnce(): Promise<boolean> {
+    const reconciled = await this.reconcileRunningTmuxJobs();
     const claimed = await this.claimNext();
     if (!claimed) {
-      return false;
+      return reconciled > 0;
     }
 
     try {
@@ -139,6 +152,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cancel(jobId: string): Promise<boolean> {
+    const job = await this.repository.getById(jobId);
+    if (job?.executionMode === 'tmux' && job.session) {
+      const session = await this.tmuxSessionRunner?.cancel(job);
+      if (session) {
+        await this.repository.save({ ...job, session });
+      }
+      return Boolean(session);
+    }
+
     const controller = this.abortControllers.get(jobId);
     if (!controller) {
       return false;
@@ -177,6 +199,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         return null;
       }
       const queuedJobs = await this.repository.listByStatus('queued');
+      const runningJobs = await this.repository.listByStatus('running');
+      const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
+      if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
+        return null;
+      }
       const candidate = queuedJobs.find((job) => !this.inFlight.has(job.id));
       if (!candidate) {
         return null;
@@ -199,6 +226,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private async executeJob(job: BridgeJob): Promise<void> {
     const currentJob = await this.repository.getById(job.id);
     if (!currentJob || currentJob.status !== 'queued') {
+      return;
+    }
+    if (currentJob.executionMode === 'tmux') {
+      await this.startTmuxJob(currentJob);
       return;
     }
 
@@ -244,6 +275,72 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async startTmuxJob(job: BridgeJob): Promise<void> {
+    this.logger.log(`Starting tmux job ${job.id}`);
+    const runningJob = await this.repository.save({
+      ...job,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      stdout: '',
+      stderr: '',
+    });
+
+    if (!this.tmuxSessionRunner) {
+      await this.markRunningJobFailed(job.id, new Error(TMUX_RUNNER_UNAVAILABLE_MESSAGE));
+      return;
+    }
+
+    try {
+      const session = await this.tmuxSessionRunner.start(runningJob);
+      await this.repository.save({
+        ...runningJob,
+        session,
+      });
+    } catch (error) {
+      await this.markRunningJobFailed(job.id, error);
+    }
+  }
+
+  private async reconcileRunningTmuxJobs(): Promise<number> {
+    const runningJobs = await this.repository.listByStatus('running');
+    let completed = 0;
+    for (const job of runningJobs) {
+      if (job.executionMode !== 'tmux') {
+        continue;
+      }
+      if (await this.collectTmuxJob(job)) {
+        completed += 1;
+      }
+    }
+    return completed;
+  }
+
+  private async collectTmuxJob(job: BridgeJob): Promise<boolean> {
+    const collected = await this.tmuxSessionRunner?.collect(job);
+    if (!collected) {
+      return false;
+    }
+
+    const latestJob = await this.repository.getById(job.id);
+    if (!latestJob || latestJob.status !== 'running') {
+      return false;
+    }
+
+    const savedJob = await this.repository.save({
+      ...latestJob,
+      status: collected.result.status,
+      finishedAt: new Date().toISOString(),
+      stdout: collected.result.stdout,
+      stderr: collected.result.stderr,
+      exitCode: collected.result.exitCode,
+      execution: collected.result.execution,
+      session: collected.session,
+    });
+    this.trackCompletionNotification(savedJob);
+    return true;
+  }
+
   private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {
     const latestJob = await this.repository.getById(jobId);
     if (!latestJob || latestJob.status !== 'running') {
@@ -266,7 +363,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.trackCompletionNotification(savedJob);
   }
 
-  private trackCompletionNotification(job: BridgeJob): void {
+  trackCompletionNotification(job: BridgeJob): void {
     const task = Promise.resolve()
       .then(async () => {
         await this.jobNotify.notifyJobComplete(job);

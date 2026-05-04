@@ -6,6 +6,7 @@ OpenClaw plugin that exposes the local `omx-bridge` NestJS service as agent tool
 
 - `omx_submit_job`
 - `omx_get_job`
+- `omx_get_job_session`
 - `omx_list_jobs`
 - `omx_cancel_job`
 
@@ -68,6 +69,7 @@ If your OpenClaw tool policy uses allowlists, allow either the whole plugin id o
             "omx-bridge-plugin",
             "omx_submit_job",
             "omx_get_job",
+            "omx_get_job_session",
             "omx_list_jobs",
             "omx_cancel_job"
           ]
@@ -91,6 +93,7 @@ The plugin accepts these config fields:
 
 - `omx_submit_job` -> `POST /jobs`
 - `omx_get_job` -> `GET /jobs/:id`
+- `omx_get_job_session` -> `GET /jobs/:id/session`
 - `omx_list_jobs` -> `GET /jobs?status=...`
 - `omx_cancel_job` -> `POST /jobs/:id/cancel`
 

@@ -2,6 +2,7 @@ import type { BridgeClient } from "./bridge-client.js";
 import type { JobNotification, NotificationStats } from "./notification-store.js";
 import type {
   BridgeJob,
+  BridgeJobSession,
   BridgeJobStats,
   CallbackJobInput,
   CreateJobResponse,
@@ -49,11 +50,12 @@ export class JobOperations {
   }
 
   async submitBridgeJob(input: SubmitJobInput): Promise<CreateJobResponse> {
-    const { prompt, cwd, requestId, originRoutingKey, metadata, notifyUrl, source, sourceName } = input;
+    const { prompt, executionMode, cwd, requestId, originRoutingKey, metadata, notifyUrl, source, sourceName } = input;
     return this.requestJson<CreateJobResponse>("jobs", {
       method: "POST",
       body: JSON.stringify({
         prompt,
+        ...(executionMode ? { executionMode } : {}),
         ...(cwd ? { cwd } : {}),
         ...(requestId ? { requestId } : {}),
         ...(originRoutingKey ? { originRoutingKey } : {}),
@@ -68,6 +70,13 @@ export class JobOperations {
   async getBridgeJob(jobId: string): Promise<BridgeJob> {
     return this.requestJson<BridgeJob>(
       `jobs/${encodeURIComponent(jobId)}`,
+      { method: "GET" },
+    );
+  }
+
+  async getBridgeJobSession(jobId: string): Promise<BridgeJobSession> {
+    return this.requestJson<BridgeJobSession>(
+      `jobs/${encodeURIComponent(jobId)}/session`,
       { method: "GET" },
     );
   }

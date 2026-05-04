@@ -9,6 +9,8 @@ function createConfig(jobsDirectory: string): BridgeConfig {
     host: '127.0.0.1',
     jobsDirectory,
     omxCommand: 'omx',
+    tmuxCommand: 'tmux',
+    tmuxSessionsDirectory: path.join(jobsDirectory, 'sessions'),
     jobPollIntervalMs: 100,
     jobTimeoutMs: 900_000,
     maxOutputChars: 32_000,

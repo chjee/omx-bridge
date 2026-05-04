@@ -143,6 +143,35 @@ test("normalizes legacy jobId payloads and defaults missing optional data", () =
   });
 });
 
+test("preserves invalid cwd execution error types", () => {
+  const job = normalizeWebhookJob({
+    id: "job-invalid-cwd",
+    status: "failed",
+    execution: {
+      command: "omx",
+      timeoutMs: 1000,
+      maxOutputChars: 2000,
+      errorType: "invalid_cwd",
+    },
+  });
+
+  assert.equal(job?.execution.errorType, "invalid_cwd");
+});
+
+test("drops malformed tmux session payloads instead of filling required fields with blanks", () => {
+  const job = normalizeWebhookJob({
+    id: "job-malformed-session",
+    status: "running",
+    session: {
+      backend: "tmux",
+      status: "running",
+      sessionName: "omx-bridge-job",
+    },
+  });
+
+  assert.equal(job?.session, undefined);
+});
+
 test("rejects invalid webhook job payloads", () => {
   assert.equal(normalizeWebhookJob(null), null);
   assert.equal(normalizeWebhookJob({ id: "job-1" }), null);

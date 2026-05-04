@@ -1,7 +1,29 @@
 import type { JobNotification, NotificationStats } from "./notification-store.js";
 
 export const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_EXECUTION_MODE_VALUES = ["exec", "tmux"] as const;
+export const BRIDGE_EXECUTION_ERROR_TYPES = [
+  "spawn_error",
+  "timeout",
+  "non_zero_exit",
+  "cancelled",
+  "execution_error",
+  "invalid_cwd",
+] as const;
+export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
+export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
+export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;
+
 export type JobStatus = (typeof JOB_STATUS_VALUES)[number];
+export type JobExecutionMode = (typeof JOB_EXECUTION_MODE_VALUES)[number];
+export type BridgeExecutionErrorType = (typeof BRIDGE_EXECUTION_ERROR_TYPES)[number];
+export type TmuxSessionStatus = (typeof TMUX_SESSION_STATUS_VALUES)[number];
+export type JobSource = (typeof JOB_SOURCE_VALUES)[number];
+export type NotifyMode = (typeof NOTIFY_MODE_VALUES)[number];
+export type NotifyTrigger = (typeof NOTIFY_TRIGGER_VALUES)[number];
+export type NotifyChannelStatus = (typeof NOTIFY_CHANNEL_STATUS_VALUES)[number];
 
 export interface BridgeJobExecution {
   command: string;
@@ -10,18 +32,47 @@ export interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled" | "execution_error";
+  errorType?: BridgeExecutionErrorType;
   recoveredFromRestart?: boolean;
 }
 
-export type JobSource = "dispatch" | "channel" | "synapse" | "openclaw";
+export interface TmuxSessionState {
+  backend: "tmux";
+  sessionName: string;
+  status: TmuxSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
+
+export interface NotifyChannelResult {
+  status: NotifyChannelStatus;
+  error?: string;
+  httpStatus?: number;
+  attempts?: number;
+  skippedReason?: string;
+}
+
+export interface NotifyOutcome {
+  attemptedAt: string;
+  mode: NotifyMode;
+  trigger?: NotifyTrigger;
+  attemptIndex?: number;
+  claudeWebhook?: NotifyChannelResult;
+  openclaw?: NotifyChannelResult;
+  telegram?: NotifyChannelResult;
+}
 
 export interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: JobExecutionMode;
   cwd?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   originRoutingKey?: string;
   source?: JobSource;
   sourceName?: string;
@@ -35,6 +86,17 @@ export interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: BridgeJobExecution;
+  session?: TmuxSessionState;
+  notifyOutcome?: NotifyOutcome;
+  notifyHistory?: NotifyOutcome[];
+}
+
+export interface BridgeJobSession {
+  jobId: string;
+  jobStatus: JobStatus;
+  executionMode: JobExecutionMode;
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
 }
 
 export interface CreateJobResponse {
@@ -54,6 +116,7 @@ export interface BridgeJobStats {
 
 export interface SubmitJobInput {
   prompt: string;
+  executionMode?: JobExecutionMode;
   cwd?: string;
   requestId?: string;
   originRoutingKey?: string;
@@ -108,6 +171,7 @@ export interface DispatchToolDependencies {
   config: DispatchToolConfig;
   submitBridgeJob: (input: SubmitJobInput) => Promise<CreateJobResponse>;
   getBridgeJob: (jobId: string) => Promise<BridgeJob>;
+  getBridgeJobSession: (jobId: string) => Promise<BridgeJobSession>;
   waitForJobCompletion: (jobId: string, options?: WaitForJobOptions) => Promise<WaitForJobResult>;
   listBridgeJobs: (status?: JobStatus) => Promise<BridgeJob[]>;
   cancelBridgeJob: (jobId: string) => Promise<BridgeJob>;
@@ -167,6 +231,22 @@ function buildTools(config: DispatchToolConfig): unknown[] {
     {
       name: "omx_get_job",
       description: "Fetch the full status and result payload for a specific omx-bridge job.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          jobId: {
+            type: "string",
+            minLength: 1,
+            description: "Bridge job identifier.",
+          },
+        },
+        required: ["jobId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "omx_get_job_session",
+      description: "Fetch compact tmux session status and attach command details for a specific omx-bridge job.",
       inputSchema: {
         type: "object",
         properties: {
@@ -333,6 +413,11 @@ function submitJobInputSchema(notifyUrlDescription: string): {
         type: "string",
         description: "Working directory for the job (absolute path).",
       },
+      executionMode: {
+        type: "string",
+        enum: [...JOB_EXECUTION_MODE_VALUES],
+        description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs.",
+      },
       requestId: {
         type: "string",
         maxLength: 200,
@@ -354,7 +439,7 @@ function submitJobInputSchema(notifyUrlDescription: string): {
       },
       source: {
         type: "string",
-        enum: ["dispatch", "channel", "synapse", "openclaw"],
+        enum: [...JOB_SOURCE_VALUES],
         description: "Caller class. Use 'dispatch' for Claude Code CLI sessions and 'channel' for broker-owned channel routing.",
       },
       sourceName: {
@@ -393,6 +478,12 @@ async function callTool(
     case "omx_get_job": {
       const { jobId } = args as { jobId: string };
       const result = await deps.getBridgeJob(jobId);
+      return toTextResult(result);
+    }
+
+    case "omx_get_job_session": {
+      const { jobId } = args as { jobId: string };
+      const result = await deps.getBridgeJobSession(jobId);
       return toTextResult(result);
     }
 

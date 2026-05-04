@@ -26,10 +26,20 @@ Main components:
 - `src/`: NestJS bridge service and file-backed job queue.
 - `omx-dispatch/`: Claude Code MCP server exposing `omx_submit_job`, job status tools, and a local `/notify` webhook.
 - `omx-bridge-plugin/`: OpenClaw plugin entry point.
+- `contracts/bridge-job.contract.json`: shared bridge job/session payload fixture used to catch server, dispatch, and plugin contract drift.
 - `.omx/state/bridge-jobs`: default job state directory.
 
+Agent maintenance workflow is documented in [docs/agent-workflow.md](docs/agent-workflow.md).
 Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
-Runtime validation steps are documented in [docs/runtime-smoke-checks.md](docs/runtime-smoke-checks.md).
+Bridge contract source-of-truth options are documented in [docs/contract-source-of-truth.md](docs/contract-source-of-truth.md).
+Runtime validation steps are documented in [docs/runtime-smoke.md](docs/runtime-smoke.md).
+Release verification gates are summarized in [docs/release-verification.md](docs/release-verification.md).
+
+When bridge job payload fields, session summary fields, status values, execution
+error types, or routing fields change, update
+`contracts/bridge-job.contract.json` in the same change. The fixture is exercised
+by the root bridge contract test, `omx-dispatch` contract test, and OpenClaw
+plugin tests so all three surfaces fail together when their contracts drift.
 
 ## Setup
 
@@ -100,11 +110,12 @@ Claude webhook URL resolution order (highest priority first):
 
 When a request comes from `omx-dispatch`, `CLAUDE_NOTIFY_URL` is effectively unused because `notifyUrl` is always present.
 
-In claude notify mode, Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied:
+In claude notify mode, configured Telegram fallback behaviour depends on whether a per-job `notifyUrl` was supplied. This fallback sends to `TELEGRAM_NOTIFY_CHAT_ID`; it does not parse `originRoutingKey` for per-conversation delivery.
 
-- **`notifyUrl` absent**: Telegram is used as a fallback when the configured `CLAUDE_NOTIFY_URL` webhook cannot be delivered.
+- **`notifyUrl` absent**: the configured Telegram target is used as a fallback when `CLAUDE_NOTIFY_URL` is not configured or its webhook cannot be delivered.
 - **`notifyUrl` present**: Telegram fallback is skipped — the per-job URL takes full ownership of the callback. This keeps per-chat routing consistent when used with channel brokers such as `claude-chopper` or legacy `claude-synapse`. For `omx-dispatch`, a 2xx response from the session-local `/notify` endpoint means the bridge treats delivery as complete; if `ENABLE_CLAUDE_CHANNEL` is not enabled in the Claude Code MCP server environment, the completion is only queued for `omx_get_notifications` and will not wake the active CLI conversation.
 - **`source: "channel"` with `originRoutingKey`**: Telegram fallback is also skipped when webhook delivery fails. `sourceName` carries the concrete broker name, e.g. `claude-chopper`.
+- **`source: "openclaw"` with `originRoutingKey`**: the routing key is stored and returned for correlation, but it does not make the job broker-owned. Without a per-job `notifyUrl`, configured Telegram fallback still applies in `claude` notify mode.
 
 Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAYS_MS`
 (default: `500,1000,2000`, which means four total attempts). Each notification
@@ -133,8 +144,9 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 ### Execution boundaries
 
-The bridge runs requested work through `omx exec --full-auto -s danger-full-access`,
-so bind and working-directory settings are part of the safety boundary.
+The bridge runs requested work through `omx exec --full-auto -s danger-full-access -`
+and writes the prompt to the child process stdin instead of passing it as an
+argv value. Bind and working-directory settings are part of the safety boundary.
 
 The `omx exec` child process receives only an environment-variable allowlist,
 configured by `BRIDGE_OMX_ENV_ALLOWLIST`. By default this keeps common shell,
@@ -320,9 +332,10 @@ Available tools:
 
 | Tool | Description |
 |------|-------------|
-| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `originRoutingKey`, `notifyUrl`, `source`, and `sourceName` for callback routing. |
+| `omx_submit_job` | Submit a prompt to the bridge and return the job id. Accepts `executionMode`, `originRoutingKey`, `notifyUrl`, `source`, and `sourceName` for backend selection and callback routing. |
 | `omx_submit_job_and_wait` | Submit a prompt, then wait for that specific job to complete in the same tool call |
 | `omx_get_job` | Fetch status and result for a specific job |
+| `omx_get_job_session` | Fetch compact tmux session status and attach command details for a specific job |
 | `omx_wait_for_job` | Wait for an existing job to complete without draining other pending notifications |
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |
@@ -419,6 +432,24 @@ npm run build
 cd omx-dispatch && npm run build
 ```
 
+Run the automated loopback runtime smoke:
+
+```bash
+npm run verify:runtime
+```
+
+This runs build artifacts with fake OMX shims and verifies bridge API submission, cancellation, per-job webhook notification, `omx-dispatch` MCP submit-and-wait, and optional OpenClaw plugin discovery when the local `openclaw` CLI is installed.
+
+Run the opt-in live OMX smoke only when the local `omx` command and model credentials are configured:
+
+```bash
+npm run verify:runtime:live
+```
+
+This submits one real `omx exec` job through a temporary loopback bridge and verifies the local callback path without contacting live Telegram or OpenClaw hooks.
+
+This is an operator smoke, not a deterministic CI gate: it uses local provider credentials, can consume model quota, and may fail because of local OMX/model state rather than a bridge regression.
+
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are marked `failed` on service startup to avoid duplicate execution.
@@ -435,3 +466,4 @@ cd omx-dispatch && npm run build
 - When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
 - `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Channel brokers such as `claude-chopper` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; `originRoutingKey` takes precedence.
 - `source` accepts `dispatch`, `channel`, `synapse`, and `openclaw`. New broker-owned chat integrations should use `source: "channel"` plus `sourceName` (for example `claude-chopper`) instead of adding app-specific source enum values.
+- `source: "openclaw"` is bridge-owned direct delivery. `originRoutingKey` on an OpenClaw job is correlation context unless a per-job `notifyUrl` owns callback delivery; configured Telegram fallback still targets `TELEGRAM_NOTIFY_CHAT_ID`, not the routing key.

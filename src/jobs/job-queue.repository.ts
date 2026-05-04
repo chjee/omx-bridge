@@ -3,21 +3,20 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
-import { JOB_STATUSES, type BridgeJob, type JobStatus } from './job.types';
+import {
+  EXECUTION_ERROR_TYPES,
+  JOB_SOURCE_VALUES,
+  JOB_EXECUTION_MODES,
+  JOB_STATUSES,
+  NOTIFY_CHANNEL_STATUSES,
+  NOTIFY_MODE_VALUES,
+  NOTIFY_TRIGGER_VALUES,
+  TMUX_SESSION_STATUSES,
+  type BridgeJob,
+  type JobStatus,
+} from './job.types';
 
 const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
-const JOB_SOURCES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
-const EXECUTION_ERROR_TYPES = [
-  'spawn_error',
-  'timeout',
-  'non_zero_exit',
-  'cancelled',
-  'execution_error',
-  'invalid_cwd',
-] as const;
-const NOTIFY_MODES = ['openclaw', 'claude'] as const;
-const NOTIFY_TRIGGERS = ['auto', 'manual'] as const;
-const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
 const INVALID_JOBS_DIRECTORY = 'invalid';
 
 export interface CleanupTerminalJobsOptions {
@@ -228,12 +227,13 @@ export class JobQueueRepository {
     return (
       value.id === jobId &&
       typeof value.prompt === 'string' &&
+      (value.executionMode === undefined || this.isOneOf(value.executionMode, JOB_EXECUTION_MODES)) &&
       (value.queueOrder === undefined || typeof value.queueOrder === 'string') &&
       (value.cwd === undefined || typeof value.cwd === 'string') &&
       (value.requestId === undefined || typeof value.requestId === 'string') &&
       (value.requestFingerprint === undefined || typeof value.requestFingerprint === 'string') &&
       (value.originRoutingKey === undefined || typeof value.originRoutingKey === 'string') &&
-      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCES)) &&
+      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCE_VALUES)) &&
       (value.sourceName === undefined || typeof value.sourceName === 'string') &&
       (value.metadata === undefined || this.isRecord(value.metadata)) &&
       (value.notifyUrl === undefined || typeof value.notifyUrl === 'string') &&
@@ -246,6 +246,7 @@ export class JobQueueRepository {
       typeof value.status === 'string' &&
       JOB_STATUSES.includes(value.status as JobStatus) &&
       this.isExecutionMetadata(execution) &&
+      (value.session === undefined || this.isTmuxSessionState(value.session)) &&
       (value.notifyOutcome === undefined || this.isNotifyOutcome(value.notifyOutcome)) &&
       (
         value.notifyHistory === undefined ||
@@ -271,6 +272,23 @@ export class JobQueueRepository {
     );
   }
 
+  private isTmuxSessionState(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      value.backend === 'tmux' &&
+      typeof value.sessionName === 'string' &&
+      this.isOneOf(value.status, TMUX_SESSION_STATUSES) &&
+      typeof value.createdAt === 'string' &&
+      typeof value.updatedAt === 'string' &&
+      typeof value.attachCommand === 'string' &&
+      (value.cwd === undefined || typeof value.cwd === 'string') &&
+      (value.lastExitCode === undefined || value.lastExitCode === null || typeof value.lastExitCode === 'number')
+    );
+  }
+
   private isNotifyOutcome(value: unknown): boolean {
     if (!this.isRecord(value)) {
       return false;
@@ -278,8 +296,8 @@ export class JobQueueRepository {
 
     return (
       typeof value.attemptedAt === 'string' &&
-      this.isOneOf(value.mode, NOTIFY_MODES) &&
-      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGERS)) &&
+      this.isOneOf(value.mode, NOTIFY_MODE_VALUES) &&
+      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGER_VALUES)) &&
       (value.attemptIndex === undefined || typeof value.attemptIndex === 'number') &&
       (value.claudeWebhook === undefined || this.isNotifyChannelResult(value.claudeWebhook)) &&
       (value.openclaw === undefined || this.isNotifyChannelResult(value.openclaw)) &&
