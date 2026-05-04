@@ -495,9 +495,10 @@ describe('JobRunnerService', () => {
         stderr: 'partial stderr',
       }),
     );
+    const execute = jest.fn();
     const runner = new JobRunnerService(
       repository,
-      { execute: jest.fn() } as unknown as OmxExecService,
+      { execute } as unknown as OmxExecService,
       mockJobNotify,
       config,
     );
@@ -519,6 +520,8 @@ describe('JobRunnerService', () => {
     expect(Date.parse(recovered?.finishedAt ?? '')).not.toBeNaN();
     expect(recovered?.stderr).toContain('partial stderr');
     expect(recovered?.stderr).toContain('Process was interrupted by service restart before completion.');
+    await expect(runner.runOnce()).resolves.toBe(false);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('does not modify terminal jobs during interrupted job recovery', async () => {
@@ -637,7 +640,7 @@ describe('JobRunnerService', () => {
     }
   });
 
-  it('reconciles terminal jobs with missing or failed notification outcomes', async () => {
+  it('reconciles only terminal jobs with missing notification outcomes at startup', async () => {
     const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
     const runner = new JobRunnerService(
       repository,
@@ -649,6 +652,17 @@ describe('JobRunnerService', () => {
       id: '00000000-0000-4000-a000-000000000001',
       status: 'succeeded',
       finishedAt: '2026-04-02T00:00:05.000Z',
+    });
+    const missingNotifyWithFullHistory = createJob({
+      id: '00000000-0000-4000-a000-000000000007',
+      status: 'failed',
+      finishedAt: '2026-04-02T00:00:14.000Z',
+      notifyHistory: Array.from({ length: 10 }, (_, index) => ({
+        attemptedAt: `2026-04-02T00:01:${String(index).padStart(2, '0')}.000Z`,
+        mode: 'claude' as const,
+        claudeWebhook: { status: 'failed' as const, error: 'fetch_error' },
+        attemptIndex: index,
+      })),
     });
     const failedNotify = createJob({
       id: '00000000-0000-4000-a000-000000000002',
@@ -668,6 +682,7 @@ describe('JobRunnerService', () => {
       })),
     });
     await repository.save(missingNotify);
+    await repository.save(missingNotifyWithFullHistory);
     await repository.save(failedNotify);
     await repository.save(createJob({
       id: '00000000-0000-4000-a000-000000000003',
@@ -711,7 +726,8 @@ describe('JobRunnerService', () => {
 
     expect(notifyJobComplete).toHaveBeenCalledTimes(2);
     expect(notifyJobComplete).toHaveBeenNthCalledWith(1, missingNotify);
-    expect(notifyJobComplete).toHaveBeenNthCalledWith(2, failedNotify);
+    expect(notifyJobComplete).toHaveBeenNthCalledWith(2, missingNotifyWithFullHistory);
+    expect(notifyJobComplete).not.toHaveBeenCalledWith(failedNotify);
   });
 
   it('starts notification reconciliation during module initialization', async () => {

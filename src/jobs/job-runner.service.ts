@@ -193,18 +193,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private shouldReconcileNotification(outcome: NotifyOutcome | undefined): boolean {
-    if (!outcome) {
-      return true;
-    }
-
-    const channelResults = [
-      outcome.claudeWebhook,
-      outcome.openclaw,
-      outcome.telegram,
-    ].filter((result): result is NonNullable<typeof result> => result !== undefined);
-    const hasSuccessfulChannel = channelResults.some((result) => result.status === 'ok');
-    const hasFailedChannel = channelResults.some((result) => result.status === 'failed');
-    return !hasSuccessfulChannel && hasFailedChannel;
+    return !outcome;
   }
 
   private async executeJob(job: BridgeJob): Promise<void> {
