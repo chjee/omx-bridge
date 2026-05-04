@@ -10,6 +10,7 @@ const PLUGIN_ID = "omx-bridge-plugin";
 const DEFAULT_BRIDGE_URL = "http://localhost:3992";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
 
 const pluginConfigSchema = Type.Object(
   {
@@ -53,10 +54,34 @@ const submitJobParameters = Type.Object(
       maxLength: 4000,
       description: "Prompt to submit to the omx-bridge service.",
     }),
+    cwd: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Working directory for the job. Must be an absolute path when provided.",
+      }),
+    ),
     requestId: Type.Optional(
       Type.String({
         maxLength: 200,
         description: "Optional request correlation identifier.",
+      }),
+    ),
+    originRoutingKey: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Routing key of the conversation that initiated this job.",
+      }),
+    ),
+    notifyUrl: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Loopback webhook URL to receive job completion callbacks.",
+      }),
+    ),
+    sourceName: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Optional concrete OpenClaw integration name for routing diagnostics.",
       }),
     ),
     metadata: Type.Optional(
@@ -118,6 +143,11 @@ interface BridgeJobExecution {
 interface BridgeJob {
   id: string;
   prompt: string;
+  cwd?: string;
+  originRoutingKey?: string;
+  source?: (typeof JOB_SOURCE_VALUES)[number];
+  sourceName?: string;
+  notifyUrl?: string;
   queueOrder: string;
   requestId?: string;
   metadata?: Record<string, unknown>;
@@ -308,7 +338,11 @@ export default definePluginEntry({
           body: JSON.stringify({
             prompt: input.prompt,
             source: "openclaw",
+            ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(input.requestId ? { requestId: input.requestId } : {}),
+            ...(input.originRoutingKey ? { originRoutingKey: input.originRoutingKey } : {}),
+            ...(input.notifyUrl ? { notifyUrl: input.notifyUrl } : {}),
+            ...(input.sourceName ? { sourceName: input.sourceName } : {}),
             ...(input.metadata ? { metadata: input.metadata } : {}),
           }),
         });
