@@ -382,37 +382,38 @@ Run `omx setup` to install all components. Run `omx doctor` to verify installati
 ## Local Notes
 
 ### 프로젝트 목적
-OpenClaw(텔레그램 AI 어시스턴트)와 OMX(코딩 에이전트)를 연결하는 브리지 서비스.
-텔레그램에서 코딩 작업을 요청하면 OMX가 자동으로 실행하고 결과를 반환하는 구조.
+OpenClaw, Claude Code MCP 세션, OMX 실행을 연결하는 NestJS/TypeScript 브리지 서비스.
+채팅 또는 MCP 도구에서 작업을 제출하면 bridge가 `omx exec` 또는 tmux 세션으로 실행하고,
+파일 기반 job state와 callback/notification 경로로 결과를 회수한다.
 
 ### 아키텍처
 ```
-텔레그램(앤디) → OpenClaw → Bridge Service → OMX exec → 결과 반환
+OpenClaw / Claude Code MCP / channel broker
+  -> omx-bridge HTTP API
+  -> omx exec 또는 tmux-backed execution
+  -> job state files + notifyUrl/callback/OpenClaw/Telegram delivery
 ```
 
 ### 기술 스택
 - Runtime: Node.js + TypeScript
 - Framework: NestJS
-- Queue: 파일 기반 (JSON 파일로 작업 상태 관리)
-- 세션 관리: tmux (장기 실행 시)
+- Queue/state: 파일 기반 JSON job store
+- Long-running execution: tmux session runner
+- Clients: `omx-dispatch` MCP server, `omx-bridge-plugin` OpenClaw plugin
 
-### 구현 단계
-1. [ ] OpenClaw → OMX 단발 실행 (`omx exec` 연동)
-2. [ ] 작업 상태 파일 저장 (`.omx/state/`)
-3. [ ] 완료 결과 회수 (polling)
-4. [ ] tmux 기반 장기 세션 관리
-5. [ ] team mode 확장
+### 운영 workflow
+- Non-trivial brownfield 작업은 `analyze -> plan/ralplan -> branch 구현 -> fresh diff review -> commit/merge/push` 순서로 진행한다.
+- 각 브랜치는 작고 되돌리기 쉬워야 하며, behavior fix, docs cleanup, runtime smoke, dispatch/plugin contract 변경을 한 브랜치에 섞지 않는다.
+- `.omx/` runtime state, logs, historical plans는 사용자가 명시적으로 OMX state maintenance를 요청한 경우에만 편집한다.
 
-### 핵심 명령어
-```bash
-omx exec "작업내용"        # non-interactive 실행
-omx status               # 현재 상태 확인
-omx --madmax --high      # Codex 기본 실행
-omx --madmax --high --model gemini-2.5-pro  # Gemini 실행
-```
+### 검증 기준
+- 기본 검증: `npm run verify`
+- Runtime/API/dispatch/plugin/callback/tmux/job lifecycle 변경: `npm run verify:runtime`
+- Live OMX 검증은 operator smoke이다: `npm run verify:runtime:live`는 credentials/quota/local OMX 상태가 준비된 경우에만 실행한다.
 
 ### 주의사항
-- OMX가 인터랙티브 기반이라 headless 실행 시 어댑터 설계가 핵심
-- 처음부터 크게 만들지 말고 단계별로 검증하면서 확장
-- 무한루프 방지: 봇끼리 대화 시 멘션 받았을 때만 응답
+- tmux/session execution, callbacks, job state files, dispatch/plugin contract는 integration boundary로 취급한다.
+- Runtime behavior 또는 live OMX behavior 변경은 unit coverage와 runtime smoke evidence 없이 진행하지 않는다.
+- 새 runtime dependency는 명시 요청 없이는 추가하지 않는다.
+- `contracts/bridge-job.contract.json`은 server/dispatch/plugin 계약 drift를 잡는 공유 fixture이다.
 <!-- OMX:AGENTS-INIT:MANUAL:END -->
