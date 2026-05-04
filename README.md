@@ -29,10 +29,11 @@ Main components:
 - `contracts/bridge-job.contract.json`: shared bridge job/session payload fixture used to catch server, dispatch, and plugin contract drift.
 - `.omx/state/bridge-jobs`: default job state directory.
 
+Agent maintenance workflow is documented in [docs/agent-workflow.md](docs/agent-workflow.md).
 Routing ownership is documented in [docs/routing-contract.md](docs/routing-contract.md).
-Bridge contract source-of-truth options are documented in [docs/bridge-contract-source-of-truth.md](docs/bridge-contract-source-of-truth.md).
-Runtime validation steps are documented in [docs/runtime-smoke-checks.md](docs/runtime-smoke-checks.md).
-Release verification gates are summarized in [docs/release-verification-checklist.md](docs/release-verification-checklist.md).
+Bridge contract source-of-truth options are documented in [docs/contract-source-of-truth.md](docs/contract-source-of-truth.md).
+Runtime validation steps are documented in [docs/runtime-smoke.md](docs/runtime-smoke.md).
+Release verification gates are summarized in [docs/release-verification.md](docs/release-verification.md).
 
 When bridge job payload fields, session summary fields, status values, execution
 error types, or routing fields change, update

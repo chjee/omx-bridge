@@ -405,6 +405,7 @@ OpenClaw / Claude Code MCP / channel broker
 - Non-trivial brownfield 작업은 `analyze -> plan/ralplan -> branch 구현 -> fresh diff review -> commit/merge/push` 순서로 진행한다.
 - 각 브랜치는 작고 되돌리기 쉬워야 하며, behavior fix, docs cleanup, runtime smoke, dispatch/plugin contract 변경을 한 브랜치에 섞지 않는다.
 - `.omx/` runtime state, logs, historical plans는 사용자가 명시적으로 OMX state maintenance를 요청한 경우에만 편집한다.
+- 자세한 workflow와 문서 map은 `docs/agent-workflow.md`를 따른다.
 
 ### 검증 기준
 - 기본 검증: `npm run verify`
