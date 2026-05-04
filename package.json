@@ -15,6 +15,8 @@
     "test:watch": "jest --watch",
     "test:unit": "jest --runInBand test/unit",
     "test:e2e": "jest --runInBand --testPathPatterns=test/.*\\.e2e-spec\\.ts$",
+    "smoke:runtime": "npm run build && npm --prefix omx-dispatch run build && npm --prefix omx-bridge-plugin run build && node scripts/runtime-smoke.js",
+    "verify:runtime": "npm run smoke:runtime",
     "verify": "npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
     "verify:root": "npm test && npm run build",
     "verify:dispatch": "npm --prefix omx-dispatch run typecheck && npm --prefix omx-dispatch run build && npm --prefix omx-dispatch test",
