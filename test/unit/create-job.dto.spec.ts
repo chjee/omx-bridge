@@ -33,6 +33,29 @@ describe('CreateJobDto', () => {
     expect(errors).toHaveLength(0);
   });
 
+  it('accepts explicit exec and tmux execution modes', async () => {
+    for (const executionMode of ['exec', 'tmux'] as const) {
+      const dto = new CreateJobDto();
+      dto.prompt = 'Implement phase 1';
+      dto.executionMode = executionMode;
+
+      const errors = await validate(dto);
+
+      expect(errors).toHaveLength(0);
+    }
+  });
+
+  it('rejects unknown execution modes', async () => {
+    const dto = new CreateJobDto();
+    dto.prompt = 'Implement phase 1';
+    // @ts-expect-error intentionally validating runtime input
+    dto.executionMode = 'screen';
+
+    const errors = await validate(dto);
+
+    expect(errors.some((error) => error.property === 'executionMode')).toBe(true);
+  });
+
   it('preserves optional metadata fields', async () => {
     const dto = new CreateJobDto();
     dto.prompt = 'Implement phase 1';

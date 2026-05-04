@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   HttpException,
   HttpStatus,
@@ -44,10 +45,13 @@ export class JobsService {
         ...input,
         cwd: await this.assertAllowedCwd(input.cwd),
       };
+      if (normalizedInput.executionMode === 'tmux') {
+        throw new BadRequestException('executionMode=tmux is not available until tmux session runner support is enabled');
+      }
       const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
       const existingJob = await this.findExistingRequestJob(normalizedInput);
       if (existingJob) {
-        this.assertRequestFingerprintMatches(existingJob, requestFingerprint);
+        this.assertRequestFingerprintMatches(existingJob, normalizedInput);
         return existingJob;
       }
 
@@ -62,6 +66,7 @@ export class JobsService {
       const job: BridgeJob = {
         id: randomUUID(),
         prompt: normalizedInput.prompt,
+        executionMode: normalizedInput.executionMode ?? 'exec',
         cwd: normalizedInput.cwd,
         queueOrder: this.nextQueueOrder(),
         requestId: normalizedInput.requestId,
@@ -221,8 +226,16 @@ export class JobsService {
       return undefined;
     }
 
+    return this.buildRequestFingerprintFromPayload(input, true);
+  }
+
+  private buildRequestFingerprintFromPayload(
+    input: Pick<CreateJobDto, 'prompt' | 'executionMode' | 'cwd' | 'notifyUrl' | 'originRoutingKey' | 'source' | 'sourceName' | 'metadata'>,
+    includeExecutionMode: boolean,
+  ): string {
     return this.hashStableJson({
       prompt: input.prompt,
+      ...(includeExecutionMode ? { executionMode: input.executionMode ?? 'exec' } : {}),
       cwd: input.cwd,
       notifyUrl: input.notifyUrl,
       originRoutingKey: input.originRoutingKey,
@@ -234,22 +247,32 @@ export class JobsService {
 
   private assertRequestFingerprintMatches(
     existingJob: BridgeJob,
-    incomingFingerprint: string | undefined,
+    incomingInput: CreateJobDto,
   ): void {
-    if (!existingJob.requestId || !incomingFingerprint) {
+    if (!existingJob.requestId || !incomingInput.requestId) {
       return;
     }
 
-    const existingFingerprint = existingJob.requestFingerprint ?? this.hashStableJson({
+    const incomingFingerprints = new Set([
+      this.buildRequestFingerprintFromPayload(incomingInput, true),
+      this.buildRequestFingerprintFromPayload(incomingInput, false),
+    ]);
+    const existingPayload = {
       prompt: existingJob.prompt,
+      executionMode: existingJob.executionMode,
       cwd: existingJob.cwd,
       notifyUrl: existingJob.notifyUrl,
       originRoutingKey: existingJob.originRoutingKey,
       source: existingJob.source,
       sourceName: existingJob.sourceName,
       metadata: existingJob.metadata,
-    });
-    if (existingFingerprint !== incomingFingerprint) {
+    };
+    const existingFingerprints = new Set([
+      ...(existingJob.requestFingerprint ? [existingJob.requestFingerprint] : []),
+      this.buildRequestFingerprintFromPayload(existingPayload, true),
+      this.buildRequestFingerprintFromPayload(existingPayload, false),
+    ]);
+    if (![...incomingFingerprints].some((fingerprint) => existingFingerprints.has(fingerprint))) {
       throw new ConflictException(
         `requestId ${existingJob.requestId} for source ${existingJob.source ?? 'default'} ` +
           'already belongs to a different job payload',

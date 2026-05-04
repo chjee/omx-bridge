@@ -3,7 +3,13 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
-import { JOB_STATUSES, type BridgeJob, type JobStatus } from './job.types';
+import {
+  JOB_EXECUTION_MODES,
+  JOB_STATUSES,
+  TMUX_SESSION_STATUSES,
+  type BridgeJob,
+  type JobStatus,
+} from './job.types';
 
 const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
 const JOB_SOURCES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
@@ -228,6 +234,7 @@ export class JobQueueRepository {
     return (
       value.id === jobId &&
       typeof value.prompt === 'string' &&
+      (value.executionMode === undefined || this.isOneOf(value.executionMode, JOB_EXECUTION_MODES)) &&
       (value.queueOrder === undefined || typeof value.queueOrder === 'string') &&
       (value.cwd === undefined || typeof value.cwd === 'string') &&
       (value.requestId === undefined || typeof value.requestId === 'string') &&
@@ -246,6 +253,7 @@ export class JobQueueRepository {
       typeof value.status === 'string' &&
       JOB_STATUSES.includes(value.status as JobStatus) &&
       this.isExecutionMetadata(execution) &&
+      (value.session === undefined || this.isTmuxSessionState(value.session)) &&
       (value.notifyOutcome === undefined || this.isNotifyOutcome(value.notifyOutcome)) &&
       (
         value.notifyHistory === undefined ||
@@ -268,6 +276,23 @@ export class JobQueueRepository {
       (value.outputTruncated === undefined || typeof value.outputTruncated === 'boolean') &&
       (value.errorType === undefined || this.isOneOf(value.errorType, EXECUTION_ERROR_TYPES)) &&
       (value.recoveredFromRestart === undefined || typeof value.recoveredFromRestart === 'boolean')
+    );
+  }
+
+  private isTmuxSessionState(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      value.backend === 'tmux' &&
+      typeof value.sessionName === 'string' &&
+      this.isOneOf(value.status, TMUX_SESSION_STATUSES) &&
+      typeof value.createdAt === 'string' &&
+      typeof value.updatedAt === 'string' &&
+      typeof value.attachCommand === 'string' &&
+      (value.cwd === undefined || typeof value.cwd === 'string') &&
+      (value.lastExitCode === undefined || value.lastExitCode === null || typeof value.lastExitCode === 'number')
     );
   }
 

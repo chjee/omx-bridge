@@ -72,6 +72,11 @@ export class CreateJobDto {
 
   @IsOptional()
   @IsString()
+  @IsIn(['exec', 'tmux'])
+  executionMode?: 'exec' | 'tmux';
+
+  @IsOptional()
+  @IsString()
   @MaxLength(500)
   cwd?: string;
 

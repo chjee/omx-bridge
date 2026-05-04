@@ -1,4 +1,4 @@
-import { ConflictException, INestApplication } from '@nestjs/common';
+import { BadRequestException, ConflictException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -217,6 +217,18 @@ describe('Jobs API (e2e)', () => {
 
     await controller.createJob({ prompt: 'still alive' });
     await runner.runOnce();
+  });
+
+  it('rejects tmux execution mode through the route handler until runner support exists', async () => {
+    await expect(
+      controller.createJob({
+        prompt: 'long running tmux work',
+        executionMode: 'tmux',
+      }),
+    ).rejects.toThrow(BadRequestException);
+
+    await expect(repository.listAll()).resolves.toEqual([]);
+    expect(fakeOmxExecService.calls).toEqual([]);
   });
 
   it('processes jobs in FIFO order with only one running at a time', async () => {

@@ -1,4 +1,5 @@
-import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,10 +13,30 @@ import type { BridgeJob } from '../../src/jobs/job.types';
 
 const TEST_ID = '00000000-0000-4000-a000-000000000001';
 
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const entries = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function hashStableJson(value: unknown): string {
+  return createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? TEST_ID,
     prompt: overrides.prompt ?? 'hello',
+    executionMode: overrides.executionMode,
     queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
     createdAt: overrides.createdAt ?? '2026-04-23T00:00:00.000Z',
@@ -36,6 +57,8 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
+    tmuxCommand: 'tmux',
+    tmuxSessionsDirectory: '/tmp/sessions',
     jobPollIntervalMs: 100,
     jobTimeoutMs: 900_000,
     maxOutputChars: 32_000,
@@ -95,6 +118,29 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
+  it('stores exec as the default execution mode', async () => {
+    const { service, repository } = createService();
+
+    const job = await service.createJob({ prompt: 'run with default mode' });
+
+    expect(job.executionMode).toBe('exec');
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      executionMode: 'exec',
+    }));
+  });
+
+  it('rejects tmux execution mode until the tmux runner is enabled', async () => {
+    const { service, repository, jobRunnerService } = createService();
+
+    await expect(service.createJob({
+      prompt: 'long running work',
+      executionMode: 'tmux',
+    })).rejects.toThrow(BadRequestException);
+
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
   it('stores a request fingerprint when requestId is provided', async () => {
     const { service, repository } = createService();
 
@@ -146,6 +192,34 @@ describe('JobsService.createJob', () => {
       prompt: 'same request retry',
       requestId: 'req-1',
       source: 'dispatch',
+    });
+
+    expect(result).toBe(existingJob);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('preserves idempotency for legacy request fingerprints without executionMode', async () => {
+    const existingJob = createJob({
+      prompt: 'same legacy request retry',
+      requestId: 'legacy-req-1',
+      requestFingerprint: hashStableJson({
+        prompt: 'same legacy request retry',
+        source: 'dispatch',
+        metadata: { channel: 'legacy' },
+      }),
+      source: 'dispatch',
+      metadata: { channel: 'legacy' },
+      status: 'running',
+    });
+    const jobs = new Map([[existingJob.id, existingJob]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    const result = await service.createJob({
+      prompt: 'same legacy request retry',
+      requestId: 'legacy-req-1',
+      source: 'dispatch',
+      metadata: { channel: 'legacy' },
     });
 
     expect(result).toBe(existingJob);
