@@ -383,6 +383,49 @@ describe('JobNotifyService', () => {
     expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'broker_fallback' });
   });
 
+  it('uses telegram fallback for openclaw callers with originRoutingKey but no per-job notifyUrl', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === CLAUDE_URL) {
+        return Promise.resolve({ ok: false, status: 502, statusText: 'Bad Gateway' });
+      }
+      return Promise.resolve({ ok: true });
+    });
+    const job = createJob({
+      source: 'openclaw',
+      sourceName: 'openclaw-telegram',
+      originRoutingKey: 'telegram:direct:123',
+    });
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(createConfig({ claudeNotifyUrl: CLAUDE_URL }), repoMock.repo);
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(CLAUDE_URL);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(TELEGRAM_URL);
+    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502, attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'ok' });
+  });
+
+  it('skips telegram fallback for openclaw callers when per-job notifyUrl owns callback delivery', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 502, statusText: 'Bad Gateway' });
+    const job = createJob({
+      source: 'openclaw',
+      sourceName: 'openclaw-telegram',
+      originRoutingKey: 'telegram:direct:123',
+      notifyUrl: CLAUDE_URL,
+    });
+    const repoMock = createRepoMock(job);
+    const service = new JobNotifyService(createConfig(), repoMock.repo);
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(CLAUDE_URL);
+    expect(outcome.claudeWebhook).toMatchObject({ status: 'failed', httpStatus: 502, attempts: 1 });
+    expect(outcome.telegram).toEqual({ status: 'skipped', skippedReason: 'per_job_webhook_failed' });
+  });
+
   it('sends both OpenClaw hooks and Telegram notifications in openclaw mode', async () => {
     const job = createJob();
     const repoMock = createRepoMock(job);

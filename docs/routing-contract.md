@@ -45,6 +45,10 @@ telegram:group:-1001234567890
 
 The bridge stores this field and includes it in completion payloads. It does not parse the key for direct delivery. Channel brokers use it to route the callback result back to the correct chat.
 
+For `source: "openclaw"`, `originRoutingKey` is correlation context only. It does
+not make the job broker-owned and does not suppress Telegram fallback when no
+per-job `notifyUrl` was supplied.
+
 ### `sourceName`
 
 `sourceName` names the concrete broker or integration when `source` is broader than one implementation.
@@ -87,7 +91,7 @@ Avoid placing secrets in `metadata`; job files are persisted on disk.
 | `dispatch` | Dispatch MCP process | `notifyUrl`, optional `requestId` | Sends completion to dispatch webhook. Dispatch queues notifications for polling/channel events. |
 | `channel` | Channel broker | `notifyUrl`, `originRoutingKey`, `sourceName` | Preserves routing fields and posts completion to broker webhook. Skips Telegram fallback. |
 | `synapse` | Legacy broker | `notifyUrl` or `CLAUDE_NOTIFY_URL`, legacy metadata as needed | Preserves compatibility fields. Treat as broker-owned routing. |
-| `openclaw` | Bridge/OpenClaw integration | OpenClaw hook config, optional Telegram config | In `NOTIFY_MODE=openclaw`, sends OpenClaw hook and Telegram notification when configured. |
+| `openclaw` | Bridge/OpenClaw integration | OpenClaw hook config, optional Telegram config; optional `originRoutingKey` for correlation | In `NOTIFY_MODE=openclaw`, sends OpenClaw hook and Telegram notification when configured. In `NOTIFY_MODE=claude`, `originRoutingKey` alone does not make the job broker-owned. |
 
 ## Notification Modes
 
@@ -112,6 +116,8 @@ Do:
 
 - Let per-job `notifyUrl` own callback delivery.
 - Let `channel` brokers own chat routing.
+- Treat `source: "openclaw"` as bridge-owned direct delivery unless a per-job
+  `notifyUrl` explicitly owns the callback path.
 - Use `omx_get_notifications`, `omx_wait_for_job`, or `omx_health` to recover dispatch-side pending completions.
 - Add explicit opt-in settings before introducing any direct fallback that bypasses a broker.
 
@@ -145,4 +151,3 @@ For a new broker-owned chat integration:
 5. Have the broker route completion payloads to the final chat destination.
 
 Only add a new `source` value if the bridge must change behavior for that caller class.
-
