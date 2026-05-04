@@ -62,7 +62,7 @@ Expected evidence:
 
 ## Deployment Smoke
 
-Use [runtime-smoke-checks.md](runtime-smoke-checks.md) for deployed service checks after systemd, OpenClaw, Telegram fallback, or external callback routing changes.
+Use [runtime-smoke.md](runtime-smoke.md) for deployed service checks after systemd, OpenClaw, Telegram fallback, or external callback routing changes.
 
 Deployment smoke should capture:
 
