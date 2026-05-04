@@ -14,6 +14,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? '00000000-0000-4000-a000-000000000001',
     prompt: overrides.prompt ?? 'hello',
+    executionMode: overrides.executionMode,
     queueOrder: overrides.queueOrder ?? '0000000000001-000001',
     status: overrides.status ?? 'queued',
     createdAt: overrides.createdAt ?? '2026-04-02T00:00:00.000Z',
@@ -62,6 +63,8 @@ describe('JobRunnerService', () => {
       host: '127.0.0.1',
       jobsDirectory: await createTempDir('runner-jobs'),
       omxCommand: 'omx',
+      tmuxCommand: 'tmux',
+      tmuxSessionsDirectory: await createTempDir('runner-sessions'),
       jobPollIntervalMs: 10,
       jobTimeoutMs: 1000,
       maxOutputChars: 1000,
@@ -485,6 +488,37 @@ describe('JobRunnerService', () => {
       (job) => job?.status === 'succeeded',
     );
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks queued tmux jobs failed without running them through exec', async () => {
+    const execute = jest.fn().mockResolvedValue(createExecutionResult());
+    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+    );
+
+    await repository.save(createJob({ executionMode: 'tmux' }));
+
+    await expect(runner.runOnce()).resolves.toBe(true);
+
+    const job = await repository.getById('00000000-0000-4000-a000-000000000001');
+    expect(job).toMatchObject({
+      executionMode: 'tmux',
+      status: 'failed',
+      exitCode: null,
+      execution: { errorType: 'execution_error' },
+    });
+    expect(job?.finishedAt).toBeDefined();
+    expect(job?.stderr).toContain('executionMode=tmux is not available');
+    expect(execute).not.toHaveBeenCalled();
+    expect(notifyJobComplete).toHaveBeenCalledWith(expect.objectContaining({
+      id: '00000000-0000-4000-a000-000000000001',
+      executionMode: 'tmux',
+      status: 'failed',
+    }));
   });
 
   it('marks stranded running jobs failed without re-queueing them', async () => {

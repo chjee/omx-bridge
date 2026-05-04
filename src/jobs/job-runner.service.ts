@@ -7,6 +7,7 @@ import type { BridgeJob, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
 
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
+const TMUX_UNSUPPORTED_MESSAGE = 'executionMode=tmux is not available until tmux session runner support is enabled.';
 
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -201,6 +202,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (!currentJob || currentJob.status !== 'queued') {
       return;
     }
+    if (currentJob.executionMode === 'tmux') {
+      await this.markUnsupportedTmuxJobFailed(currentJob);
+      return;
+    }
 
     this.logger.log(`Running job ${job.id}`);
     const runningJob: BridgeJob = {
@@ -242,6 +247,22 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.abortControllers.delete(job.id);
     }
+  }
+
+  private async markUnsupportedTmuxJobFailed(job: BridgeJob): Promise<void> {
+    const savedJob = await this.repository.save({
+      ...job,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      exitCode: job.exitCode ?? null,
+      stderr: job.stderr ? `${job.stderr}\n${TMUX_UNSUPPORTED_MESSAGE}` : TMUX_UNSUPPORTED_MESSAGE,
+      execution: {
+        ...job.execution,
+        errorType: 'execution_error',
+      },
+    });
+    this.logger.warn(`Job ${job.id} requested tmux execution before tmux runner support is enabled`);
+    this.trackCompletionNotification(savedJob);
   }
 
   private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {

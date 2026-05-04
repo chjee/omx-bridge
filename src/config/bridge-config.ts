@@ -10,6 +10,10 @@ export interface BridgeConfig {
   requestBodyLimit?: string;
   jobsDirectory: string;
   omxCommand: string;
+  /** tmux 기반 장기 세션을 시작할 때 사용할 바이너리. */
+  tmuxCommand: string;
+  /** tmux 세션 상태 파일을 저장할 디렉터리. */
+  tmuxSessionsDirectory: string;
   /** `omx exec` 자식 프로세스에 전달할 환경 변수 이름 allowlist. */
   omxEnvAllowlist?: string[];
   jobPollIntervalMs: number;
@@ -191,6 +195,11 @@ export function buildBridgeConfig(
       path.join(cwd, '.omx', 'state', 'bridge-jobs'),
     ),
     omxCommand: configService.get<string>('OMX_COMMAND', 'omx'),
+    tmuxCommand: configService.get<string>('TMUX_COMMAND', 'tmux'),
+    tmuxSessionsDirectory: configService.get<string>(
+      'BRIDGE_TMUX_SESSIONS_DIR',
+      path.join(cwd, '.omx', 'state', 'bridge-sessions'),
+    ),
     omxEnvAllowlist: parseStringList(
       configService.get<string>('BRIDGE_OMX_ENV_ALLOWLIST'),
       DEFAULT_OMX_ENV_ALLOWLIST,

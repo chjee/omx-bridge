@@ -30,6 +30,8 @@ function createService(
     host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
     omxCommand: 'omx',
+    tmuxCommand: 'tmux',
+    tmuxSessionsDirectory: '/tmp/sessions',
     jobPollIntervalMs: 10,
     jobTimeoutMs: 100,
     maxOutputChars: 10,

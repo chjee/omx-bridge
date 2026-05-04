@@ -1,7 +1,11 @@
 export const JOB_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancelled'] as const;
+export const JOB_EXECUTION_MODES = ['exec', 'tmux'] as const;
+export const TMUX_SESSION_STATUSES = ['starting', 'running', 'exited', 'cancelled', 'failed'] as const;
 
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export type TerminalJobStatus = Extract<JobStatus, 'succeeded' | 'failed' | 'cancelled'>;
+export type JobExecutionMode = (typeof JOB_EXECUTION_MODES)[number];
+export type TmuxSessionStatus = (typeof TMUX_SESSION_STATUSES)[number];
 
 export interface JobExecutionMetadata {
   command: string;
@@ -15,6 +19,17 @@ export interface JobExecutionMetadata {
 }
 
 export type JobSource = 'dispatch' | 'channel' | 'synapse' | 'openclaw';
+
+export interface TmuxSessionState {
+  backend: 'tmux';
+  sessionName: string;
+  status: TmuxSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
 
 export type NotifyChannelStatus = 'ok' | 'failed' | 'skipped';
 
@@ -43,6 +58,7 @@ export interface NotifyOutcome {
 export interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: JobExecutionMode;
   cwd?: string;
   queueOrder: string;
   requestId?: string;
@@ -60,6 +76,7 @@ export interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: JobExecutionMetadata;
+  session?: TmuxSessionState;
   notifyOutcome?: NotifyOutcome;
   /** 최근 10개 완료 알림 시도 이력 */
   notifyHistory?: NotifyOutcome[];
