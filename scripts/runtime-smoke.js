@@ -2,6 +2,7 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const { createRequire } = require('node:module');
@@ -14,6 +15,34 @@ const distMain = path.join(repoRoot, 'dist', 'main.js');
 const dispatchMain = path.join(dispatchDir, 'dist', 'index.js');
 const apiToken = 'runtime-smoke-token';
 const dispatchRequire = createRequire(path.join(dispatchDir, 'package.json'));
+const liveOmxEnvAllowlist = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'TMPDIR',
+  'CODEX_HOME',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'SSH_AUTH_SOCK',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OMX_DEFAULT_FRONTIER_MODEL',
+  'OMX_DEFAULT_SPARK_MODEL',
+  'OMX_DEFAULT_STANDARD_MODEL',
+];
+const liveOmxFakeEnvAllowlist = [
+  ...liveOmxEnvAllowlist,
+  'OMX_LIVE_SMOKE_EXPECTED_MARKER',
+];
 
 const children = [];
 const servers = [];
@@ -41,6 +70,14 @@ function writeExecutable(filePath, content) {
 }
 
 function findExecutable(name) {
+  if (path.isAbsolute(name)) {
+    try {
+      fs.accessSync(name, fs.constants.X_OK);
+      return name;
+    } catch {
+      return null;
+    }
+  }
   const pathEntries = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
   for (const entry of pathEntries) {
     const candidate = path.join(entry, name);
@@ -67,6 +104,30 @@ function createSuccessShim(dir) {
   return filePath;
 }
 
+function createLiveOmxShim(dir) {
+  const filePath = path.join(dir, 'fake-omx-live.sh');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env sh',
+    'while IFS= read -r _line; do',
+    '  :',
+    'done',
+    'printf "%s\\n" "$OMX_LIVE_SMOKE_EXPECTED_MARKER"',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
+function collectAllowedEnv(keys) {
+  const env = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 function createWaitShim(dir) {
   const filePath = path.join(dir, 'fake-omx-wait.sh');
   writeExecutable(filePath, [
@@ -85,6 +146,11 @@ function createWaitShim(dir) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function getFreePort() {
@@ -140,7 +206,14 @@ function startNotifyServer() {
   });
 }
 
-function startBridge({ port, jobsDir, omxCommand }) {
+function startBridge({
+  port,
+  jobsDir,
+  omxCommand,
+  allowedCwdPrefixes,
+  bridgeEnv = {},
+  omxEnvAllowlist = 'PATH',
+}) {
   const child = spawn(process.execPath, [distMain], {
     cwd: repoRoot,
     env: {
@@ -148,11 +221,13 @@ function startBridge({ port, jobsDir, omxCommand }) {
       HOME: process.env.HOME ?? '',
       USER: process.env.USER ?? '',
       TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+      ...bridgeEnv,
       PORT: String(port),
       BRIDGE_HOST: '127.0.0.1',
       BRIDGE_JOBS_DIR: jobsDir,
       OMX_COMMAND: omxCommand,
-      BRIDGE_OMX_ENV_ALLOWLIST: 'PATH',
+      BRIDGE_ALLOWED_CWD_PREFIXES: allowedCwdPrefixes ?? repoRoot,
+      BRIDGE_OMX_ENV_ALLOWLIST: omxEnvAllowlist,
       NOTIFY_MODE: 'claude',
       BRIDGE_API_TOKEN: apiToken,
       BRIDGE_JOB_POLL_INTERVAL_MS: '50',
@@ -212,8 +287,8 @@ async function requestJson(port, method, route, body) {
   return parsed;
 }
 
-async function waitForTerminalJob(port, jobId) {
-  const deadline = Date.now() + 8_000;
+async function waitForTerminalJob(port, jobId, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
   let latest;
   while (Date.now() < deadline) {
     latest = await requestJson(port, 'GET', `/jobs/${encodeURIComponent(jobId)}`);
@@ -241,8 +316,8 @@ async function waitForRunningJob(port, jobId) {
   throw new Error(`job ${jobId} did not enter running state; latest=${JSON.stringify(latest)}`);
 }
 
-async function waitForNotifyOutcome(port, jobId) {
-  const deadline = Date.now() + 8_000;
+async function waitForNotifyOutcome(port, jobId, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
   let latest;
   while (Date.now() < deadline) {
     latest = await requestJson(port, 'GET', `/jobs/${encodeURIComponent(jobId)}`);
@@ -254,7 +329,7 @@ async function waitForNotifyOutcome(port, jobId) {
   throw new Error(`job ${jobId} did not persist notifyOutcome; latest=${JSON.stringify(latest)}`);
 }
 
-async function stopChild(child) {
+async function stopChild(child, killTimeoutMs = 2_000) {
   if (!child || child.exitCode !== null || child.signalCode !== null) {
     return;
   }
@@ -266,7 +341,7 @@ async function stopChild(child) {
         // ignore cleanup errors
       }
       resolve();
-    }, 2_000);
+    }, killTimeoutMs);
     child.once('exit', () => {
       clearTimeout(timeout);
       resolve();
@@ -512,7 +587,82 @@ async function smokeOpenClawPluginDiscovery() {
   log('OpenClaw plugin discovery passed');
 }
 
-async function main() {
+function resolveLiveOmxCommand() {
+  const command = process.env.OMX_LIVE_SMOKE_COMMAND || process.env.OMX_COMMAND || 'omx';
+  const resolved = findExecutable(command);
+  assert(resolved, `live OMX command not found or not executable: ${command}`);
+  return command;
+}
+
+function buildLiveOmxPrompt() {
+  const nonce = crypto.randomBytes(4).toString('hex');
+  const markerParts = ['OMX', '_BRIDGE', '_LIVE', '_SMOKE', '_OK'];
+  const marker = `${markerParts.join('')}_${nonce}`;
+  return {
+    marker,
+    prompt: [
+      'You are running a live omx-bridge smoke check.',
+      'Print exactly one token and no explanation.',
+      `Build the token by concatenating these quoted parts with no spaces or separators: ${markerParts.map((part) => `"${part}"`).join(', ')}`,
+      `Then append one underscore and this nonce: ${nonce}`,
+      'Do not edit files, install dependencies, start services, or make network calls beyond the model/tool runtime already required by OMX.',
+    ].join('\n'),
+  };
+}
+
+function getLiveOmxTimeoutMs() {
+  return parsePositiveInt(process.env.OMX_LIVE_SMOKE_TIMEOUT_MS, 300_000);
+}
+
+async function smokeLiveOmxExec({ fake = false } = {}) {
+  const tempDir = makeTempDir('omx-bridge-live-smoke-');
+  const notify = await startNotifyServer();
+  const port = await getFreePort();
+  const omxCommand = fake ? createLiveOmxShim(tempDir) : resolveLiveOmxCommand();
+  const { marker, prompt } = buildLiveOmxPrompt();
+  const timeoutMs = getLiveOmxTimeoutMs();
+  const bridge = startBridge({
+    port,
+    jobsDir: path.join(tempDir, 'jobs'),
+    omxCommand,
+    allowedCwdPrefixes: tempDir,
+    omxEnvAllowlist: (fake ? liveOmxFakeEnvAllowlist : liveOmxEnvAllowlist).join(','),
+    bridgeEnv: {
+      ...collectAllowedEnv(liveOmxEnvAllowlist),
+      ...(fake ? { OMX_LIVE_SMOKE_EXPECTED_MARKER: marker } : {}),
+      BRIDGE_JOB_TIMEOUT_MS: String(timeoutMs),
+      BRIDGE_SIGKILL_GRACE_MS: '5000',
+    },
+  });
+  try {
+    await waitForBridge(port);
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt,
+      requestId: `runtime-smoke-live-omx-${Date.now()}`,
+      source: 'dispatch',
+      sourceName: 'runtime-smoke-live',
+      originRoutingKey: 'runtime-smoke:live',
+      cwd: tempDir,
+      notifyUrl: `http://127.0.0.1:${notify.port}/notify`,
+      metadata: { smoke: 'live-omx' },
+    });
+    const job = await waitForNotifyOutcome(port, submit.jobId, timeoutMs + 15_000);
+    assert(job.status === 'succeeded', `live OMX job status was ${job.status}; stderr=${job.stderr || '<empty>'}`);
+    assert(
+      job.stdout.includes(marker),
+      `live OMX job output did not include ${marker}; stdout=${job.stdout || '<empty>'}`,
+    );
+    assert(job.execution?.command === omxCommand, 'live OMX job did not record the selected OMX command');
+    assert(job.notifyOutcome?.claudeWebhook?.status === 'ok', 'live OMX notifyUrl did not report ok');
+    assert(notify.requests.some((request) => request.json?.id === submit.jobId), 'local notify server did not receive live OMX callback');
+  } finally {
+    await stopChild(bridge, 7_000);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+  log(`${fake ? 'fake ' : ''}live OMX exec smoke passed`);
+}
+
+async function smokeLoopbackRuntime() {
   assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
   assert(fs.existsSync(dispatchMain), 'omx-dispatch/dist/index.js not found; run npm --prefix omx-dispatch run build first');
   await smokeBridgeApi();
@@ -520,6 +670,24 @@ async function main() {
   await smokeDispatchMcp();
   await smokeOpenClawPluginDiscovery();
   log('runtime smoke passed');
+}
+
+async function main() {
+  assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
+  const mode = process.argv[2] || '--loopback';
+  if (mode === '--loopback') {
+    await smokeLoopbackRuntime();
+    return;
+  }
+  if (mode === '--live-omx') {
+    await smokeLiveOmxExec();
+    return;
+  }
+  if (mode === '--live-omx-fake') {
+    await smokeLiveOmxExec({ fake: true });
+    return;
+  }
+  fail(`unknown runtime smoke mode: ${mode}`);
 }
 
 main().catch(async (error) => {

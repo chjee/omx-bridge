@@ -429,6 +429,16 @@ npm run verify:runtime
 
 This runs build artifacts with fake OMX shims and verifies bridge API submission, cancellation, per-job webhook notification, `omx-dispatch` MCP submit-and-wait, and optional OpenClaw plugin discovery when the local `openclaw` CLI is installed.
 
+Run the opt-in live OMX smoke only when the local `omx` command and model credentials are configured:
+
+```bash
+npm run verify:runtime:live
+```
+
+This submits one real `omx exec` job through a temporary loopback bridge and verifies the local callback path without contacting live Telegram or OpenClaw hooks.
+
+This is an operator smoke, not a deterministic CI gate: it uses local provider credentials, can consume model quota, and may fail because of local OMX/model state rather than a bridge regression.
+
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are marked `failed` on service startup to avoid duplicate execution.
