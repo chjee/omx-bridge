@@ -46,6 +46,8 @@ const liveOmxFakeEnvAllowlist = [
 
 const children = [];
 const servers = [];
+const keepRuntimeSmokeDir = process.env.KEEP_RUNTIME_SMOKE_DIR === '1';
+const verboseRuntimeSmokeDiagnostics = process.env.RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE === '1';
 
 function log(message) {
   process.stdout.write(`[runtime-smoke] ${message}\n`);
@@ -59,6 +61,26 @@ function assert(condition, message) {
   if (!condition) {
     fail(message);
   }
+}
+
+function truncateForDiagnostic(value, maxChars = 4_000) {
+  if (!value) {
+    return '';
+  }
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, 1_000)}\n...<truncated ${value.length - maxChars} chars>...\n${value.slice(-(maxChars - 1_000))}`;
+}
+
+function redactDiagnosticText(value) {
+  if (!value) {
+    return '';
+  }
+  return value
+    .replace(/(bearer\s+)[^\s"']+/gi, '$1<redacted>')
+    .replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[=:]\s*)[^\s"',}]+/gi, '$1<redacted>')
+    .replace(/([?&](?:api[_-]?key|token|secret|password|authorization)=)[^&\s"']+/gi, '$1<redacted>');
 }
 
 function makeTempDir(prefix) {
@@ -126,6 +148,259 @@ function collectAllowedEnv(keys) {
     }
   }
   return env;
+}
+
+function cleanupTempDir(tempDir, failed = false) {
+  if (keepRuntimeSmokeDir) {
+    log(`preserved ${failed ? 'failed ' : ''}runtime smoke temp dir: ${tempDir}`);
+    return;
+  }
+  fs.rmSync(tempDir, { recursive: true, force: true });
+}
+
+function summarizeTextField(value) {
+  const text = value ?? '';
+  const summary = {
+    bytes: Buffer.byteLength(text),
+    chars: text.length,
+  };
+  if (verboseRuntimeSmokeDiagnostics && text) {
+    summary.preview = truncateForDiagnostic(redactDiagnosticText(text), 1_200);
+  }
+  return summary;
+}
+
+function metadataSummary(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return undefined;
+  }
+  return {
+    keys: Object.keys(metadata).sort(),
+  };
+}
+
+function executionSummary(execution) {
+  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) {
+    return undefined;
+  }
+  return {
+    command: execution.command ? '<redacted>' : undefined,
+    exitCode: execution.exitCode,
+    signal: execution.signal,
+    durationMs: execution.durationMs,
+    errorType: execution.errorType,
+    timedOut: execution.timedOut,
+  };
+}
+
+function notifyOutcomeSummary(notifyOutcome) {
+  if (!notifyOutcome || typeof notifyOutcome !== 'object' || Array.isArray(notifyOutcome)) {
+    return undefined;
+  }
+  const summary = {};
+  for (const [channel, outcome] of Object.entries(notifyOutcome)) {
+    if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+      summary[channel] = outcome;
+      continue;
+    }
+    summary[channel] = {
+      status: outcome.status,
+      skippedReason: outcome.skippedReason,
+      attempts: outcome.attempts,
+      statusCode: outcome.statusCode,
+      errorType: outcome.errorType,
+    };
+  }
+  return summary;
+}
+
+function listFilesRecursive(dir, predicate, limit = 30) {
+  const files = [];
+  const visit = (current) => {
+    if (files.length >= limit || !fs.existsSync(current)) {
+      return;
+    }
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        visit(entryPath);
+      } else if (predicate(entryPath)) {
+        files.push(entryPath);
+      }
+      if (files.length >= limit) {
+        return;
+      }
+    }
+  };
+  visit(dir);
+  return files;
+}
+
+function summarizeJobFile(filePath) {
+  try {
+    const job = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!job || typeof job !== 'object' || !('status' in job)) {
+      return null;
+    }
+    return {
+      file: filePath,
+      id: job.id,
+      status: job.status,
+      requestId: job.requestId,
+      source: job.source,
+      sourceName: job.sourceName,
+      originRoutingKey: job.originRoutingKey,
+      cwd: job.cwd,
+      notifyUrl: job.notifyUrl ? '<redacted>' : undefined,
+      metadata: metadataSummary(job.metadata),
+      stdout: summarizeTextField(job.stdout),
+      stderr: summarizeTextField(job.stderr),
+      execution: executionSummary(job.execution),
+      notifyOutcome: notifyOutcomeSummary(job.notifyOutcome),
+    };
+  } catch (error) {
+    return {
+      file: filePath,
+      unreadable: String(error),
+    };
+  }
+}
+
+function summarizeJsonlFile(filePath) {
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean).slice(-5);
+    return {
+      file: filePath,
+      tail: lines.map((line) => {
+        try {
+          const event = JSON.parse(line);
+          return {
+            id: event?.job?.id ?? event?.id,
+            status: event?.job?.status ?? event?.status,
+            source: event?.job?.source ?? event?.source,
+            sourceName: event?.job?.sourceName ?? event?.sourceName,
+          };
+        } catch {
+          return truncateForDiagnostic(line, 300);
+        }
+      }),
+    };
+  } catch (error) {
+    return {
+      file: filePath,
+      unreadable: String(error),
+    };
+  }
+}
+
+function printSmokeDiagnostics(name, tempDir, bridges = []) {
+  process.stderr.write(`\n[runtime-smoke] diagnostics for ${name}\n`);
+  process.stderr.write(`[runtime-smoke] tempDir: ${tempDir}\n`);
+  if (keepRuntimeSmokeDir) {
+    process.stderr.write('[runtime-smoke] KEEP_RUNTIME_SMOKE_DIR=1 is set; temp dir will be preserved\n');
+  } else {
+    process.stderr.write('[runtime-smoke] set KEEP_RUNTIME_SMOKE_DIR=1 to preserve temp files after failures\n');
+  }
+  if (!verboseRuntimeSmokeDiagnostics) {
+    process.stderr.write('[runtime-smoke] set RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1 to include redacted stdout/stderr previews\n');
+  }
+
+  for (const [index, bridge] of bridges.entries()) {
+    const output = bridge?.output ?? '';
+    const summary = { bytes: Buffer.byteLength(output), chars: output.length };
+    if (verboseRuntimeSmokeDiagnostics && output) {
+      summary.preview = truncateForDiagnostic(redactDiagnosticText(output), 8_000).trim();
+    }
+    process.stderr.write(`[runtime-smoke] bridge[${index}] output summary:\n${JSON.stringify(summary, null, 2)}\n`);
+  }
+
+  const jobSummaries = listFilesRecursive(
+    tempDir,
+    (filePath) => filePath.endsWith('.json') && !filePath.endsWith('package.json'),
+  )
+    .map(summarizeJobFile)
+    .filter(Boolean);
+  if (jobSummaries.length > 0) {
+    process.stderr.write(`[runtime-smoke] job json summaries:\n${JSON.stringify(jobSummaries, null, 2)}\n`);
+  } else {
+    process.stderr.write('[runtime-smoke] job json summaries: <none>\n');
+  }
+
+  const jsonlSummaries = listFilesRecursive(tempDir, (filePath) => filePath.endsWith('.jsonl'))
+    .map(summarizeJsonlFile);
+  if (jsonlSummaries.length > 0) {
+    process.stderr.write(`[runtime-smoke] jsonl summaries:\n${JSON.stringify(jsonlSummaries, null, 2)}\n`);
+  }
+}
+
+async function smokeDiagnosticsFixture() {
+  const result = await runCommand(process.execPath, [__filename, '--diagnostics-fixture-child'], {
+    env: {
+      ...process.env,
+      KEEP_RUNTIME_SMOKE_DIR: '1',
+      RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE: '1',
+    },
+    timeoutMs: 10_000,
+  });
+  assert(result.stderr.includes('[runtime-smoke] diagnostics for diagnostics fixture'), 'diagnostics fixture did not print diagnostics header');
+  assert(result.stderr.includes('[runtime-smoke] job json summaries:'), 'diagnostics fixture did not print job summaries');
+  assert(result.stderr.includes('"notifyUrl": "<redacted>"'), 'diagnostics fixture did not redact notifyUrl');
+  assert(result.stderr.includes('"command": "<redacted>"'), 'diagnostics fixture did not redact execution command');
+  assert(result.stderr.includes('token=<redacted>'), 'diagnostics fixture did not redact token-like bridge output');
+  assert(!result.stderr.includes('super-secret'), 'diagnostics fixture leaked secret metadata/output');
+
+  const preservedMatch = result.stdout.match(/preserved failed runtime smoke temp dir: (.+)$/m);
+  assert(preservedMatch, 'diagnostics fixture did not preserve the temp dir with KEEP_RUNTIME_SMOKE_DIR=1');
+  fs.rmSync(preservedMatch[1], { recursive: true, force: true });
+  log('runtime smoke diagnostics fixture passed');
+}
+
+function emitDiagnosticsFixture() {
+  const tempDir = makeTempDir('omx-bridge-smoke-diagnostics-');
+  const jobsDir = path.join(tempDir, 'jobs');
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.writeFileSync(path.join(jobsDir, 'job.json'), JSON.stringify({
+    id: 'diagnostics-fixture',
+    status: 'failed',
+    requestId: 'runtime-smoke-diagnostics-fixture',
+    source: 'dispatch',
+    sourceName: 'runtime-smoke',
+    originRoutingKey: 'telegram:direct:fixture',
+    cwd: tempDir,
+    notifyUrl: 'http://127.0.0.1:1/notify?token=super-secret',
+    metadata: {
+      token: 'super-secret',
+      channel: 'fixture',
+    },
+    stdout: 'stdout token=super-secret\n',
+    stderr: 'stderr bearer super-secret\n',
+    execution: {
+      command: '/tmp/super-secret-command',
+      exitCode: 1,
+      errorType: 'process_exit',
+      durationMs: 12,
+    },
+    notifyOutcome: {
+      claudeWebhook: {
+        status: 'failed',
+        statusCode: 500,
+        url: 'http://127.0.0.1:1/notify?token=super-secret',
+      },
+      telegram: {
+        skippedReason: 'not_configured',
+      },
+    },
+  }));
+  fs.writeFileSync(path.join(tempDir, 'notifications.jsonl'), `${JSON.stringify({
+    job: {
+      id: 'diagnostics-fixture',
+      status: 'failed',
+      source: 'dispatch',
+      sourceName: 'runtime-smoke',
+    },
+  })}\n`);
+  printSmokeDiagnostics('diagnostics fixture', tempDir, [{ output: 'bridge output token=super-secret\n' }]);
+  cleanupTempDir(tempDir, true);
 }
 
 function createWaitShim(dir) {
@@ -429,14 +704,16 @@ async function runCommand(command, args, options = {}) {
 
 async function smokeBridgeApi() {
   const tempDir = makeTempDir('omx-bridge-smoke-api-');
-  const notify = await startNotifyServer();
-  const port = await getFreePort();
-  const bridge = startBridge({
-    port,
-    jobsDir: tempDir,
-    omxCommand: createSuccessShim(tempDir),
-  });
+  let bridge;
+  let failed = false;
   try {
+    const notify = await startNotifyServer();
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir: tempDir,
+      omxCommand: createSuccessShim(tempDir),
+    });
     await waitForBridge(port);
 
     const dispatchSubmit = await requestJson(port, 'POST', '/jobs', {
@@ -474,22 +751,28 @@ async function smokeBridgeApi() {
     assert(openclawJob.metadata?.channel === 'openclaw', 'openclaw metadata was not preserved');
     assert(openclawJob.notifyOutcome?.claudeWebhook?.skippedReason === 'no_notify_url', 'missing CLAUDE_NOTIFY_URL was not recorded');
     assert(openclawJob.notifyOutcome?.telegram?.skippedReason === 'not_configured', 'unconfigured Telegram fallback was not recorded');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('bridge API submit/get/notifyUrl and OpenClaw field preservation', tempDir, [bridge].filter(Boolean));
+    throw error;
   } finally {
     await stopChild(bridge);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupTempDir(tempDir, failed);
   }
   log('bridge API submit/get/notifyUrl and OpenClaw field preservation passed');
 }
 
 async function smokeCancelPath() {
   const tempDir = makeTempDir('omx-bridge-smoke-cancel-');
-  const port = await getFreePort();
-  const bridge = startBridge({
-    port,
-    jobsDir: tempDir,
-    omxCommand: createWaitShim(tempDir),
-  });
+  let bridge;
+  let failed = false;
   try {
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir: tempDir,
+      omxCommand: createWaitShim(tempDir),
+    });
     await waitForBridge(port);
     const submit = await requestJson(port, 'POST', '/jobs', {
       prompt: 'runtime smoke cancel',
@@ -504,44 +787,51 @@ async function smokeCancelPath() {
     assert(cancelledJob.execution?.errorType === 'cancelled', 'cancelled job did not record errorType=cancelled');
     assert(cancelledJob.notifyOutcome?.claudeWebhook?.skippedReason === 'no_notify_url', 'cancel notify did not record missing CLAUDE_NOTIFY_URL');
     assert(cancelledJob.notifyOutcome?.telegram?.skippedReason === 'not_configured', 'cancel notify did not record unconfigured Telegram');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('cancel path', tempDir, [bridge].filter(Boolean));
+    throw error;
   } finally {
     await stopChild(bridge);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupTempDir(tempDir, failed);
   }
   log('cancel path passed');
 }
 
 async function smokeDispatchMcp() {
   const tempDir = makeTempDir('omx-bridge-smoke-dispatch-');
-  const bridgePort = await getFreePort();
-  const webhookPort = await getFreePort();
-  const bridge = startBridge({
-    port: bridgePort,
-    jobsDir: tempDir,
-    omxCommand: createSuccessShim(tempDir),
-  });
-  await waitForBridge(bridgePort);
-
-  const { Client } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
-  const { StdioClientTransport } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [dispatchMain],
-    cwd: dispatchDir,
-    env: {
-      BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
-      BRIDGE_API_TOKEN: apiToken,
-      WEBHOOK_PORT: String(webhookPort),
-      OMX_DISPATCH_NOTIFICATION_STORE_PATH: path.join(tempDir, 'notifications.jsonl'),
-      OMX_DISPATCH_WAIT_TIMEOUT_MS: '10000',
-      OMX_DISPATCH_WAIT_POLL_INTERVAL_MS: '100',
-      OMX_DISPATCH_TERMINAL_NOTIFICATION_GRACE_MS: '2000',
-      ENABLE_CLAUDE_CHANNEL: 'false',
-    },
-    stderr: 'pipe',
-  });
-  const client = new Client({ name: 'runtime-smoke', version: '1.0.0' });
+  let bridge;
+  let client;
+  let failed = false;
   try {
+    const bridgePort = await getFreePort();
+    const webhookPort = await getFreePort();
+    bridge = startBridge({
+      port: bridgePort,
+      jobsDir: tempDir,
+      omxCommand: createSuccessShim(tempDir),
+    });
+    await waitForBridge(bridgePort);
+
+    const { Client } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
+    const { StdioClientTransport } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [dispatchMain],
+      cwd: dispatchDir,
+      env: {
+        BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
+        BRIDGE_API_TOKEN: apiToken,
+        WEBHOOK_PORT: String(webhookPort),
+        OMX_DISPATCH_NOTIFICATION_STORE_PATH: path.join(tempDir, 'notifications.jsonl'),
+        OMX_DISPATCH_WAIT_TIMEOUT_MS: '10000',
+        OMX_DISPATCH_WAIT_POLL_INTERVAL_MS: '100',
+        OMX_DISPATCH_TERMINAL_NOTIFICATION_GRACE_MS: '2000',
+        ENABLE_CLAUDE_CHANNEL: 'false',
+      },
+      stderr: 'pipe',
+    });
+    client = new Client({ name: 'runtime-smoke', version: '1.0.0' });
     await client.connect(transport);
     const health = parseToolJson(await client.callTool({ name: 'omx_health', arguments: {} }));
     assert(health.bridge?.reachable === true, 'omx_health did not report bridge reachable');
@@ -559,10 +849,14 @@ async function smokeDispatchMcp() {
     assert(wait.status === 'succeeded', `dispatch wait status was ${wait.status}`);
     assert(wait.notification?.job?.notifyUrl === `http://127.0.0.1:${webhookPort}/notify`, 'dispatch notifyUrl was not the session webhook');
     assert(wait.job?.stdout === 'OK\n', 'dispatch MCP job stdout was not captured');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('omx-dispatch MCP health and submit-and-wait', tempDir, [bridge].filter(Boolean));
+    throw error;
   } finally {
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
     await stopChild(bridge);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupTempDir(tempDir, failed);
   }
   log('omx-dispatch MCP health and submit-and-wait passed');
 }
@@ -616,25 +910,27 @@ function getLiveOmxTimeoutMs() {
 
 async function smokeLiveOmxExec({ fake = false } = {}) {
   const tempDir = makeTempDir('omx-bridge-live-smoke-');
-  const notify = await startNotifyServer();
-  const port = await getFreePort();
-  const omxCommand = fake ? createLiveOmxShim(tempDir) : resolveLiveOmxCommand();
-  const { marker, prompt } = buildLiveOmxPrompt();
-  const timeoutMs = getLiveOmxTimeoutMs();
-  const bridge = startBridge({
-    port,
-    jobsDir: path.join(tempDir, 'jobs'),
-    omxCommand,
-    allowedCwdPrefixes: tempDir,
-    omxEnvAllowlist: (fake ? liveOmxFakeEnvAllowlist : liveOmxEnvAllowlist).join(','),
-    bridgeEnv: {
-      ...collectAllowedEnv(liveOmxEnvAllowlist),
-      ...(fake ? { OMX_LIVE_SMOKE_EXPECTED_MARKER: marker } : {}),
-      BRIDGE_JOB_TIMEOUT_MS: String(timeoutMs),
-      BRIDGE_SIGKILL_GRACE_MS: '5000',
-    },
-  });
+  let bridge;
+  let failed = false;
   try {
+    const notify = await startNotifyServer();
+    const port = await getFreePort();
+    const omxCommand = fake ? createLiveOmxShim(tempDir) : resolveLiveOmxCommand();
+    const { marker, prompt } = buildLiveOmxPrompt();
+    const timeoutMs = getLiveOmxTimeoutMs();
+    bridge = startBridge({
+      port,
+      jobsDir: path.join(tempDir, 'jobs'),
+      omxCommand,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: (fake ? liveOmxFakeEnvAllowlist : liveOmxEnvAllowlist).join(','),
+      bridgeEnv: {
+        ...collectAllowedEnv(liveOmxEnvAllowlist),
+        ...(fake ? { OMX_LIVE_SMOKE_EXPECTED_MARKER: marker } : {}),
+        BRIDGE_JOB_TIMEOUT_MS: String(timeoutMs),
+        BRIDGE_SIGKILL_GRACE_MS: '5000',
+      },
+    });
     await waitForBridge(port);
     const submit = await requestJson(port, 'POST', '/jobs', {
       prompt,
@@ -655,9 +951,13 @@ async function smokeLiveOmxExec({ fake = false } = {}) {
     assert(job.execution?.command === omxCommand, 'live OMX job did not record the selected OMX command');
     assert(job.notifyOutcome?.claudeWebhook?.status === 'ok', 'live OMX notifyUrl did not report ok');
     assert(notify.requests.some((request) => request.json?.id === submit.jobId), 'local notify server did not receive live OMX callback');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics(`${fake ? 'fake ' : ''}live OMX exec smoke`, tempDir, [bridge].filter(Boolean));
+    throw error;
   } finally {
     await stopChild(bridge, 7_000);
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    cleanupTempDir(tempDir, failed);
   }
   log(`${fake ? 'fake ' : ''}live OMX exec smoke passed`);
 }
@@ -665,6 +965,7 @@ async function smokeLiveOmxExec({ fake = false } = {}) {
 async function smokeLoopbackRuntime() {
   assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
   assert(fs.existsSync(dispatchMain), 'omx-dispatch/dist/index.js not found; run npm --prefix omx-dispatch run build first');
+  await smokeDiagnosticsFixture();
   await smokeBridgeApi();
   await smokeCancelPath();
   await smokeDispatchMcp();
@@ -673,8 +974,12 @@ async function smokeLoopbackRuntime() {
 }
 
 async function main() {
-  assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
   const mode = process.argv[2] || '--loopback';
+  if (mode === '--diagnostics-fixture-child') {
+    emitDiagnosticsFixture();
+    return;
+  }
+  assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
   if (mode === '--loopback') {
     await smokeLoopbackRuntime();
     return;

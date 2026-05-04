@@ -65,7 +65,11 @@ Optional knobs:
 ```bash
 OMX_LIVE_SMOKE_COMMAND=/path/to/omx npm run verify:runtime:live
 OMX_LIVE_SMOKE_TIMEOUT_MS=600000 npm run verify:runtime:live
+KEEP_RUNTIME_SMOKE_DIR=1 npm run verify:runtime
+RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1 npm run verify:runtime
 ```
+
+`KEEP_RUNTIME_SMOKE_DIR=1` works for both loopback and live runtime smoke. On failure, the smoke script prints bridge output/job JSON summaries/notification JSONL summaries with sensitive fields redacted, plus the temporary directory path. Set `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` only for local triage when redacted stdout/stderr previews are needed.
 
 Expected:
 
