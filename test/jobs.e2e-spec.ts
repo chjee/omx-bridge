@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, INestApplication } from '@nestjs/common';
+import { ConflictException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -10,6 +10,7 @@ import { OmxExecService } from '../src/jobs/omx-exec.service';
 import { JobNotifyService } from '../src/jobs/job-notify.service';
 import { JobQueueRepository } from '../src/jobs/job-queue.repository';
 import type { BridgeJob, OmxExecutionResult } from '../src/jobs/job.types';
+import { TmuxSessionRunnerService } from '../src/jobs/tmux-session-runner.service';
 import { createTempDir, waitFor } from './helpers';
 
 class FakeOmxExecService {
@@ -84,6 +85,38 @@ class FakeOmxExecService {
   }
 }
 
+class FakeTmuxSessionRunnerService {
+  public readonly startedJobIds: string[] = [];
+
+  async start(job: BridgeJob): Promise<NonNullable<BridgeJob['session']>> {
+    this.startedJobIds.push(job.id);
+    return {
+      backend: 'tmux',
+      sessionName: `fake-${job.id.slice(0, 8)}`,
+      status: 'running',
+      createdAt: job.startedAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      attachCommand: `tmux attach -t fake-${job.id.slice(0, 8)}`,
+      ...(job.cwd ? { cwd: job.cwd } : {}),
+    };
+  }
+
+  async collect(): Promise<null> {
+    return null;
+  }
+
+  async cancel(job: BridgeJob): Promise<NonNullable<BridgeJob['session']> | null> {
+    if (!job.session) {
+      return null;
+    }
+    return {
+      ...job.session,
+      status: 'cancelled',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
 function createBridgeJobFixture(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? '00000000-0000-4000-a000-000000000001',
@@ -117,6 +150,7 @@ describe('Jobs API (e2e)', () => {
   let app: INestApplication;
   let jobsDirectory: string;
   let fakeOmxExecService: FakeOmxExecService;
+  let fakeTmuxSessionRunner: FakeTmuxSessionRunnerService;
   let runner: JobRunnerService;
   let controller: JobsController;
   let repository: JobQueueRepository;
@@ -133,6 +167,7 @@ describe('Jobs API (e2e)', () => {
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
     process.env.BRIDGE_API_TOKEN = '';
     fakeOmxExecService = new FakeOmxExecService();
+    fakeTmuxSessionRunner = new FakeTmuxSessionRunnerService();
     notifyJobComplete = jest.fn().mockResolvedValue(undefined);
 
     const moduleRef = await Test.createTestingModule({
@@ -140,6 +175,8 @@ describe('Jobs API (e2e)', () => {
     })
       .overrideProvider(OmxExecService)
       .useValue(fakeOmxExecService)
+      .overrideProvider(TmuxSessionRunnerService)
+      .useValue(fakeTmuxSessionRunner)
       .overrideProvider(JobNotifyService)
       .useValue({ notifyJobComplete })
       .compile();
@@ -219,16 +256,27 @@ describe('Jobs API (e2e)', () => {
     await runner.runOnce();
   });
 
-  it('rejects tmux execution mode through the route handler until runner support exists', async () => {
-    await expect(
-      controller.createJob({
-        prompt: 'long running tmux work',
-        executionMode: 'tmux',
-      }),
-    ).rejects.toThrow(BadRequestException);
+  it('accepts tmux execution mode and starts a session-backed job without exec', async () => {
+    const response = await controller.createJob({
+      prompt: 'long running tmux work',
+      executionMode: 'tmux',
+    });
 
-    await expect(repository.listAll()).resolves.toEqual([]);
+    const job = await waitFor(
+      () => repository.getById(response.jobId),
+      (currentJob) => currentJob?.status === 'running' && currentJob.session?.status === 'running',
+    );
+    expect(job).toMatchObject({
+      id: response.jobId,
+      executionMode: 'tmux',
+      status: 'running',
+      session: {
+        backend: 'tmux',
+        status: 'running',
+      },
+    });
     expect(fakeOmxExecService.calls).toEqual([]);
+    expect(fakeTmuxSessionRunner.startedJobIds).toContain(response.jobId);
   });
 
   it('processes jobs in FIFO order with only one running at a time', async () => {

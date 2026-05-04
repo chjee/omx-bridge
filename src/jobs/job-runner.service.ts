@@ -5,9 +5,10 @@ import { OmxExecService } from './omx-exec.service';
 import { JobNotifyService } from './job-notify.service';
 import type { BridgeJob, NotifyOutcome } from './job.types';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
+import { TmuxSessionRunnerService } from './tmux-session-runner.service';
 
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
-const TMUX_UNSUPPORTED_MESSAGE = 'executionMode=tmux is not available until tmux session runner support is enabled.';
+const TMUX_RUNNER_UNAVAILABLE_MESSAGE = 'executionMode=tmux requires tmux session runner support.';
 
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
@@ -26,6 +27,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     private readonly omxExecService: OmxExecService,
     private readonly jobNotify: JobNotifyService,
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
+    @Optional() private readonly tmuxSessionRunner?: TmuxSessionRunnerService,
     @Optional() private readonly instanceLock?: BridgeInstanceLockService,
   ) {}
 
@@ -69,6 +71,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   async recoverInterruptedJobs(): Promise<void> {
     const runningJobs = await this.repository.listByStatus('running');
     for (const job of runningJobs) {
+      if (job.executionMode === 'tmux') {
+        const collected = await this.collectTmuxJob(job);
+        if (collected) {
+          continue;
+        }
+        if (job.session?.status === 'running') {
+          continue;
+        }
+      }
       await this.repository.save({
         ...job,
         status: 'failed',
@@ -122,9 +133,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runOnce(): Promise<boolean> {
+    const reconciled = await this.reconcileRunningTmuxJobs();
     const claimed = await this.claimNext();
     if (!claimed) {
-      return false;
+      return reconciled > 0;
     }
 
     try {
@@ -140,6 +152,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cancel(jobId: string): Promise<boolean> {
+    const job = await this.repository.getById(jobId);
+    if (job?.executionMode === 'tmux' && job.session) {
+      const session = await this.tmuxSessionRunner?.cancel(job);
+      if (session) {
+        await this.repository.save({ ...job, session });
+      }
+      return Boolean(session);
+    }
+
     const controller = this.abortControllers.get(jobId);
     if (!controller) {
       return false;
@@ -178,6 +199,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         return null;
       }
       const queuedJobs = await this.repository.listByStatus('queued');
+      const runningJobs = await this.repository.listByStatus('running');
+      const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
+      if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
+        return null;
+      }
       const candidate = queuedJobs.find((job) => !this.inFlight.has(job.id));
       if (!candidate) {
         return null;
@@ -203,7 +229,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     if (currentJob.executionMode === 'tmux') {
-      await this.markUnsupportedTmuxJobFailed(currentJob);
+      await this.startTmuxJob(currentJob);
       return;
     }
 
@@ -249,20 +275,70 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async markUnsupportedTmuxJobFailed(job: BridgeJob): Promise<void> {
-    const savedJob = await this.repository.save({
+  private async startTmuxJob(job: BridgeJob): Promise<void> {
+    this.logger.log(`Starting tmux job ${job.id}`);
+    const runningJob = await this.repository.save({
       ...job,
-      status: 'failed',
-      finishedAt: new Date().toISOString(),
-      exitCode: job.exitCode ?? null,
-      stderr: job.stderr ? `${job.stderr}\n${TMUX_UNSUPPORTED_MESSAGE}` : TMUX_UNSUPPORTED_MESSAGE,
-      execution: {
-        ...job.execution,
-        errorType: 'execution_error',
-      },
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      finishedAt: undefined,
+      stdout: '',
+      stderr: '',
     });
-    this.logger.warn(`Job ${job.id} requested tmux execution before tmux runner support is enabled`);
+
+    if (!this.tmuxSessionRunner) {
+      await this.markRunningJobFailed(job.id, new Error(TMUX_RUNNER_UNAVAILABLE_MESSAGE));
+      return;
+    }
+
+    try {
+      const session = await this.tmuxSessionRunner.start(runningJob);
+      await this.repository.save({
+        ...runningJob,
+        session,
+      });
+    } catch (error) {
+      await this.markRunningJobFailed(job.id, error);
+    }
+  }
+
+  private async reconcileRunningTmuxJobs(): Promise<number> {
+    const runningJobs = await this.repository.listByStatus('running');
+    let completed = 0;
+    for (const job of runningJobs) {
+      if (job.executionMode !== 'tmux') {
+        continue;
+      }
+      if (await this.collectTmuxJob(job)) {
+        completed += 1;
+      }
+    }
+    return completed;
+  }
+
+  private async collectTmuxJob(job: BridgeJob): Promise<boolean> {
+    const collected = await this.tmuxSessionRunner?.collect(job);
+    if (!collected) {
+      return false;
+    }
+
+    const latestJob = await this.repository.getById(job.id);
+    if (!latestJob || latestJob.status !== 'running') {
+      return false;
+    }
+
+    const savedJob = await this.repository.save({
+      ...latestJob,
+      status: collected.result.status,
+      finishedAt: new Date().toISOString(),
+      stdout: collected.result.stdout,
+      stderr: collected.result.stderr,
+      exitCode: collected.result.exitCode,
+      execution: collected.result.execution,
+      session: collected.session,
+    });
     this.trackCompletionNotification(savedJob);
+    return true;
   }
 
   private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {

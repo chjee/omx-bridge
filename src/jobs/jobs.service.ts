@@ -1,12 +1,4 @@
-import {
-  BadRequestException,
-  ConflictException,
-  HttpException,
-  HttpStatus,
-  Inject,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { ConflictException, HttpException, HttpStatus, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
@@ -45,9 +37,6 @@ export class JobsService {
         ...input,
         cwd: await this.assertAllowedCwd(input.cwd),
       };
-      if (normalizedInput.executionMode === 'tmux') {
-        throw new BadRequestException('executionMode=tmux is not available until tmux session runner support is enabled');
-      }
       const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
       const existingJob = await this.findExistingRequestJob(normalizedInput);
       if (existingJob) {
@@ -177,18 +166,31 @@ export class JobsService {
       throw new ConflictException(`Job ${id} is already ${job.status}`);
     }
 
+    let jobToCancel = job;
+    let runnerCancelAlreadyRequested = false;
+    if (job.executionMode === 'tmux' && job.status === 'running' && job.session) {
+      runnerCancelAlreadyRequested = true;
+      const cancelled = await this.jobRunnerService.cancel(id);
+      if (!cancelled) {
+        throw new ConflictException(`Job ${id} tmux session could not be cancelled`);
+      }
+      jobToCancel = await this.getJobOrThrow(id);
+    }
+
     const savedJob = await this.repository.save({
-      ...job,
+      ...jobToCancel,
       status: 'cancelled',
       finishedAt: new Date().toISOString(),
-      exitCode: job.exitCode ?? null,
-      stderr: job.stderr || 'Cancelled by API request',
+      exitCode: jobToCancel.exitCode ?? null,
+      stderr: jobToCancel.stderr || 'Cancelled by API request',
       execution: {
-        ...job.execution,
+        ...jobToCancel.execution,
         errorType: 'cancelled',
       },
     });
-    await this.jobRunnerService.cancel(id);
+    if (!runnerCancelAlreadyRequested) {
+      await this.jobRunnerService.cancel(id);
+    }
     this.jobRunnerService.trackCompletionNotification(savedJob);
     return savedJob;
   }
@@ -253,10 +255,6 @@ export class JobsService {
       return;
     }
 
-    const incomingFingerprints = new Set([
-      this.buildRequestFingerprintFromPayload(incomingInput, true),
-      this.buildRequestFingerprintFromPayload(incomingInput, false),
-    ]);
     const existingPayload = {
       prompt: existingJob.prompt,
       executionMode: existingJob.executionMode,
@@ -267,17 +265,34 @@ export class JobsService {
       sourceName: existingJob.sourceName,
       metadata: existingJob.metadata,
     };
-    const existingFingerprints = new Set([
-      ...(existingJob.requestFingerprint ? [existingJob.requestFingerprint] : []),
-      this.buildRequestFingerprintFromPayload(existingPayload, true),
-      this.buildRequestFingerprintFromPayload(existingPayload, false),
-    ]);
-    if (![...incomingFingerprints].some((fingerprint) => existingFingerprints.has(fingerprint))) {
-      throw new ConflictException(
-        `requestId ${existingJob.requestId} for source ${existingJob.source ?? 'default'} ` +
-          'already belongs to a different job payload',
-      );
+    const incomingCurrentFingerprint = this.buildRequestFingerprintFromPayload(incomingInput, true);
+    const existingCurrentFingerprint = this.buildRequestFingerprintFromPayload(existingPayload, true);
+    if (
+      existingJob.requestFingerprint === incomingCurrentFingerprint ||
+      existingCurrentFingerprint === incomingCurrentFingerprint
+    ) {
+      return;
     }
+
+    const incomingLegacyFingerprint = this.buildRequestFingerprintFromPayload(incomingInput, false);
+    const existingLegacyFingerprint = this.buildRequestFingerprintFromPayload(existingPayload, false);
+    const existingMode = existingJob.executionMode ?? 'exec';
+    const incomingMode = incomingInput.executionMode ?? 'exec';
+    const storedFingerprintAllowsLegacyMatch =
+      !existingJob.requestFingerprint ||
+      existingJob.requestFingerprint === existingLegacyFingerprint;
+    if (
+      existingMode === incomingMode &&
+      storedFingerprintAllowsLegacyMatch &&
+      incomingLegacyFingerprint === existingLegacyFingerprint
+    ) {
+      return;
+    }
+
+    throw new ConflictException(
+      `requestId ${existingJob.requestId} for source ${existingJob.source ?? 'default'} ` +
+        'already belongs to a different job payload',
+    );
   }
 
   private hashStableJson(value: unknown): string {
