@@ -148,7 +148,7 @@ export class JobsService {
       },
     });
     await this.jobRunnerService.cancel(id);
-    void this.jobNotify.notifyJobComplete(savedJob);
+    this.jobRunnerService.trackCompletionNotification(savedJob);
     return savedJob;
   }
 
@@ -184,7 +184,7 @@ export class JobsService {
       },
     });
     await this.jobRunnerService.cancel(id);
-    void this.jobNotify.notifyJobComplete(savedJob);
+    this.jobRunnerService.trackCompletionNotification(savedJob);
     return savedJob;
   }
 
