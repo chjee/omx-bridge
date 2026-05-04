@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -129,16 +129,21 @@ describe('JobsService.createJob', () => {
     }));
   });
 
-  it('rejects tmux execution mode until the tmux runner is enabled', async () => {
+  it('stores tmux execution mode for session-backed jobs', async () => {
     const { service, repository, jobRunnerService } = createService();
 
-    await expect(service.createJob({
+    const job = await service.createJob({
       prompt: 'long running work',
       executionMode: 'tmux',
-    })).rejects.toThrow(BadRequestException);
+    });
 
-    expect(repository.save).not.toHaveBeenCalled();
-    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+    expect(job.executionMode).toBe('tmux');
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: 'long running work',
+      executionMode: 'tmux',
+      status: 'queued',
+    }));
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
   it('stores a request fingerprint when requestId is provided', async () => {
@@ -223,6 +228,28 @@ describe('JobsService.createJob', () => {
     });
 
     expect(result).toBe(existingJob);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobRunnerService.trigger).not.toHaveBeenCalled();
+  });
+
+  it('rejects retries that change executionMode for the same requestId', async () => {
+    const existingJob = createJob({
+      prompt: 'same prompt different mode',
+      executionMode: 'exec',
+      requestId: 'mode-conflict-1',
+      source: 'dispatch',
+      status: 'running',
+    });
+    const jobs = new Map([[existingJob.id, existingJob]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+
+    await expect(service.createJob({
+      prompt: 'same prompt different mode',
+      executionMode: 'tmux',
+      requestId: 'mode-conflict-1',
+      source: 'dispatch',
+    })).rejects.toThrow(ConflictException);
+
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
   });
@@ -367,6 +394,71 @@ describe('JobsService.cancelJob', () => {
       expect.objectContaining({ id: job.id, status: 'cancelled' }),
     );
     expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+
+  it('rejects running tmux cancellation when the session cannot be killed', async () => {
+    const job = createJob({
+      status: 'running',
+      executionMode: 'tmux',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:01.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      },
+    });
+    const jobs = new Map([[job.id, job]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+    jest.mocked(jobRunnerService.cancel).mockResolvedValue(false);
+
+    await expect(service.cancelJob(job.id)).rejects.toThrow(ConflictException);
+
+    expect(jobRunnerService.cancel).toHaveBeenCalledWith(job.id);
+    expect(repository.save).not.toHaveBeenCalled();
+    expect(jobs.get(job.id)?.status).toBe('running');
+  });
+
+  it('preserves cancelled tmux session state after a successful kill', async () => {
+    const job = createJob({
+      status: 'running',
+      executionMode: 'tmux',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:01.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      },
+    });
+    const jobs = new Map([[job.id, job]]);
+    const { service, repository, jobRunnerService } = createService(jobs);
+    jest.mocked(jobRunnerService.cancel).mockImplementation(async () => {
+      jobs.set(job.id, {
+        ...job,
+        session: {
+          ...job.session!,
+          status: 'cancelled',
+          updatedAt: '2026-04-02T00:00:02.000Z',
+        },
+      });
+      return true;
+    });
+
+    const result = await service.cancelJob(job.id);
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      session: {
+        status: 'cancelled',
+        updatedAt: '2026-04-02T00:00:02.000Z',
+      },
+      execution: { errorType: 'cancelled' },
+    });
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.cancel).toHaveBeenCalledTimes(1);
   });
 
   it('returns an already cancelled job without sending another notification', async () => {

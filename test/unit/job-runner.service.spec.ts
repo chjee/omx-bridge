@@ -4,6 +4,7 @@ import { JobRunnerService } from '../../src/jobs/job-runner.service';
 import type { BridgeJob, OmxExecutionResult } from '../../src/jobs/job.types';
 import type { OmxExecService } from '../../src/jobs/omx-exec.service';
 import type { JobNotifyService } from '../../src/jobs/job-notify.service';
+import type { TmuxSessionRunnerService } from '../../src/jobs/tmux-session-runner.service';
 import { createTempDir, waitFor } from '../helpers';
 
 const mockJobNotify = {
@@ -27,6 +28,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
     requestId: overrides.requestId,
     notifyUrl: overrides.notifyUrl,
     source: overrides.source,
+    session: overrides.session,
     notifyOutcome: overrides.notifyOutcome,
     notifyHistory: overrides.notifyHistory,
     execution: overrides.execution ?? {
@@ -82,15 +84,13 @@ describe('JobRunnerService', () => {
   });
 
   it('picks the oldest queued job first and only runs one at a time', async () => {
-    let resolveExecution: (() => void) | undefined;
+    let resolveExecution!: () => void;
+    const firstExecution = new Promise<OmxExecutionResult>((resolve) => {
+      resolveExecution = () => resolve(createExecutionResult());
+    });
     const execute = jest
       .fn()
-      .mockImplementationOnce(
-        () =>
-          new Promise<OmxExecutionResult>((resolve) => {
-            resolveExecution = () => resolve(createExecutionResult());
-          }),
-      )
+      .mockReturnValueOnce(firstExecution)
       .mockResolvedValue(createExecutionResult());
     const runner = new JobRunnerService(
       repository,
@@ -115,17 +115,15 @@ describe('JobRunnerService', () => {
     );
     expect(runningJob?.status).toBe('running');
     expect(execute).toHaveBeenCalledWith('hello', expect.any(Object));
+    await expect(repository.getById('00000000-0000-4000-a000-000000000002')).resolves.toMatchObject({
+      status: 'queued',
+    });
 
-    resolveExecution?.();
+    resolveExecution();
     await firstRun;
 
     const completedJob = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(completedJob?.status).toBe('succeeded');
-
-    await waitFor(
-      () => Promise.resolve(execute.mock.calls.length),
-      (callCount) => callCount === 2,
-    );
   });
 
   it('marks failed results when the omx execution fails', async () => {
@@ -490,14 +488,25 @@ describe('JobRunnerService', () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
 
-  it('marks queued tmux jobs failed without running them through exec', async () => {
+  it('starts queued tmux jobs through the tmux session runner without exec', async () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
-    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const tmuxSessionRunner = {
+      collect: jest.fn().mockResolvedValue(null),
+      start: jest.fn().mockResolvedValue({
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:01.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      }),
+    };
     const runner = new JobRunnerService(
       repository,
       { execute } as unknown as OmxExecService,
-      { notifyJobComplete } as unknown as JobNotifyService,
+      mockJobNotify,
       config,
+      tmuxSessionRunner as unknown as TmuxSessionRunnerService,
     );
 
     await repository.save(createJob({ executionMode: 'tmux' }));
@@ -507,17 +516,83 @@ describe('JobRunnerService', () => {
     const job = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(job).toMatchObject({
       executionMode: 'tmux',
-      status: 'failed',
+      status: 'running',
       exitCode: null,
-      execution: { errorType: 'execution_error' },
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+      },
     });
-    expect(job?.finishedAt).toBeDefined();
-    expect(job?.stderr).toContain('executionMode=tmux is not available');
+    expect(job?.startedAt).toBeDefined();
+    expect(job?.finishedAt).toBeUndefined();
     expect(execute).not.toHaveBeenCalled();
-    expect(notifyJobComplete).toHaveBeenCalledWith(expect.objectContaining({
-      id: '00000000-0000-4000-a000-000000000001',
+    expect(tmuxSessionRunner.start).toHaveBeenCalledWith(expect.objectContaining({
       executionMode: 'tmux',
-      status: 'failed',
+      status: 'running',
+    }));
+    expect(mockJobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+
+  it('collects finished tmux jobs and tracks completion notification', async () => {
+    const collect = jest.fn().mockResolvedValue({
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'exited',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:02.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+        lastExitCode: 0,
+      },
+      result: createExecutionResult({
+        stdout: 'tmux done',
+        execution: {
+          command: 'tmux',
+          timeoutMs: 1000,
+          maxOutputChars: 1000,
+          durationMs: 2000,
+        },
+      }),
+    });
+    const notifyJobComplete = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      { notifyJobComplete } as unknown as JobNotifyService,
+      config,
+      { collect } as unknown as TmuxSessionRunnerService,
+    );
+
+    await repository.save(createJob({
+      executionMode: 'tmux',
+      status: 'running',
+      startedAt: '2026-04-02T00:00:00.000Z',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:01.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      },
+    }));
+
+    await expect(runner.runOnce()).resolves.toBe(true);
+
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toMatchObject({
+      executionMode: 'tmux',
+      status: 'succeeded',
+      stdout: 'tmux done',
+      exitCode: 0,
+      session: {
+        status: 'exited',
+        lastExitCode: 0,
+      },
+    });
+    expect(notifyJobComplete).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'succeeded',
+      executionMode: 'tmux',
     }));
   });
 

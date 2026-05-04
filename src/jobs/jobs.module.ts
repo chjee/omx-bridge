@@ -10,6 +10,11 @@ import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
 import { JobNotifyService } from './job-notify.service';
 import { BridgeInstanceLockService } from './bridge-instance-lock.service';
+import {
+  defaultTmuxSpawn,
+  TMUX_SPAWN,
+  TmuxSessionRunnerService,
+} from './tmux-session-runner.service';
 
 @Module({
   controllers: [JobsController],
@@ -23,9 +28,14 @@ import { BridgeInstanceLockService } from './bridge-instance-lock.service';
       provide: OMX_SPAWN,
       useValue: defaultSpawn,
     },
+    {
+      provide: TMUX_SPAWN,
+      useValue: defaultTmuxSpawn,
+    },
     JobQueueRepository,
     JobsService,
     OmxExecService,
+    TmuxSessionRunnerService,
     JobRunnerService,
     BridgeInstanceLockService,
     ApiTokenGuard,
