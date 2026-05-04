@@ -139,6 +139,96 @@ function createLiveOmxShim(dir) {
   return filePath;
 }
 
+function createTmuxOmxShim(dir) {
+  const filePath = path.join(dir, 'fake-omx-tmux.sh');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env sh',
+    'if [ "${1-}" != "exec" ]; then',
+    '  echo "unexpected omx command: ${1-}" >&2',
+    '  exit 64',
+    'fi',
+    'prompt="$(cat)"',
+    'printf "TMUX_OK:%s\\n" "$prompt"',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
+function createFakeTmuxShim(dir) {
+  const filePath = path.join(dir, 'fake-tmux.sh');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'cmd="${1-}"',
+    'shift || true',
+    'state_dir="${FAKE_TMUX_STATE_DIR:?}"',
+    'mkdir -p "$state_dir"',
+    'case "$cmd" in',
+    '  new-session)',
+    '    session=""',
+    '    workdir=""',
+    '    command=""',
+    '    while [ "$#" -gt 0 ]; do',
+    '      case "$1" in',
+    '        -d) shift ;;',
+    '        -s) session="${2-}"; shift 2 ;;',
+    '        -c) workdir="${2-}"; shift 2 ;;',
+    '        *) command="$1"; shift ;;',
+    '      esac',
+    '    done',
+    '    if [ -z "$session" ] || [ -z "$command" ]; then',
+    '      echo "missing fake tmux session or command" >&2',
+    '      exit 64',
+    '    fi',
+    '    touch "$state_dir/$session.running"',
+    '    (',
+    '      if [ -n "$workdir" ]; then',
+    '        cd "$workdir"',
+    '      fi',
+    '      bash -lc "$command"',
+    '      code=$?',
+    '      rm -f "$state_dir/$session.running"',
+    '      printf "%s\\n" "$code" > "$state_dir/$session.exit"',
+    '    ) &',
+    '    exit 0',
+    '    ;;',
+    '  has-session)',
+    '    target=""',
+    '    while [ "$#" -gt 0 ]; do',
+    '      case "$1" in',
+    '        -t) target="${2-}"; shift 2 ;;',
+    '        *) shift ;;',
+    '      esac',
+    '    done',
+    '    [ -n "$target" ] && [ -f "$state_dir/$target.running" ]',
+    '    exit $?',
+    '    ;;',
+    '  kill-session)',
+    '    target=""',
+    '    while [ "$#" -gt 0 ]; do',
+    '      case "$1" in',
+    '        -t) target="${2-}"; shift 2 ;;',
+    '        *) shift ;;',
+    '      esac',
+    '    done',
+    '    if [ -z "$target" ] || [ ! -f "$state_dir/$target.running" ]; then',
+    '      echo "no such fake session: $target" >&2',
+    '      exit 1',
+    '    fi',
+    '    rm -f "$state_dir/$target.running"',
+    '    printf "143\\n" > "$state_dir/$target.exit"',
+    '    exit 0',
+    '    ;;',
+    '  *)',
+    '    echo "unsupported fake tmux command: $cmd" >&2',
+    '    exit 64',
+    '    ;;',
+    'esac',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
 function collectAllowedEnv(keys) {
   const env = {};
   for (const key of keys) {
@@ -485,6 +575,8 @@ function startBridge({
   port,
   jobsDir,
   omxCommand,
+  tmuxCommand,
+  tmuxSessionsDir,
   allowedCwdPrefixes,
   bridgeEnv = {},
   omxEnvAllowlist = 'PATH',
@@ -501,6 +593,8 @@ function startBridge({
       BRIDGE_HOST: '127.0.0.1',
       BRIDGE_JOBS_DIR: jobsDir,
       OMX_COMMAND: omxCommand,
+      ...(tmuxCommand ? { TMUX_COMMAND: tmuxCommand } : {}),
+      ...(tmuxSessionsDir ? { BRIDGE_TMUX_SESSIONS_DIR: tmuxSessionsDir } : {}),
       BRIDGE_ALLOWED_CWD_PREFIXES: allowedCwdPrefixes ?? repoRoot,
       BRIDGE_OMX_ENV_ALLOWLIST: omxEnvAllowlist,
       NOTIFY_MODE: 'claude',
@@ -798,6 +892,70 @@ async function smokeCancelPath() {
   log('cancel path passed');
 }
 
+async function smokeTmuxRuntime() {
+  const tempDir = makeTempDir('omx-bridge-smoke-tmux-');
+  let bridge;
+  let failed = false;
+  try {
+    const jobsDir = path.join(tempDir, 'jobs');
+    const tmuxSessionsDir = path.join(tempDir, 'sessions');
+    const fakeTmuxStateDir = path.join(tempDir, 'fake-tmux-state');
+    fs.mkdirSync(fakeTmuxStateDir, { recursive: true });
+
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir,
+      omxCommand: createTmuxOmxShim(tempDir),
+      tmuxCommand: createFakeTmuxShim(tempDir),
+      tmuxSessionsDir,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR',
+      bridgeEnv: {
+        FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+      },
+    });
+    await waitForBridge(port);
+
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke tmux',
+      requestId: 'runtime-smoke-tmux',
+      source: 'dispatch',
+      sourceName: 'runtime-smoke-tmux',
+      originRoutingKey: 'runtime-smoke:tmux',
+      cwd: tempDir,
+      executionMode: 'tmux',
+      metadata: { smoke: 'tmux' },
+    });
+    const job = await waitForTerminalJob(port, submit.jobId, 10_000);
+    assert(job.status === 'succeeded', `tmux job status was ${job.status}; stderr=${job.stderr || '<empty>'}`);
+    assert(job.executionMode === 'tmux', 'tmux job did not preserve executionMode');
+    assert(job.stdout.includes('TMUX_OK:runtime smoke tmux'), `tmux job stdout was not captured: ${job.stdout || '<empty>'}`);
+    assert(job.session?.backend === 'tmux', 'tmux job did not persist session backend');
+    assert(job.session?.status === 'exited', `tmux session status was ${job.session?.status}`);
+    assert(job.session?.lastExitCode === 0, `tmux session lastExitCode was ${job.session?.lastExitCode}`);
+    assert(job.session?.attachCommand?.includes('attach -t'), 'tmux attachCommand was not persisted');
+
+    const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
+    assert(fs.existsSync(path.join(sessionDir, 'prompt.txt')), 'tmux prompt file was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'run.sh')), 'tmux runner script was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'session.json')), 'tmux session file was not created');
+    assert(fs.existsSync(path.join(sessionDir, 'exit-code')), 'tmux exit-code file was not created');
+    assert(fs.readFileSync(path.join(sessionDir, 'prompt.txt'), 'utf8') === 'runtime smoke tmux', 'tmux prompt file did not preserve prompt');
+    assert(fs.readFileSync(path.join(sessionDir, 'exit-code'), 'utf8').trim() === '0', 'tmux exit-code file was not zero');
+    const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
+    assert(sessionFile.status === 'exited', `session.json status was ${sessionFile.status}`);
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('tmux session runtime smoke', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
+  log('tmux session runtime smoke passed');
+}
+
 async function smokeDispatchMcp() {
   const tempDir = makeTempDir('omx-bridge-smoke-dispatch-');
   let bridge;
@@ -968,6 +1126,7 @@ async function smokeLoopbackRuntime() {
   await smokeDiagnosticsFixture();
   await smokeBridgeApi();
   await smokeCancelPath();
+  await smokeTmuxRuntime();
   await smokeDispatchMcp();
   await smokeOpenClawPluginDiscovery();
   log('runtime smoke passed');
