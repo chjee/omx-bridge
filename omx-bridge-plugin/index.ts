@@ -69,7 +69,7 @@ const submitJobParameters = Type.Object(
     originRoutingKey: Type.Optional(
       Type.String({
         maxLength: 200,
-        description: "Routing key of the conversation that initiated this job.",
+        description: "Conversation key to preserve for correlation. For OpenClaw jobs, this is correlation-only; callback ownership is controlled by notifyUrl.",
       }),
     ),
     notifyUrl: Type.Optional(
