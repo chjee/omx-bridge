@@ -16,7 +16,7 @@ export BRIDGE_API_TOKEN="<token from omx-bridge .env>"
 
 ## 1. Automated Verification
 
-Run the aggregate verification script before manual runtime smoke checks:
+Run the aggregate verification script before runtime smoke checks:
 
 ```bash
 npm run verify
@@ -26,9 +26,26 @@ This covers:
 
 - root bridge tests and build
 - `omx-dispatch` typecheck, build, and tests
-- `omx-bridge-plugin` typecheck and build
+- `omx-bridge-plugin` typecheck, build, and tests
 
-`omx-bridge-plugin` does not currently define a `test` script, so plugin tests are not part of the aggregate command.
+Run the automated runtime smoke after build/test verification:
+
+```bash
+npm run verify:runtime
+```
+
+`npm run smoke:runtime` is the same loopback runtime smoke command. It is kept separate from the aggregate `npm run verify` so CI or local runs can opt into port-binding runtime checks explicitly.
+
+This starts temporary loopback bridge instances from build artifacts with isolated job directories and fake OMX shims. It verifies:
+
+- authenticated bridge API submit/get flow
+- per-job `notifyUrl` delivery to a local webhook
+- OpenClaw `source`, `sourceName`, `originRoutingKey`, and `metadata` preservation
+- cancellation terminal state and notification persistence
+- `omx-dispatch` MCP `omx_health` and `omx_submit_job_and_wait`
+- optional OpenClaw plugin discovery when the `openclaw` CLI is installed
+
+The automated smoke does not run the real OMX CLI and does not contact live Telegram or OpenClaw hooks. Keep the manual checks below for deployed service wiring, real OMX execution, and external notification delivery.
 
 ## 2. Build Artifacts
 

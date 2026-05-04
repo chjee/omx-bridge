@@ -421,6 +421,14 @@ npm run build
 cd omx-dispatch && npm run build
 ```
 
+Run the automated loopback runtime smoke:
+
+```bash
+npm run verify:runtime
+```
+
+This runs build artifacts with fake OMX shims and verifies bridge API submission, cancellation, per-job webhook notification, `omx-dispatch` MCP submit-and-wait, and optional OpenClaw plugin discovery when the local `openclaw` CLI is installed.
+
 ## Notes
 
 - The job queue is file-backed; interrupted `running` jobs are marked `failed` on service startup to avoid duplicate execution.
