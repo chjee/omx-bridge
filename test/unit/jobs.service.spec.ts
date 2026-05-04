@@ -69,6 +69,7 @@ function createService(
 
   const jobRunnerService = {
     cancel: jest.fn().mockResolvedValue(true),
+    trackCompletionNotification: jest.fn(),
     trigger: jest.fn(),
   } as unknown as JobRunnerService;
 
@@ -278,7 +279,7 @@ describe('JobsService.createJob', () => {
 });
 
 describe('JobsService.cancelJob', () => {
-  it('marks a queued job cancelled and sends completion notification', async () => {
+  it('marks a queued job cancelled and tracks completion notification', async () => {
     const job = createJob({ status: 'queued' });
     const jobs = new Map([[job.id, job]]);
     const { service, jobNotify, jobRunnerService } = createService(jobs);
@@ -288,9 +289,10 @@ describe('JobsService.cancelJob', () => {
     expect(result.status).toBe('cancelled');
     expect(result.stderr).toBe('Cancelled by API request');
     expect(jobRunnerService.cancel).toHaveBeenCalledWith(job.id);
-    expect(jobNotify.notifyJobComplete).toHaveBeenCalledWith(
+    expect(jobRunnerService.trackCompletionNotification).toHaveBeenCalledWith(
       expect.objectContaining({ id: job.id, status: 'cancelled' }),
     );
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 
   it('returns an already cancelled job without sending another notification', async () => {
@@ -302,6 +304,7 @@ describe('JobsService.cancelJob', () => {
 
     expect(result).toBe(job);
     expect(jobRunnerService.cancel).not.toHaveBeenCalled();
+    expect(jobRunnerService.trackCompletionNotification).not.toHaveBeenCalled();
     expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 
@@ -396,17 +399,18 @@ describe('JobsService.completeJobFromCallback', () => {
     expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 
-  it('fires notifyJobComplete after saving', async () => {
+  it('tracks completion notification after saving', async () => {
     const job = createJob({ status: 'running' });
     const jobs = new Map([[job.id, job]]);
-    const { service, jobNotify } = createService(jobs);
+    const { service, jobNotify, jobRunnerService } = createService(jobs);
 
     await service.completeJobFromCallback(job.id, { status: 'succeeded' });
 
-    expect(jobNotify.notifyJobComplete).toHaveBeenCalledTimes(1);
-    expect(jobNotify.notifyJobComplete).toHaveBeenCalledWith(
+    expect(jobRunnerService.trackCompletionNotification).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trackCompletionNotification).toHaveBeenCalledWith(
       expect.objectContaining({ id: job.id, status: 'succeeded' }),
     );
+    expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
   });
 });
 

@@ -277,7 +277,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.trackCompletionNotification(savedJob);
   }
 
-  private trackCompletionNotification(job: BridgeJob): void {
+  trackCompletionNotification(job: BridgeJob): void {
     const task = Promise.resolve()
       .then(async () => {
         await this.jobNotify.notifyJobComplete(job);
