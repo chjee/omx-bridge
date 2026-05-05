@@ -2,7 +2,7 @@
 
 This document is the human-readable maintenance workflow for `omx-bridge`.
 The root `AGENTS.md` is the short execution contract; this file records the
-repeatable workflow, branch hygiene, verification ladder, and documentation map.
+repeatable workflow, branch hygiene, and verification ladder.
 
 ## Brownfield Loop
 
@@ -57,14 +57,8 @@ gate.
 
 ## Documentation Map
 
-- [routing-contract.md](routing-contract.md): routing ownership for `source`,
-  `notifyUrl`, `originRoutingKey`, callbacks, and broker-owned delivery.
-- [contract-source-of-truth.md](contract-source-of-truth.md): bridge contract
-  fixture and future type/source-of-truth options.
-- [runtime-smoke.md](runtime-smoke.md): detailed runtime smoke and deployed
-  service checks.
-- [release-verification.md](release-verification.md): merge/release gate
-  selection and operator-only live smoke boundaries.
+Use [README.md](README.md) as the canonical docs index. Keep this workflow file
+focused on maintenance sequence, scope rules, and verification ladder details.
 
 ## Checkpoints
 
