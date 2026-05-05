@@ -10,10 +10,10 @@ USE CODEX NATIVE SUBAGENTS FOR INDEPENDENT PARALLEL SUBTASKS WHEN THAT IMPROVES 
 
 You are running with oh-my-codex (OMX), a coordination layer for Codex CLI.
 This AGENTS.md is the top-level operating contract for the workspace.
-Role prompts under `prompts/*.md` are narrower execution surfaces. They must follow this file, not override it.
+Installed role prompts are narrower execution surfaces. They must follow this file, not override it.
 
 <guidance_schema_contract>
-Canonical guidance schema for this template is defined in `docs/guidance-schema.md`.
+Canonical guidance schema for this template belongs to the OMX/harness source that generated this managed section. This target repository does not need to carry that source file.
 
 Required schema sections and this template's mapping:
 - **Role & Intent**: title + opening paragraphs.
@@ -142,7 +142,7 @@ Reserve `worker` strictly for active `team`/`swarm` sessions and team-runtime bo
 <child_agent_protocol>
 When delegating:
 1. Choose the right role.
-2. Read `./.codex/prompts/{role}.md` first.
+2. Use the installed prompt for that role when the current Codex/OMX runtime exposes one.
 3. Spawn the child with that prompt plus the concrete task.
 4. Keep the task bounded and verifiable.
 
@@ -197,22 +197,22 @@ The `deep-interview` skill is the Socratic deep interview workflow and includes 
 
 | Keyword(s) | Skill | Action |
 |-------------|-------|--------|
-| "ralph", "don't stop", "must complete", "keep going" | `$ralph` | Read `./.codex/skills/ralph/SKILL.md`, execute persistence loop |
-| "autopilot", "build me", "I want a" | `$autopilot` | Read `./.codex/skills/autopilot/SKILL.md`, execute autonomous pipeline |
-| "ultrawork", "ulw", "parallel" | `$ultrawork` | Read `./.codex/skills/ultrawork/SKILL.md`, execute parallel agents |
-| "ultraqa" | `$ultraqa` | Read `./.codex/skills/ultraqa/SKILL.md`, run QA cycling workflow |
-| "analyze", "investigate" | `$analyze` | Read `./.codex/skills/analyze/SKILL.md`, run deep analysis |
-| "plan this", "plan the", "let's plan" | `$plan` | Read `./.codex/skills/plan/SKILL.md`, start planning workflow |
-| "interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros" | `$deep-interview` | Read `./.codex/skills/deep-interview/SKILL.md`, run Ouroboros-inspired Socratic ambiguity-gated interview workflow |
-| "ralplan", "consensus plan" | `$ralplan` | Read `./.codex/skills/ralplan/SKILL.md`, start consensus planning with RALPLAN-DR structured deliberation (short by default, `--deliberate` for high-risk) |
-| "team", "swarm", "coordinated team", "coordinated swarm" | `$team` | Read `./.codex/skills/team/SKILL.md`, start team orchestration (swarm compatibility alias) |
-| "ecomode", "eco", "budget" | `$ecomode` | Read `./.codex/skills/ecomode/SKILL.md`, enable token-efficient mode |
-| "cancel", "stop", "abort" | `$cancel` | Read `./.codex/skills/cancel/SKILL.md`, cancel active modes |
-| "tdd", "test first" | `$tdd` | Read `./.codex/skills/tdd/SKILL.md`, start test-driven workflow |
-| "fix build", "type errors" | `$build-fix` | Read `./.codex/skills/build-fix/SKILL.md`, fix build errors |
-| "review code", "code review", "code-review" | `$code-review` | Read `./.codex/skills/code-review/SKILL.md`, run code review |
-| "security review" | `$security-review` | Read `./.codex/skills/security-review/SKILL.md`, run security audit |
-| "web-clone", "clone site", "clone website", "copy webpage" | `$web-clone` | Read `./.codex/skills/web-clone/SKILL.md`, start website cloning pipeline |
+| "ralph", "don't stop", "must complete", "keep going" | `$ralph` | Invoke the installed Ralph persistence workflow |
+| "autopilot", "build me", "I want a" | `$autopilot` | Invoke the installed autonomous pipeline workflow |
+| "ultrawork", "ulw", "parallel" | `$ultrawork` | Invoke the installed parallel-agent workflow |
+| "ultraqa" | `$ultraqa` | Invoke the installed QA cycling workflow |
+| "analyze", "investigate" | `$analyze` | Invoke the installed read-only deep analysis workflow |
+| "plan this", "plan the", "let's plan" | `$plan` | Invoke the installed planning workflow |
+| "interview", "deep interview", "gather requirements", "interview me", "don't assume", "ouroboros" | `$deep-interview` | Invoke the installed Socratic ambiguity-gated interview workflow |
+| "ralplan", "consensus plan" | `$ralplan` | Invoke the installed consensus planning workflow with RALPLAN-DR structured deliberation |
+| "team", "swarm", "coordinated team", "coordinated swarm" | `$team` | Invoke the installed team orchestration workflow |
+| "ecomode", "eco", "budget" | `$ecomode` | Invoke the installed token-efficient workflow when available |
+| "cancel", "stop", "abort" | `$cancel` | Invoke the installed cancellation workflow |
+| "tdd", "test first" | `$tdd` | Invoke the installed test-first workflow when available |
+| "fix build", "type errors" | `$build-fix` | Invoke the installed build-fix workflow when available |
+| "review code", "code review", "code-review" | `$code-review` | Invoke the installed code review workflow |
+| "security review" | `$security-review` | Invoke the installed security review workflow |
+| "web-clone", "clone site", "clone website", "copy webpage" | `$web-clone` | Invoke the installed website cloning workflow when available |
 
 Detection rules:
 - Keywords are case-insensitive and match anywhere in the user message.
