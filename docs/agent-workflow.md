@@ -2,7 +2,7 @@
 
 This document is the human-readable maintenance workflow for `omx-bridge`.
 The root `AGENTS.md` is the short execution contract; this file records the
-repeatable workflow, branch hygiene, verification ladder, and documentation map.
+repeatable workflow, branch hygiene, and verification ladder.
 
 ## Brownfield Loop
 
@@ -22,6 +22,9 @@ smoke work, contract changes, and release-readiness refreshes.
 - Keep each branch small and reversible.
 - Do not mix behavior fixes, documentation cleanup, runtime smoke changes,
   dispatch/plugin contract changes, and harness refactors in one branch.
+- Do not mix bridge-local documentation remediation with `agent-harness`
+  metadata, preset, or template changes. Use a separate branch in each
+  repository.
 - Check `git status --short --branch` before broad edits, commits, merges, or
   release-gate work.
 - Do not edit `.omx/` runtime state, logs, or historical plans unless the task
@@ -40,6 +43,29 @@ smoke work, contract changes, and release-readiness refreshes.
 - Keep `contracts/bridge-job.contract.json` aligned with job payload, session
   summary, status, execution error, and routing field changes.
 
+## Harness Sync Gates
+
+When applying generated agent surfaces or `agent-harness` output to this
+repository, treat `AGENTS.md` as handwritten target-local guidance unless a
+separate migration plan proves otherwise.
+
+Before any write:
+
+- review generated output with a dry run
+- inspect the existing `AGENTS.md`
+- verify the `<!-- OMX:AGENTS-INIT:MANUAL:START -->` and
+  `<!-- OMX:AGENTS-INIT:MANUAL:END -->` markers remain preserved
+- confirm the Korean local notes inside the manual block remain preserved
+- reject generated output that points at harness-only docs, prompt seeds,
+  helper files, or target-local paths that do not exist in `omx-bridge`
+- identify the relevant bridge verification lane before accepting the change
+- record unresolved risks as `PENDING` until they are actually checked
+
+Stop instead of syncing when the dry-run output has not been reviewed, when
+manual-note preservation is uncertain, when generated output references files
+that will not exist in this repository, or when the required target verification
+is unknown.
+
 ## Verification Ladder
 
 Use the smallest meaningful subset while developing, then run the relevant
@@ -57,14 +83,8 @@ gate.
 
 ## Documentation Map
 
-- [routing-contract.md](routing-contract.md): routing ownership for `source`,
-  `notifyUrl`, `originRoutingKey`, callbacks, and broker-owned delivery.
-- [contract-source-of-truth.md](contract-source-of-truth.md): bridge contract
-  fixture and future type/source-of-truth options.
-- [runtime-smoke.md](runtime-smoke.md): detailed runtime smoke and deployed
-  service checks.
-- [release-verification.md](release-verification.md): merge/release gate
-  selection and operator-only live smoke boundaries.
+Use [README.md](README.md) as the canonical docs index. Keep this workflow file
+focused on maintenance sequence, scope rules, and verification ladder details.
 
 ## Checkpoints
 

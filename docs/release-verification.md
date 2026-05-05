@@ -33,6 +33,23 @@ Expected evidence:
 - fake live OMX wiring reaches `fake live OMX exec smoke passed`
 - no leftover working-tree files are produced by the checks
 
+## Manual Harness-Sync Evidence
+
+Use [agent-workflow.md](agent-workflow.md#harness-sync-gates) as the canonical
+gate before applying generated `agent-harness` output or any generated agent
+surface to `omx-bridge`.
+
+For release evidence, record:
+
+- the dry-run command and review result
+- the `AGENTS.md` manual-marker and Korean-local-notes preservation check
+- the missing-target and harness-only-reference check
+- the selected bridge verification lane and result
+- any unresolved risks still marked `PENDING`
+
+Do not mark a generated agent-surface sync release-ready unless the canonical
+harness-sync gate has passed.
+
 ## Operator Smoke
 
 Run the live OMX smoke after deployment-sensitive changes, before a manual release, or when validating a workstation/service account:
@@ -78,6 +95,7 @@ Deployment smoke should capture:
 A change is release-ready when:
 
 - required lane commands for the change type pass
+- any generated agent-surface sync has passed the manual harness-sync checklist
 - any operator-only live smoke failures are either fixed or explicitly classified as non-bridge local/model failures
 - live Telegram/OpenClaw delivery gaps are documented when those integrations were not intentionally exercised
 - the working tree is clean except for intended commits
