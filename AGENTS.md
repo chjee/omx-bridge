@@ -17,9 +17,14 @@ maintenance procedures in `docs/agent-workflow.md` and release verification in
 - Solve clear tasks directly and verify before claiming completion.
 - Ask only for destructive, irreversible, credentialed, or materially branching
   actions.
+- Surface ambiguity, inconsistencies, and trade-offs before choosing a path when
+  they affect the correct solution.
 - Prefer existing project patterns, scripts, and utilities over new
   abstractions.
+- Push back when a simpler or safer approach better fits the requested outcome.
 - Keep diffs small, reviewable, reversible, and scoped to the requested lane.
+- Do not rewrite unrelated code, comments, or formatting that the task does not
+  require.
 - Do not add runtime dependencies without explicit approval.
 - Do not revert user changes unless explicitly asked.
 - Do not edit `.omx/` runtime state, logs, or historical plans unless the task
@@ -78,8 +83,8 @@ first.
 
 ## Verification
 
-- Identify the smallest evidence that proves the claim, run it, read it, and
-  report the result.
+- Identify the smallest declarative, testable evidence that proves the claim,
+  run it, read it, and report the result.
 - If verification fails, fix and rerun instead of reporting partial success.
 - Documentation-only changes: run `git diff --check`.
 - Standard code changes: run `npm run verify`.
