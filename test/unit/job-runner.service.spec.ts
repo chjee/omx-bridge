@@ -107,7 +107,7 @@ describe('JobRunnerService', () => {
     );
 
     const firstRun = runner.runOnce();
-    expect(await runner.runOnce()).toBe(false);
+    const secondRun = runner.runOnce();
 
     const runningJob = await waitFor(
       () => repository.getById('00000000-0000-4000-a000-000000000001'),
@@ -120,7 +120,8 @@ describe('JobRunnerService', () => {
     });
 
     resolveExecution();
-    await firstRun;
+    const runResults = await Promise.all([firstRun, secondRun]);
+    expect(runResults).toEqual(expect.arrayContaining([true, false]));
 
     const completedJob = await repository.getById('00000000-0000-4000-a000-000000000001');
     expect(completedJob?.status).toBe('succeeded');
@@ -455,13 +456,13 @@ describe('JobRunnerService', () => {
     expect(job3?.status).toBe('queued');
     expect(execute).toHaveBeenCalledTimes(2);
 
-    expect(await thirdRun).toBe(false);
-
     expect(releasers).toHaveLength(3);
     releasers[0]();
     releasers[1]();
     releasers[2]();
-    await Promise.all([firstRun, secondRun]);
+    const runResults = await Promise.all([firstRun, secondRun, thirdRun]);
+    expect(runResults.filter(Boolean)).toHaveLength(2);
+    expect(runResults.filter((result) => !result)).toHaveLength(1);
 
     await runner.runOnce();
     await waitFor(
