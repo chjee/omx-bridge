@@ -167,6 +167,38 @@ describe('OmxExecService', () => {
     expect(readStdin()).toBe('check env');
   });
 
+  it('passes configured Codex model and reasoning effort options to omx exec', async () => {
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(
+      () => child as unknown as ChildProcessWithoutNullStreams,
+    );
+    const service = createService(spawnFn, {
+      omxModel: 'gpt-5.5',
+      omxModelReasoningEffort: 'xhigh',
+      maxOutputChars: 100,
+    });
+
+    const pending = service.execute('use options');
+    child.emit('close', 0);
+    await pending;
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      'omx',
+      [
+        'exec',
+        '--full-auto',
+        '-s',
+        'danger-full-access',
+        '--model',
+        'gpt-5.5',
+        '-c',
+        'model_reasoning_effort="xhigh"',
+        '-',
+      ],
+      expect.objectContaining({ stdio: 'pipe' }),
+    );
+  });
+
   it('passes a realpath-normalized cwd when it is inside an allowed prefix', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
     const project = path.join(root, 'project');

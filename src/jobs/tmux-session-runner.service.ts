@@ -9,6 +9,7 @@ import {
 } from '../config/bridge-config';
 import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { BridgeJob, OmxExecutionResult, TmuxSessionState } from './job.types';
+import { buildOmxExecArgs } from './omx-exec-args';
 
 export type TmuxSpawnFunction = (
   command: string,
@@ -222,10 +223,15 @@ export class TmuxSessionRunnerService {
   }
 
   private buildRunnerScript(jobId: string): string {
+    const omxCommand = [
+      this.shellQuote(this.config.omxCommand),
+      ...buildOmxExecArgs(this.config).map((arg) => this.shellQuote(arg)),
+    ].join(' ');
+
     return [
       '#!/usr/bin/env bash',
       'set +e',
-      `${this.shellQuote(this.config.omxCommand)} exec --full-auto -s danger-full-access - < ${this.shellQuote(this.promptFile(jobId))} > ${this.shellQuote(this.stdoutFile(jobId))} 2> ${this.shellQuote(this.stderrFile(jobId))}`,
+      `${omxCommand} < ${this.shellQuote(this.promptFile(jobId))} > ${this.shellQuote(this.stdoutFile(jobId))} 2> ${this.shellQuote(this.stderrFile(jobId))}`,
       'code=$?',
       `printf '%s\\n' "$code" > ${this.shellQuote(this.exitCodeFile(jobId))}`,
       'exit "$code"',

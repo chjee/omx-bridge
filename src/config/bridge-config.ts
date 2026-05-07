@@ -10,6 +10,10 @@ export interface BridgeConfig {
   requestBodyLimit?: string;
   jobsDirectory: string;
   omxCommand: string;
+  /** `omx exec --model`에 전달할 Codex 모델 이름. */
+  omxModel?: string;
+  /** `omx exec -c model_reasoning_effort=...`로 전달할 Codex reasoning effort. */
+  omxModelReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
   /** tmux 기반 장기 세션을 시작할 때 사용할 바이너리. */
   tmuxCommand: string;
   /** tmux 세션 상태 파일을 저장할 디렉터리. */
@@ -153,6 +157,23 @@ function parseStringList(value: string | undefined, fallback: string[]): string[
   return parsed.length > 0 ? [...new Set(parsed)] : fallback;
 }
 
+function parseModelReasoningEffort(
+  value: string | undefined,
+): BridgeConfig['omxModelReasoningEffort'] {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh') {
+    return normalized;
+  }
+
+  throw new Error('BRIDGE_OMX_MODEL_REASONING_EFFORT must be one of: low, medium, high, xhigh');
+}
+
 function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase();
   return normalized === '127.0.0.1' ||
@@ -195,6 +216,10 @@ export function buildBridgeConfig(
       path.join(cwd, '.omx', 'state', 'bridge-jobs'),
     ),
     omxCommand: configService.get<string>('OMX_COMMAND', 'omx'),
+    omxModel: configService.get<string>('BRIDGE_OMX_MODEL')?.trim() || undefined,
+    omxModelReasoningEffort: parseModelReasoningEffort(
+      configService.get<string>('BRIDGE_OMX_MODEL_REASONING_EFFORT'),
+    ),
     tmuxCommand: configService.get<string>('TMUX_COMMAND', 'tmux'),
     tmuxSessionsDirectory: configService.get<string>(
       'BRIDGE_TMUX_SESSIONS_DIR',

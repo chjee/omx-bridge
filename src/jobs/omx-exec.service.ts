@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStd
 import { BRIDGE_CONFIG, DEFAULT_OMX_ENV_ALLOWLIST, type BridgeConfig } from '../config/bridge-config';
 import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { JobExecutionMetadata, OmxExecutionResult, TerminalJobStatus } from './job.types';
+import { buildOmxExecArgs } from './omx-exec-args';
 
 export type SpawnFunction = (
   command: string,
@@ -11,8 +12,6 @@ export type SpawnFunction = (
 ) => ChildProcessWithoutNullStreams;
 
 export const OMX_SPAWN = Symbol('OMX_SPAWN');
-// Codex exec treats "-" as the prompt-from-stdin marker; OMX passes this through.
-const OMX_STDIN_PROMPT_ARG = '-';
 
 export interface ExecuteOmxOptions {
   signal?: AbortSignal;
@@ -55,7 +54,7 @@ export class OmxExecService {
 
       const child = this.spawnFn(
         this.config.omxCommand,
-        ['exec', '--full-auto', '-s', 'danger-full-access', OMX_STDIN_PROMPT_ARG],
+        buildOmxExecArgs(this.config),
         {
           stdio: 'pipe',
           env: this.buildChildEnv(),
