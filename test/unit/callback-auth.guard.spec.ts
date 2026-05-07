@@ -3,7 +3,10 @@ import { createHmac } from 'node:crypto';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { CallbackAuthGuard } from '../../src/jobs/callback-auth.guard';
 
-function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConfig {
+function createConfig(
+  callbackSecret: string | undefined = 'secret',
+  overrides: Partial<BridgeConfig> = {},
+): BridgeConfig {
   return {
     host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
@@ -22,7 +25,9 @@ function createConfig(callbackSecret: string | undefined = 'secret'): BridgeConf
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
     allowedCwdPrefixes: ['/workspace'],
+    insecureLoopback: false,
     callbackSecret,
+    ...overrides,
   };
 }
 
@@ -74,8 +79,8 @@ describe('CallbackAuthGuard', () => {
     ).toThrow(UnauthorizedException);
   });
 
-  it('allows callbacks without a configured callback secret', () => {
-    const guard = new CallbackAuthGuard({ ...createConfig(), callbackSecret: undefined });
+  it('allows callbacks without a configured callback secret only for explicit insecure loopback mode', () => {
+    const guard = new CallbackAuthGuard(createConfig('', { insecureLoopback: true }));
 
     expect(
       guard.canActivate(
@@ -85,5 +90,18 @@ describe('CallbackAuthGuard', () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it('rejects callbacks without a configured callback secret by default', () => {
+    const guard = new CallbackAuthGuard(createConfig(''));
+
+    expect(() =>
+      guard.canActivate(
+        createContext({
+          params: { id: 'job-id' },
+          headers: {},
+        }),
+      ),
+    ).toThrow(UnauthorizedException);
   });
 });

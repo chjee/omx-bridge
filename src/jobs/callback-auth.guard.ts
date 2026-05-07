@@ -14,8 +14,11 @@ export class CallbackAuthGuard implements CanActivate {
   constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
 
   canActivate(context: ExecutionContext): boolean {
-    if (!this.config.callbackSecret) {
+    if (!this.config.callbackSecret && this.config.insecureLoopback) {
       return true;
+    }
+    if (!this.config.callbackSecret) {
+      throw new UnauthorizedException('BRIDGE_CALLBACK_SECRET is not configured');
     }
 
     const req = context.switchToHttp().getRequest<Request & { rawBody?: Buffer }>();

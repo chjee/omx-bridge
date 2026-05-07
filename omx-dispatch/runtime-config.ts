@@ -5,6 +5,7 @@ export interface DispatchRuntimeConfig {
   bridgeUrl: string;
   bridgeCallbackSecret: string;
   bridgeApiToken: string;
+  insecureLoopback: boolean;
   bridgeRequestTimeoutMs: number;
   webhookPort: number;
   webhookPortMin: number;
@@ -46,11 +47,29 @@ export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): DispatchRuntimeConfig {
+  const bridgeUrl = env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL;
+  const insecureLoopback = parseBoolean(
+    env["OMX_DISPATCH_INSECURE_LOOPBACK"] ?? env["BRIDGE_INSECURE_LOOPBACK"],
+  );
+  const bridgeCallbackSecret = env["BRIDGE_CALLBACK_SECRET"] ?? "";
+  const bridgeApiToken = env["BRIDGE_API_TOKEN"] ?? "";
+
+  if (insecureLoopback && !isLoopbackBridgeUrl(bridgeUrl)) {
+    throw new Error("OMX_DISPATCH_INSECURE_LOOPBACK is only allowed for loopback BRIDGE_URL");
+  }
+  if (!insecureLoopback && !bridgeApiToken) {
+    throw new Error("BRIDGE_API_TOKEN is required unless OMX_DISPATCH_INSECURE_LOOPBACK=1");
+  }
+  if (!insecureLoopback && !bridgeCallbackSecret) {
+    throw new Error("BRIDGE_CALLBACK_SECRET is required unless OMX_DISPATCH_INSECURE_LOOPBACK=1");
+  }
+
   return {
     serverVersion: DEFAULT_SERVER_VERSION,
-    bridgeUrl: env["BRIDGE_URL"] ?? DEFAULT_BRIDGE_URL,
-    bridgeCallbackSecret: env["BRIDGE_CALLBACK_SECRET"] ?? "",
-    bridgeApiToken: env["BRIDGE_API_TOKEN"] ?? "",
+    bridgeUrl,
+    bridgeCallbackSecret,
+    bridgeApiToken,
+    insecureLoopback,
     bridgeRequestTimeoutMs: parsePositiveInt(
       env["BRIDGE_REQUEST_TIMEOUT_MS"],
       10_000,
@@ -90,6 +109,15 @@ export function loadRuntimeConfig(
 
 export function parseBoolean(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
+}
+
+function isLoopbackBridgeUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  } catch {
+    return false;
+  }
 }
 
 export function parsePositiveInt(value: string | undefined, fallback: number): number {

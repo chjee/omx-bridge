@@ -120,7 +120,7 @@ async function startWebhookServer(server: OmxBridgeMcpServer): Promise<void> {
     portMin: runtimeConfig.webhookPortMin,
     portMax: runtimeConfig.webhookPortMax,
     bodyLimitBytes: runtimeConfig.webhookBodyLimitBytes,
-    signatureRequired: !!runtimeConfig.bridgeCallbackSecret,
+    signatureRequired: !runtimeConfig.insecureLoopback,
     extractJobId: extractWebhookJobId,
     verifySignature: (jobId, rawBody, signature) =>
       verifyWebhookSignature(jobId, rawBody, signature, runtimeConfig.bridgeCallbackSecret),

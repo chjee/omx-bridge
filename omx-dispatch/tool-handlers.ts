@@ -323,7 +323,7 @@ function buildTools(config: DispatchToolConfig): unknown[] {
     {
       name: "omx_callback_job",
       description:
-        "Send a callback to mark an omx-bridge job as completed. Automatically signs the request with X-Callback-Signature when BRIDGE_CALLBACK_SECRET is configured.",
+        "Send a callback to mark an omx-bridge job as completed. Automatically signs the request with X-Callback-Signature using BRIDGE_CALLBACK_SECRET.",
       inputSchema: {
         type: "object",
         properties: {

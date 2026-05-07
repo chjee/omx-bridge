@@ -6,7 +6,7 @@ export type NotifyMode = 'openclaw' | 'claude';
 
 export interface BridgeConfig {
   host: string;
-  /** Express JSON/urlencoded body parser limit. */
+  /** Express JSON body parser limit. */
   requestBodyLimit?: string;
   jobsDirectory: string;
   omxCommand: string;
@@ -39,11 +39,13 @@ export interface BridgeConfig {
   notifyRetryDelaysMs?: number[];
   /** 완료 알림 fetch 1회 시도 timeout (ms). 작업 실행 timeout과 별개. */
   notifyTimeoutMs: number;
-  /** 콜백 시참 서명 검증에 사용하는 HMAC 시크릿 (undefined 시 인증 없이 허용) */
+  /** loopback host에서 토큰/콜백 시크릿이 없는 레거시 로컬 실행을 명시적으로 허용한다. */
+  insecureLoopback: boolean;
+  /** 콜백 서명 검증에 사용하는 HMAC 시크릿. insecureLoopback이 아니면 필수. */
   callbackSecret?: string;
   /**
    * Bearer 토큰: POST /jobs, GET /jobs[/:id], POST /jobs/:id/cancel 보호.
-   * undefined 시 가드 비활성(기본). 외부 호스트 노출 시 반드시 설정 권장.
+   * insecureLoopback이 아니면 필수.
    * /callback은 callbackSecret 기반 HMAC을 별도 사용하므로 영향 없음.
    */
   apiToken?: string;
@@ -157,6 +159,10 @@ function parseStringList(value: string | undefined, fallback: string[]): string[
   return parsed.length > 0 ? [...new Set(parsed)] : fallback;
 }
 
+function parseBoolean(value: string | undefined): boolean {
+  return value === '1' || value?.toLowerCase() === 'true' || value?.toLowerCase() === 'yes';
+}
+
 function parseModelReasoningEffort(
   value: string | undefined,
 ): BridgeConfig['omxModelReasoningEffort'] {
@@ -194,15 +200,20 @@ export function buildBridgeConfig(
   const openclawHooksToken = configService.get<string>('OPENCLAW_HOOKS_TOKEN') || undefined;
   const callbackSecret = configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined;
   const apiToken = configService.get<string>('BRIDGE_API_TOKEN') || undefined;
+  const loopbackHost = isLoopbackHost(host);
+  const insecureLoopback = parseBoolean(configService.get<string>('BRIDGE_INSECURE_LOOPBACK'));
 
   if (openclawHooksUrl && !openclawHooksToken) {
     throw new Error('OPENCLAW_HOOKS_TOKEN is required when OPENCLAW_HOOKS_URL is set');
   }
-  if (!isLoopbackHost(host) && !apiToken) {
-    throw new Error('BRIDGE_API_TOKEN is required when BRIDGE_HOST is not loopback');
+  if (insecureLoopback && !loopbackHost) {
+    throw new Error('BRIDGE_INSECURE_LOOPBACK is only allowed when BRIDGE_HOST is loopback');
   }
-  if (!isLoopbackHost(host) && !callbackSecret) {
-    throw new Error('BRIDGE_CALLBACK_SECRET is required when BRIDGE_HOST is not loopback');
+  if (!insecureLoopback && !apiToken) {
+    throw new Error('BRIDGE_API_TOKEN is required unless BRIDGE_INSECURE_LOOPBACK=1 on a loopback BRIDGE_HOST');
+  }
+  if (!insecureLoopback && !callbackSecret) {
+    throw new Error('BRIDGE_CALLBACK_SECRET is required unless BRIDGE_INSECURE_LOOPBACK=1 on a loopback BRIDGE_HOST');
   }
 
   return {
@@ -273,6 +284,7 @@ export function buildBridgeConfig(
       configService.get<string>('BRIDGE_NOTIFY_TIMEOUT_MS'),
       5_000,
     ),
+    insecureLoopback,
     callbackSecret,
     apiToken,
     allowedCwdPrefixes: parseAllowedCwdPrefixes(

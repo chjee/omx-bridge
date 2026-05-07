@@ -20,7 +20,6 @@ async function bootstrap(): Promise<void> {
   app.enableShutdownHooks();
   const requestBodyLimit = bridgeConfig.requestBodyLimit ?? DEFAULT_REQUEST_BODY_LIMIT;
   app.useBodyParser('json', { limit: requestBodyLimit });
-  app.useBodyParser('urlencoded', { extended: true, limit: requestBodyLimit });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

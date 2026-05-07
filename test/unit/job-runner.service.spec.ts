@@ -78,6 +78,7 @@ describe('JobRunnerService', () => {
       jobCleanupIntervalMs: 3600000,
       notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
+      insecureLoopback: false,
       allowedCwdPrefixes: ['/workspace'],
     };
     repository = new JobQueueRepository(config);

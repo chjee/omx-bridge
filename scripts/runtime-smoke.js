@@ -14,6 +14,7 @@ const dispatchDir = path.join(repoRoot, 'omx-dispatch');
 const distMain = path.join(repoRoot, 'dist', 'main.js');
 const dispatchMain = path.join(dispatchDir, 'dist', 'index.js');
 const apiToken = 'runtime-smoke-token';
+const callbackSecret = 'runtime-smoke-callback-secret';
 const dispatchRequire = createRequire(path.join(dispatchDir, 'package.json'));
 const liveOmxEnvAllowlist = [
   'PATH',
@@ -749,6 +750,7 @@ function startBridge({
       BRIDGE_OMX_ENV_ALLOWLIST: omxEnvAllowlist,
       NOTIFY_MODE: 'claude',
       BRIDGE_API_TOKEN: apiToken,
+      BRIDGE_CALLBACK_SECRET: callbackSecret,
       BRIDGE_JOB_POLL_INTERVAL_MS: '50',
       BRIDGE_NOTIFY_RETRY_DELAYS_MS: '1',
       BRIDGE_NOTIFY_TIMEOUT_MS: '500',
@@ -1312,6 +1314,7 @@ async function smokeDispatchMcp() {
       env: {
         BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
         BRIDGE_API_TOKEN: apiToken,
+        BRIDGE_CALLBACK_SECRET: callbackSecret,
         WEBHOOK_PORT: String(webhookPort),
         OMX_DISPATCH_NOTIFICATION_STORE_PATH: path.join(tempDir, 'notifications.jsonl'),
         OMX_DISPATCH_WAIT_TIMEOUT_MS: '10000',

@@ -22,6 +22,7 @@ function createConfig(jobsDirectory: string): BridgeConfig {
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'claude',
+    insecureLoopback: false,
     allowedCwdPrefixes: ['/workspace'],
   };
 }

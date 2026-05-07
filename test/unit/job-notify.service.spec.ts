@@ -52,6 +52,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     notifyRetryDelaysMs: [],
     notifyTimeoutMs: 5000,
     notifyMode: 'claude',
+    insecureLoopback: false,
     allowedCwdPrefixes: ['/workspace'],
     telegram: {
       botToken: 'token',
