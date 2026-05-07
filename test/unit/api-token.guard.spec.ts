@@ -2,7 +2,10 @@ import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { ApiTokenGuard } from '../../src/jobs/api-token.guard';
 
-function createConfig(apiToken: string | undefined): BridgeConfig {
+function createConfig(
+  apiToken: string | undefined,
+  overrides: Partial<BridgeConfig> = {},
+): BridgeConfig {
   return {
     host: '127.0.0.1',
     jobsDirectory: '/tmp/jobs',
@@ -21,7 +24,9 @@ function createConfig(apiToken: string | undefined): BridgeConfig {
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
     allowedCwdPrefixes: ['/workspace'],
+    insecureLoopback: false,
     apiToken,
+    ...overrides,
   };
 }
 
@@ -34,9 +39,14 @@ function createContext(headers: Record<string, unknown>): ExecutionContext {
 }
 
 describe('ApiTokenGuard', () => {
-  it('allows when apiToken is unset (default-allow)', () => {
-    const guard = new ApiTokenGuard(createConfig(undefined));
+  it('allows missing token only for explicit insecure loopback mode', () => {
+    const guard = new ApiTokenGuard(createConfig(undefined, { insecureLoopback: true }));
     expect(guard.canActivate(createContext({}))).toBe(true);
+  });
+
+  it('rejects when apiToken is unset without insecure loopback mode', () => {
+    const guard = new ApiTokenGuard(createConfig(undefined));
+    expect(() => guard.canActivate(createContext({}))).toThrow(UnauthorizedException);
   });
 
   it('allows when correct Bearer token is provided', () => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import plugin, {
@@ -97,6 +98,7 @@ test("omx_get_job returns the shared full bridge job fixture without dropping fi
 test("omx_submit_job forwards OpenClaw routing fields to the bridge", async () => {
   const { api, tools } = createApi({
     bridgeUrl: "http://127.0.0.1:3992",
+    apiToken: "bridge-token",
     requestTimeoutMs: 100,
   });
   plugin.register(api as unknown as PluginApi);
@@ -133,6 +135,7 @@ test("omx_submit_job forwards OpenClaw routing fields to the bridge", async () =
 
   assert.equal(capturedUrl, "http://127.0.0.1:3992/jobs");
   assert.equal(capturedInit?.method, "POST");
+  assert.equal((capturedInit?.headers as Record<string, string>)?.Authorization, "Bearer bridge-token");
   assert.deepEqual(JSON.parse(String(capturedInit?.body)), {
     prompt: "ship this",
     source: "openclaw",
@@ -179,4 +182,56 @@ test("omx_get_job_session fetches compact tmux session details", async () => {
   assert.deepEqual((result as { details: unknown }).details, contract.bridgeJobSession);
   assert.equal(capturedUrl, `http://127.0.0.1:3992/jobs/${contract.bridgeJobSession.jobId}/session`);
   assert.equal(capturedInit?.method, "GET");
+});
+
+test("omx_callback_job signs the exact JSON body and sends the API token", async () => {
+  const { api, tools } = createApi({
+    bridgeUrl: "http://127.0.0.1:3992",
+    callbackSecret: "callback-secret",
+    apiToken: "bridge-token",
+    requestTimeoutMs: 100,
+  });
+  plugin.register(api as unknown as PluginApi);
+
+  const callbackJob = tools.get("omx_callback_job");
+  assert.ok(callbackJob);
+
+  let capturedUrl: string | undefined;
+  let capturedInit: RequestInit | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    capturedUrl = String(input);
+    capturedInit = init;
+    return new Response(JSON.stringify({ id: "job-1", status: "succeeded" }), {
+      status: 200,
+      statusText: "OK",
+    });
+  };
+
+  try {
+    await callbackJob.execute("call-1", {
+      jobId: "job-1",
+      status: "succeeded",
+      stdout: "done",
+      exitCode: 0,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const body = String(capturedInit?.body);
+  const expectedSignature = `sha256=${createHmac("sha256", "callback-secret")
+    .update(`job-1:${body}`)
+    .digest("hex")}`;
+  const headers = capturedInit?.headers as Record<string, string>;
+
+  assert.equal(capturedUrl, "http://127.0.0.1:3992/jobs/job-1/callback");
+  assert.equal(capturedInit?.method, "POST");
+  assert.equal(headers.Authorization, "Bearer bridge-token");
+  assert.equal(headers["X-Callback-Signature"], expectedSignature);
+  assert.deepEqual(JSON.parse(body), {
+    status: "succeeded",
+    stdout: "done",
+    exitCode: 0,
+  });
 });

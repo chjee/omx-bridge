@@ -10,10 +10,11 @@ The checks assume the default local bridge URL:
 export BRIDGE_URL="${BRIDGE_URL:-http://127.0.0.1:3992}"
 ```
 
-If `BRIDGE_API_TOKEN` is configured, keep it in the shell for authenticated checks:
+Default strict mode requires the bridge API token and callback secret. Keep both in the shell for authenticated checks:
 
 ```bash
 export BRIDGE_API_TOKEN="<token from omx-bridge .env>"
+export BRIDGE_CALLBACK_SECRET="<callback secret from omx-bridge .env>"
 ```
 
 ## 1. Automated Verification
@@ -131,10 +132,11 @@ If a second bridge instance points at the same `BRIDGE_JOBS_DIR`, it should fail
 Stats should be reachable:
 
 ```bash
-curl -sS "$BRIDGE_URL/jobs/stats"
+curl -sS "$BRIDGE_URL/jobs/stats" \
+  ${BRIDGE_API_TOKEN:+-H "Authorization: Bearer $BRIDGE_API_TOKEN"}
 ```
 
-When `BRIDGE_API_TOKEN` is set, unauthenticated mutation should fail:
+Unauthenticated mutation should fail:
 
 ```bash
 curl -i -X POST "$BRIDGE_URL/jobs" \
@@ -243,8 +245,8 @@ Confirm plugin config uses the bridge's runtime port:
         "enabled": true,
         "config": {
           "bridgeUrl": "http://localhost:3992",
-          "apiToken": "<BRIDGE_API_TOKEN when configured>",
-          "callbackSecret": "<BRIDGE_CALLBACK_SECRET when configured>"
+          "apiToken": "<BRIDGE_API_TOKEN>",
+          "callbackSecret": "<BRIDGE_CALLBACK_SECRET>"
         }
       }
     }
@@ -315,7 +317,7 @@ A runtime smoke pass is complete when:
 - build artifacts succeed
 - bridge service is active
 - `GET /jobs/stats` works
-- authenticated submit/get/cancel paths work when auth is enabled
+- authenticated submit/get/cancel paths work
 - `omx_health` reports bridge reachable
 - dispatch submit-and-wait completes
 - OpenClaw plugin config points at `http://localhost:3992`

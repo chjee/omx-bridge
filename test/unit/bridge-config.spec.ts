@@ -12,8 +12,19 @@ describe('buildBridgeConfig', () => {
     process.env = originalEnv;
   });
 
-  it('uses documented defaults when env vars are unset', () => {
+  it('rejects startup without required auth material by default', () => {
     process.env = {};
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      'BRIDGE_API_TOKEN is required unless BRIDGE_INSECURE_LOOPBACK=1 on a loopback BRIDGE_HOST',
+    );
+  });
+
+  it('uses documented defaults when required auth material is configured', () => {
+    process.env = {
+      BRIDGE_API_TOKEN: 'token-xyz',
+      BRIDGE_CALLBACK_SECRET: 'callback-secret',
+    };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
@@ -39,11 +50,24 @@ describe('buildBridgeConfig', () => {
       notifyRetryDelaysMs: [500, 1000, 2000],
       notifyTimeoutMs: 5000,
       notifyMode: 'openclaw',
-      callbackSecret: undefined,
-      apiToken: undefined,
+      insecureLoopback: false,
+      callbackSecret: 'callback-secret',
+      apiToken: 'token-xyz',
       allowedCwdPrefixes: ['/home/tester'],
       claudeNotifyUrl: undefined,
     });
+  });
+
+  it('allows legacy loopback deployments only with explicit insecure opt-in', () => {
+    process.env = {
+      BRIDGE_INSECURE_LOOPBACK: '1',
+    };
+
+    const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
+
+    expect(config.insecureLoopback).toBe(true);
+    expect(config.apiToken).toBeUndefined();
+    expect(config.callbackSecret).toBeUndefined();
   });
 
   it('uses env overrides when present', () => {
@@ -69,6 +93,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_NOTIFY_RETRY_DELAYS_MS: '10,20,40',
       BRIDGE_NOTIFY_TIMEOUT_MS: '3000',
       BRIDGE_API_TOKEN: 'token-xyz',
+      BRIDGE_CALLBACK_SECRET: 'callback-secret',
       BRIDGE_ALLOWED_CWD_PREFIXES: '~/workspace,/srv/projects',
     };
 
@@ -96,7 +121,8 @@ describe('buildBridgeConfig', () => {
       notifyRetryDelaysMs: [10, 20, 40],
       notifyTimeoutMs: 3000,
       notifyMode: 'openclaw',
-      callbackSecret: undefined,
+      insecureLoopback: false,
+      callbackSecret: 'callback-secret',
       apiToken: 'token-xyz',
       allowedCwdPrefixes: ['/home/tester/workspace', '/srv/projects'],
       claudeNotifyUrl: undefined,
@@ -106,6 +132,8 @@ describe('buildBridgeConfig', () => {
   it('falls back to the default request body limit for invalid values', () => {
     process.env = {
       BRIDGE_REQUEST_BODY_LIMIT: 'not a size',
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
     };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
@@ -116,6 +144,8 @@ describe('buildBridgeConfig', () => {
   it('rejects invalid model reasoning effort values', () => {
     process.env = {
       BRIDGE_OMX_MODEL_REASONING_EFFORT: 'extreme',
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
     };
 
     expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
@@ -130,7 +160,7 @@ describe('buildBridgeConfig', () => {
     };
 
     expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
-      'BRIDGE_API_TOKEN is required when BRIDGE_HOST is not loopback',
+      'BRIDGE_API_TOKEN is required unless BRIDGE_INSECURE_LOOPBACK=1 on a loopback BRIDGE_HOST',
     );
   });
 
@@ -141,7 +171,18 @@ describe('buildBridgeConfig', () => {
     };
 
     expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
-      'BRIDGE_CALLBACK_SECRET is required when BRIDGE_HOST is not loopback',
+      'BRIDGE_CALLBACK_SECRET is required unless BRIDGE_INSECURE_LOOPBACK=1 on a loopback BRIDGE_HOST',
+    );
+  });
+
+  it('rejects insecure loopback opt-in on non-loopback hosts', () => {
+    process.env = {
+      BRIDGE_HOST: '0.0.0.0',
+      BRIDGE_INSECURE_LOOPBACK: '1',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      'BRIDGE_INSECURE_LOOPBACK is only allowed when BRIDGE_HOST is loopback',
     );
   });
 
@@ -155,6 +196,7 @@ describe('buildBridgeConfig', () => {
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
     expect(config.host).toBe('0.0.0.0');
+    expect(config.insecureLoopback).toBe(false);
     expect(config.apiToken).toBe('token');
     expect(config.callbackSecret).toBe('secret');
   });
@@ -162,6 +204,8 @@ describe('buildBridgeConfig', () => {
   it('rejects partial OpenClaw hook configuration', () => {
     process.env = {
       OPENCLAW_HOOKS_URL: 'http://127.0.0.1:3994/hooks',
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
     };
 
     expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app')).toThrow(
@@ -174,6 +218,8 @@ describe('buildBridgeConfig', () => {
       OPENCLAW_HOOKS_URL: 'http://127.0.0.1:3994/hooks',
       OPENCLAW_HOOKS_TOKEN: 'token',
       OPENCLAW_HOOKS_SESSION_KEY: 'agent:main:telegram:direct',
+      BRIDGE_API_TOKEN: 'api-token',
+      BRIDGE_CALLBACK_SECRET: 'callback-secret',
     };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');

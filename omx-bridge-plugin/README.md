@@ -85,8 +85,8 @@ If your OpenClaw tool policy uses allowlists, allow either the whole plugin id o
 The plugin accepts these config fields:
 
 - `bridgeUrl`: Base URL for the bridge service. Default: `http://localhost:3992`
-- `callbackSecret`: HMAC secret for signing callback requests. Must match `BRIDGE_CALLBACK_SECRET` when configured.
-- `apiToken`: Bearer token for non-callback bridge routes. Must match `BRIDGE_API_TOKEN` when configured.
+- `callbackSecret`: HMAC secret for signing callback requests. Must match `BRIDGE_CALLBACK_SECRET` unless the bridge explicitly runs insecure loopback mode.
+- `apiToken`: Bearer token for non-callback bridge routes. Must match `BRIDGE_API_TOKEN` unless the bridge explicitly runs insecure loopback mode.
 - `requestTimeoutMs`: Timeout in milliseconds for each bridge HTTP request. Default: `10000`
 
 ## Bridge API mapping

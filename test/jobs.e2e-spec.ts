@@ -165,7 +165,8 @@ describe('Jobs API (e2e)', () => {
     process.env.BRIDGE_JOBS_DIR = jobsDirectory;
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
-    process.env.BRIDGE_API_TOKEN = '';
+    process.env.BRIDGE_API_TOKEN = 'test-api-token';
+    process.env.BRIDGE_CALLBACK_SECRET = 'test-callback-secret';
     fakeOmxExecService = new FakeOmxExecService();
     fakeTmuxSessionRunner = new FakeTmuxSessionRunnerService();
     notifyJobComplete = jest.fn().mockResolvedValue(undefined);
@@ -214,6 +215,7 @@ describe('Jobs API (e2e)', () => {
     delete process.env.BRIDGE_JOB_POLL_INTERVAL_MS;
     delete process.env.BRIDGE_MAX_CONCURRENCY;
     delete process.env.BRIDGE_API_TOKEN;
+    delete process.env.BRIDGE_CALLBACK_SECRET;
   });
 
   it('submits, persists, executes, and returns a successful job', async () => {
@@ -528,7 +530,8 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     process.env.BRIDGE_JOB_POLL_INTERVAL_MS = '1000';
     process.env.BRIDGE_JOB_TIMEOUT_MS = '5000';
     process.env.BRIDGE_MAX_CONCURRENCY = '1';
-    process.env.BRIDGE_API_TOKEN = '';
+    process.env.BRIDGE_API_TOKEN = 'test-api-token';
+    process.env.BRIDGE_CALLBACK_SECRET = 'test-callback-secret';
     process.env.OMX_COMMAND = fakeOmxPath;
     process.env.BRIDGE_OMX_ENV_ALLOWLIST = 'PATH,BRIDGE_TRACE_FILE,FAKE_CODEX_PATH';
     process.env.BRIDGE_TRACE_FILE = traceFile;
@@ -551,6 +554,7 @@ exec node "$FAKE_CODEX_PATH" "$prompt"
     delete process.env.BRIDGE_JOB_TIMEOUT_MS;
     delete process.env.BRIDGE_MAX_CONCURRENCY;
     delete process.env.BRIDGE_API_TOKEN;
+    delete process.env.BRIDGE_CALLBACK_SECRET;
     delete process.env.OMX_COMMAND;
     delete process.env.BRIDGE_OMX_ENV_ALLOWLIST;
     delete process.env.BRIDGE_TRACE_FILE;

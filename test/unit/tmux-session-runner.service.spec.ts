@@ -76,6 +76,7 @@ async function createConfig(overrides: Partial<BridgeConfig> = {}): Promise<Brid
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'openclaw',
+    insecureLoopback: false,
     allowedCwdPrefixes: [root],
     ...overrides,
   };

@@ -142,7 +142,7 @@ TELEGRAM_BOT_TOKEN=optional-fallback-token
 TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 ```
 
-`BRIDGE_CALLBACK_SECRET` must match the MCP server env when webhook signature verification is enabled.
+`BRIDGE_CALLBACK_SECRET` must match the MCP server env in the default strict mode.
 
 ### Execution boundaries
 
@@ -221,15 +221,15 @@ BRIDGE_MAX_TERMINAL_JOBS=100
 
 ### API token guard
 
-`BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. When unset, the guard is disabled and these routes accept all requests — appropriate for the default `BRIDGE_HOST=127.0.0.1` localhost-only deployment.
+`BRIDGE_API_TOKEN` protects all non-callback routes (`POST /jobs`, `GET /jobs[/:id]`, `POST /jobs/:id/cancel`) with a Bearer token. It is required by default, including on `BRIDGE_HOST=127.0.0.1`.
 
-`/callback` is intentionally excluded — it carries its own HMAC signature via `BRIDGE_CALLBACK_SECRET` (different concern: bind-to-body, not just identity).
+`/callback` is intentionally excluded from the bearer-token guard. It carries its own HMAC signature via `BRIDGE_CALLBACK_SECRET`, which is also required by default.
 
-#### When to enable
+`POST /jobs` and `POST /jobs/:id/callback` accept JSON request bodies only. Browser-style `application/x-www-form-urlencoded` submissions are rejected before job creation.
 
-- The bridge is exposed beyond loopback (`BRIDGE_HOST=0.0.0.0`).
-- Multiple unprivileged users share the host.
-- Defense-in-depth even on localhost-only deployments.
+#### Insecure loopback opt-in
+
+For legacy local-only deployments, set `BRIDGE_INSECURE_LOOPBACK=1` to allow missing `BRIDGE_API_TOKEN` and `BRIDGE_CALLBACK_SECRET`. This opt-in is rejected unless `BRIDGE_HOST` is loopback (`127.0.0.1`, `localhost`, or `::1`).
 
 #### Deployment procedure (lockstep)
 
@@ -245,6 +245,7 @@ openssl rand -hex 32
 
 ```env
 BRIDGE_API_TOKEN=<generated>
+BRIDGE_CALLBACK_SECRET=<shared-secret>
 ```
 
 **3. Propagate to every caller.** Same value in every place a caller reads its config from.
@@ -321,9 +322,14 @@ curl -i -X POST http://127.0.0.1:3992/jobs \
   -d '{"prompt":"ping"}'
 ```
 
-#### Disabling the guard
+#### Disabling strict auth for local legacy use
 
-Remove or comment out `BRIDGE_API_TOKEN` from `~/workspace/omx-bridge/.env` and restart `omx-bridge`. Callers that still send the header will be ignored (header is parsed but unused when the guard is disabled).
+Only for loopback-only legacy deployments, set this on the bridge and matching local tools that intentionally run unsigned/unauthenticated:
+
+```env
+BRIDGE_INSECURE_LOOPBACK=1
+OMX_DISPATCH_INSECURE_LOOPBACK=1
+```
 
 ## Claude Code MCP Server
 
@@ -344,7 +350,7 @@ Available tools:
 | `omx_wait_for_job` | Wait for an existing job to complete without draining other pending notifications |
 | `omx_list_jobs` | List jobs, optionally filtered by status |
 | `omx_cancel_job` | Cancel a queued or running job |
-| `omx_callback_job` | Mark a job as completed via callback (signs request when `BRIDGE_CALLBACK_SECRET` is set) |
+| `omx_callback_job` | Mark a job as completed via callback (signs request with `BRIDGE_CALLBACK_SECRET`) |
 | `omx_get_notifications` | Atomically drain all pending completion notifications from the shared webhook notification store |
 | `omx_health` | Inspect bridge reachability, job stats, and pending dispatch notifications in one response |
 | `omx_notification_stats` | Inspect pending notification count/store metadata without draining |
@@ -468,7 +474,7 @@ This is an operator smoke, not a deterministic CI gate: it uses local provider c
 - The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in the shared JSONL store, uses a file lock for cross-process drain, and deduplicates by job id before returning notifications.
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
 - On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
-- When `BRIDGE_CALLBACK_SECRET` is set, `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header. The MCP server and plugin sign callback requests automatically when the secret is configured.
+- `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header unless the bridge explicitly runs `BRIDGE_INSECURE_LOOPBACK=1`. The MCP server and plugin sign callback requests automatically when the secret is configured.
 - `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Channel brokers such as `claude-chopper` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; `originRoutingKey` takes precedence.
 - `source` accepts `dispatch`, `channel`, `synapse`, and `openclaw`. New broker-owned chat integrations should use `source: "channel"` plus `sourceName` (for example `claude-chopper`) instead of adding app-specific source enum values.
 - `source: "openclaw"` is bridge-owned direct delivery. `originRoutingKey` on an OpenClaw job is correlation context unless a per-job `notifyUrl` owns callback delivery; configured Telegram fallback still targets `TELEGRAM_NOTIFY_CHAT_ID`, not the routing key.

@@ -70,6 +70,7 @@ function createConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
     jobCleanupIntervalMs: 3600000,
     notifyTimeoutMs: 5000,
     notifyMode: 'claude',
+    insecureLoopback: false,
     allowedCwdPrefixes: ['/workspace', '/home/tester'],
     ...overrides,
   };

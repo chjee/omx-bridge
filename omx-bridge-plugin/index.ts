@@ -35,12 +35,12 @@ const pluginConfigSchema = Type.Object(
     ),
     callbackSecret: Type.Optional(
       Type.String({
-        description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server.",
+        description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET unless the server explicitly runs insecure loopback mode.",
       }),
     ),
     apiToken: Type.Optional(
       Type.String({
-        description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN on the server when set.",
+        description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN unless the server explicitly runs insecure loopback mode.",
       }),
     ),
     requestTimeoutMs: Type.Optional(

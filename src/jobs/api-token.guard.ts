@@ -12,10 +12,7 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 /**
  * Bearer-token guard for bridge API routes (non-callback).
  *
- * Pairs with BRIDGE_API_TOKEN. If the token is unset, the guard is a
- * no-op — this matches the historical default and lets local-only
- * deployments (BRIDGE_HOST=127.0.0.1) keep running without configuring
- * a token. When the token is set, all guarded routes require:
+ * Pairs with BRIDGE_API_TOKEN. Guarded routes require:
  *
  *     Authorization: Bearer <BRIDGE_API_TOKEN>
  *
@@ -28,8 +25,11 @@ export class ApiTokenGuard implements CanActivate {
   constructor(@Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig) {}
 
   canActivate(context: ExecutionContext): boolean {
-    if (!this.config.apiToken) {
+    if (!this.config.apiToken && this.config.insecureLoopback) {
       return true;
+    }
+    if (!this.config.apiToken) {
+      throw new UnauthorizedException('BRIDGE_API_TOKEN is not configured');
     }
 
     const req = context.switchToHttp().getRequest<Request>();
