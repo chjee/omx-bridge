@@ -82,6 +82,8 @@ BRIDGE_HOST=127.0.0.1
 BRIDGE_REQUEST_BODY_LIMIT=1mb
 BRIDGE_JOBS_DIR=.omx/state/bridge-jobs
 OMX_COMMAND=omx
+# BRIDGE_OMX_MODEL=gpt-5.5
+# BRIDGE_OMX_MODEL_REASONING_EFFORT=high
 NOTIFY_MODE=openclaw
 ```
 
@@ -146,7 +148,10 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 The bridge runs requested work through `omx exec --full-auto -s danger-full-access -`
 and writes the prompt to the child process stdin instead of passing it as an
-argv value. Bind and working-directory settings are part of the safety boundary.
+argv value. Optional `BRIDGE_OMX_MODEL` and
+`BRIDGE_OMX_MODEL_REASONING_EFFORT` values add `--model <value>` and
+`-c model_reasoning_effort="<low|medium|high|xhigh>"` before the stdin marker.
+Bind and working-directory settings are part of the safety boundary.
 
 The `omx exec` child process receives only an environment-variable allowlist,
 configured by `BRIDGE_OMX_ENV_ALLOWLIST`. By default this keeps common shell,

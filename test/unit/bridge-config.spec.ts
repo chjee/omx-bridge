@@ -22,6 +22,8 @@ describe('buildBridgeConfig', () => {
       requestBodyLimit: DEFAULT_REQUEST_BODY_LIMIT,
       jobsDirectory: '/workspace/app/.omx/state/bridge-jobs',
       omxCommand: 'omx',
+      omxModel: undefined,
+      omxModelReasoningEffort: undefined,
       tmuxCommand: 'tmux',
       tmuxSessionsDirectory: '/workspace/app/.omx/state/bridge-sessions',
       omxEnvAllowlist: DEFAULT_OMX_ENV_ALLOWLIST,
@@ -51,6 +53,8 @@ describe('buildBridgeConfig', () => {
       BRIDGE_HOST: 'localhost',
       BRIDGE_REQUEST_BODY_LIMIT: '2mb',
       OMX_COMMAND: 'omx-custom',
+      BRIDGE_OMX_MODEL: 'gpt-5.5',
+      BRIDGE_OMX_MODEL_REASONING_EFFORT: 'high',
       TMUX_COMMAND: 'tmux-custom',
       BRIDGE_OMX_ENV_ALLOWLIST: 'PATH,HOME,CUSTOM_ENV,PATH',
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
@@ -75,6 +79,8 @@ describe('buildBridgeConfig', () => {
       requestBodyLimit: '2mb',
       jobsDirectory: '/tmp/custom-jobs',
       omxCommand: 'omx-custom',
+      omxModel: 'gpt-5.5',
+      omxModelReasoningEffort: 'high',
       tmuxCommand: 'tmux-custom',
       tmuxSessionsDirectory: '/tmp/custom-sessions',
       omxEnvAllowlist: ['PATH', 'HOME', 'CUSTOM_ENV'],
@@ -105,6 +111,16 @@ describe('buildBridgeConfig', () => {
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
     expect(config.requestBodyLimit).toBe(DEFAULT_REQUEST_BODY_LIMIT);
+  });
+
+  it('rejects invalid model reasoning effort values', () => {
+    process.env = {
+      BRIDGE_OMX_MODEL_REASONING_EFFORT: 'extreme',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      'BRIDGE_OMX_MODEL_REASONING_EFFORT must be one of: low, medium, high, xhigh',
+    );
   });
 
   it('rejects non-loopback hosts without API token', () => {

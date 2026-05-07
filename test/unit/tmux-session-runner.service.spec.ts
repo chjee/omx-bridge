@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -16,6 +17,23 @@ class MockChildProcess extends EventEmitter {
   stdout = new PassThrough();
   stderr = new PassThrough();
   kill = jest.fn(() => true);
+}
+
+async function runShellScript(filePath: string, env: NodeJS.ProcessEnv = {}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('bash', [filePath], {
+      env: { ...process.env, ...env },
+      stdio: 'ignore',
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`script exited with code ${code ?? 'null'}`));
+    });
+  });
 }
 
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
@@ -82,7 +100,7 @@ describe('TmuxSessionRunnerService', () => {
     );
     await expect(fs.readFile(path.join(sessionDirectory, 'prompt.txt'), 'utf8')).resolves.toBe('hello from tmux');
     await expect(fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8')).resolves.toContain(
-      "omx' exec --full-auto -s danger-full-access -",
+      "'omx' 'exec' '--full-auto' '-s' 'danger-full-access' '-'",
     );
     await expect(fs.readFile(path.join(sessionDirectory, 'session.json'), 'utf8')).resolves.toContain(session.sessionName);
     expect(session).toMatchObject({
@@ -90,6 +108,73 @@ describe('TmuxSessionRunnerService', () => {
       status: 'running',
       attachCommand: `tmux attach -t ${session.sessionName}`,
     });
+  });
+
+  it('writes configured Codex model and reasoning effort options into the session runner', async () => {
+    const config = await createConfig({
+      omxModel: 'gpt-5.5',
+      omxModelReasoningEffort: 'high',
+    });
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
+
+    await service.start(createJob());
+    const sessionDirectory = path.join(config.tmuxSessionsDirectory, '00000000-0000-4000-a000-000000000001');
+
+    await expect(fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8')).resolves.toContain(
+      "'omx' 'exec' '--full-auto' '-s' 'danger-full-access' '--model' 'gpt-5.5' '-c' 'model_reasoning_effort=\"high\"' '-'",
+    );
+  });
+
+  it('keeps shell metacharacters in the configured Codex model as one tmux runner argv', async () => {
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const argvFile = path.join(root, 'argv.txt');
+    const injectedFile = path.join(root, 'injected');
+    const substitutionFile = path.join(root, 'substitution');
+    const fakeOmxCommand = path.join(root, 'fake-omx.sh');
+    const model = `gpt custom'; touch ${injectedFile}; $(touch ${substitutionFile})`;
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'printf "%s\\n" "$@" > "$ARGV_FILE"',
+        'cat > /dev/null',
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand, omxModel: model },
+      spawnFn as TmuxSpawnFunction,
+    );
+
+    await service.start(createJob());
+    const runFile = path.join(config.tmuxSessionsDirectory, '00000000-0000-4000-a000-000000000001', 'run.sh');
+    await runShellScript(runFile, { ARGV_FILE: argvFile });
+
+    const argv = await fs.readFile(argvFile, 'utf8');
+    expect(argv.split('\n')).toEqual([
+      'exec',
+      '--full-auto',
+      '-s',
+      'danger-full-access',
+      '--model',
+      model,
+      '-',
+      '',
+    ]);
+    await expect(fs.access(injectedFile)).rejects.toThrow();
+    await expect(fs.access(substitutionFile)).rejects.toThrow();
   });
 
   it('collects exit code and captured output from a finished session', async () => {
