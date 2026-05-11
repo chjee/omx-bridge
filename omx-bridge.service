@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/omx-bridge
-ExecStart=/home/<user>/.nvm/versions/node/v24.14.1/bin/node dist/main.js
+WorkingDirectory=%h/workspace/omx-bridge
+ExecStart=/usr/bin/env node dist/main.js
 Restart=always
 RestartSec=5
-EnvironmentFile=/path/to/omx-bridge/.env
+EnvironmentFile=%h/workspace/omx-bridge/.env
 Environment=NODE_ENV=production
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

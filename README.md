@@ -72,6 +72,24 @@ cd omx-dispatch && npm run build
 cd ../omx-bridge-plugin && npm run build
 ```
 
+Install the bridge as a user systemd service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp omx-bridge.service ~/.config/systemd/user/omx-bridge.service
+systemctl --user daemon-reload
+systemctl --user enable --now omx-bridge
+```
+
+The provided service file assumes the repository lives at
+`~/workspace/omx-bridge`. If your checkout is elsewhere, edit
+`WorkingDirectory` and `EnvironmentFile` in
+`~/.config/systemd/user/omx-bridge.service` before enabling it. User systemd
+services do not always inherit your interactive shell `PATH`; if `node` or
+`omx` is installed through a version manager, use an absolute `ExecStart` path
+or add a service `Environment=PATH=...` line, and set `OMX_COMMAND` in `.env`
+to an absolute `omx` path when needed.
+
 ## Bridge Service Configuration
 
 Important root `.env` values:
@@ -442,6 +460,16 @@ Build checks:
 npm run build
 cd omx-dispatch && npm run build
 ```
+
+Run the public hygiene guard before public release or release-readiness changes:
+
+```bash
+npm run verify:public-hygiene
+```
+
+This checks tracked files for known local operator paths, live-looking hook
+session keys, and local OMX workflow artifacts that should not be part of the
+public source tree.
 
 Run the automated loopback runtime smoke:
 

@@ -21,6 +21,7 @@
     "smoke:runtime:live": "npm run build && node scripts/runtime-smoke.js --live-omx",
     "verify:runtime": "npm run smoke:runtime",
     "verify:runtime:live": "npm run smoke:runtime:live",
+    "verify:public-hygiene": "node scripts/public-hygiene-check.js",
     "verify": "npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
     "verify:root": "npm test && npm run build",
     "verify:dispatch": "npm --prefix omx-dispatch run typecheck && npm --prefix omx-dispatch run build && npm --prefix omx-dispatch test",

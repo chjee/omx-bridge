@@ -6,6 +6,7 @@ Use this checklist before merging or deploying bridge changes. It separates dete
 
 | Lane | Command | Use as CI gate | Requires local ports | Requires model credentials | Covers |
 | --- | --- | --- | --- | --- | --- |
+| Public hygiene guard | `npm run verify:public-hygiene` | Yes, before public release | No | No | Local operator paths, live-looking hook session keys, tracked local OMX artifacts |
 | Deterministic build/test | `npm run verify` | Yes | No | No | Root tests/build, dispatch typecheck/build/tests, plugin typecheck/build/tests |
 | Loopback runtime smoke | `npm run verify:runtime` | Optional, when runner can bind loopback ports | Yes | No | Built bridge runtime, dispatch MCP, local webhook callback, cancel path, fake live-OMX wiring |
 | Live OMX operator smoke | `npm run verify:runtime:live` | No | Yes | Yes | One real `omx exec` job through a temporary loopback bridge and local callback webhook |
@@ -14,7 +15,13 @@ Do not make `verify:runtime:live` a required CI or merge gate unless the runner 
 
 ## Pre-Merge Checklist
 
-Run these before merging ordinary code changes:
+Run this before public release or release-readiness changes:
+
+```bash
+npm run verify:public-hygiene
+```
+
+Run this before merging ordinary code changes:
 
 ```bash
 npm run verify
@@ -94,6 +101,8 @@ Deployment smoke should capture:
 
 A change is release-ready when:
 
+- `npm run verify:public-hygiene` has passed for public release or
+  release-readiness changes
 - required lane commands for the change type pass
 - any generated agent-surface sync has passed the manual harness-sync checklist
 - any operator-only live smoke failures are either fixed or explicitly classified as non-bridge local/model failures

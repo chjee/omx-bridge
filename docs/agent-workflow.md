@@ -29,6 +29,8 @@ smoke work, contract changes, and release-readiness refreshes.
   release-gate work.
 - Do not edit `.omx/` runtime state, logs, or historical plans unless the task
   explicitly asks for OMX state maintenance.
+- Promote durable decisions from `.omx/` workflow artifacts into `docs/` before
+  relying on them as public project knowledge.
 
 ## Scope Rules
 
@@ -72,6 +74,7 @@ Use the smallest meaningful subset while developing, then run the relevant
 full gate before claiming completion.
 
 - Documentation-only changes: `git diff --check`.
+- Public release or release-readiness changes: `npm run verify:public-hygiene`.
 - Standard code changes: `npm run verify`.
 - Runtime/API/dispatch/plugin/callback/tmux/job lifecycle changes:
   `npm run verify:runtime` after the relevant build/test gate.
