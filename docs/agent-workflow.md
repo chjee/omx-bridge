@@ -29,6 +29,8 @@ smoke work, contract changes, and release-readiness refreshes.
   release-gate work.
 - Do not edit `.omx/` runtime state, logs, or historical plans unless the task
   explicitly asks for OMX state maintenance.
+- Promote durable decisions from `.omx/` workflow artifacts into `docs/` before
+  relying on them as public project knowledge.
 
 ## Scope Rules
 
