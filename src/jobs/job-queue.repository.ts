@@ -158,7 +158,7 @@ export class JobQueueRepository {
 
   private async parseJob(raw: string, jobId: string, filePath: string): Promise<BridgeJob | null> {
     try {
-      const parsed = JSON.parse(raw) as unknown;
+      const parsed = this.normalizeLegacyJobSource(JSON.parse(raw) as unknown);
       if (!this.isBridgeJob(parsed, jobId)) {
         this.logger.warn(`Skipping invalid job file for ${jobId}`);
         await this.quarantineInvalidJobFile(filePath, jobId, 'invalid');
@@ -172,6 +172,18 @@ export class JobQueueRepository {
       await this.quarantineInvalidJobFile(filePath, jobId, 'malformed');
       return null;
     }
+  }
+
+  private normalizeLegacyJobSource(value: unknown): unknown {
+    if (!this.isRecord(value) || value.source !== 'synapse') {
+      return value;
+    }
+
+    return {
+      ...value,
+      source: 'channel',
+      sourceName: typeof value.sourceName === 'string' ? value.sourceName : 'claude-synapse',
+    };
   }
 
   private async quarantineInvalidJobFile(

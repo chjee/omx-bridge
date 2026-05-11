@@ -9,6 +9,7 @@ import {
   ValidateBy,
   type ValidationOptions,
 } from 'class-validator';
+import { Expose, Transform } from 'class-transformer';
 import { Buffer } from 'node:buffer';
 
 export const MAX_PROMPT_LENGTH = 4000;
@@ -92,12 +93,22 @@ export class CreateJobDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['dispatch', 'channel', 'synapse', 'openclaw'])
-  source?: 'dispatch' | 'channel' | 'synapse' | 'openclaw';
+  @Transform(({ value, obj }) => {
+    if (value !== 'synapse') {
+      return value;
+    }
+
+    obj.sourceName ??= 'claude-synapse';
+    return 'channel';
+  })
+  @IsIn(['dispatch', 'channel', 'openclaw'])
+  source?: 'dispatch' | 'channel' | 'openclaw';
 
   @IsOptional()
   @IsString()
   @MaxLength(200)
+  @Expose()
+  @Transform(({ value, obj }) => value ?? (obj?.source === 'synapse' ? 'claude-synapse' : value))
   sourceName?: string;
 
   @IsOptional()

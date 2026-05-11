@@ -9,7 +9,7 @@ export const EXECUTION_ERROR_TYPES = [
   'execution_error',
   'invalid_cwd',
 ] as const;
-export const JOB_SOURCE_VALUES = ['dispatch', 'channel', 'synapse', 'openclaw'] as const;
+export const JOB_SOURCE_VALUES = ['dispatch', 'channel', 'openclaw'] as const;
 export const NOTIFY_MODE_VALUES = ['openclaw', 'claude'] as const;
 export const NOTIFY_TRIGGER_VALUES = ['auto', 'manual'] as const;
 export const NOTIFY_CHANNEL_STATUSES = ['ok', 'failed', 'skipped'] as const;
