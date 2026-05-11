@@ -288,9 +288,8 @@ docs/routing-contract.md
 Expected source behavior:
 
 - `dispatch`: completion goes to dispatch session-local `notifyUrl`
-- `channel`: broker owns final chat routing using `originRoutingKey`
+- `channel`: broker owns final chat routing using `originRoutingKey`; legacy `source: "synapse"` submissions normalize here with `sourceName: "claude-synapse"`
 - `openclaw`: bridge/OpenClaw integration owns final delivery
-- `synapse`: legacy broker-owned routing
 
 Do not validate channel routing by adding direct Telegram fallback in the bridge. The broker should receive the completion payload and route it.
 

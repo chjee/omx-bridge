@@ -159,6 +159,25 @@ describe('JobQueueRepository', () => {
     await expect(repository.getById(job.id)).resolves.toEqual(persisted);
   });
 
+  it('normalizes legacy persisted synapse source to channel', async () => {
+    const legacyJob = {
+      ...createJob({ id: TEST_ID_1 }),
+      source: 'synapse',
+      originRoutingKey: 'telegram:direct:123',
+    };
+    await fs.writeFile(
+      path.join(jobsDirectory, `${TEST_ID_1}.json`),
+      `${JSON.stringify(legacyJob)}\n`,
+      'utf8',
+    );
+
+    await expect(repository.getById(TEST_ID_1)).resolves.toMatchObject({
+      source: 'channel',
+      sourceName: 'claude-synapse',
+      originRoutingKey: 'telegram:direct:123',
+    });
+  });
+
   it('reads jobs with tmux execution contract fields', async () => {
     const job = createJob({
       executionMode: 'tmux',

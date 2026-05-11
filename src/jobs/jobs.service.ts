@@ -33,9 +33,10 @@ export class JobsService {
 
   async createJob(input: CreateJobDto): Promise<BridgeJob> {
     return this.withCreateLock(async () => {
+      const sourceNormalizedInput = this.normalizeLegacySource(input);
       const normalizedInput = {
-        ...input,
-        cwd: await this.assertAllowedCwd(input.cwd),
+        ...sourceNormalizedInput,
+        cwd: await this.assertAllowedCwd(sourceNormalizedInput.cwd),
       };
       const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
       const existingJob = await this.findExistingRequestJob(normalizedInput);
@@ -220,6 +221,19 @@ export class JobsService {
 
   private isTerminal(status: JobStatus): boolean {
     return status === 'succeeded' || status === 'failed' || status === 'cancelled';
+  }
+
+  private normalizeLegacySource(input: CreateJobDto): CreateJobDto {
+    const source = input.source as CreateJobDto['source'] | 'synapse';
+    if (source !== 'synapse') {
+      return input;
+    }
+
+    return {
+      ...input,
+      source: 'channel',
+      sourceName: input.sourceName ?? 'claude-synapse',
+    };
   }
 
   private async findExistingRequestJob(input: CreateJobDto): Promise<BridgeJob | null> {

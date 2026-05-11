@@ -184,7 +184,6 @@ export class JobNotifyService {
     // for correlation, but it does not make OpenClaw jobs broker-owned.
     return (
       job.source === 'channel' ||
-      job.source === 'synapse' ||
       (!job.source && !!job.originRoutingKey)
     );
   }

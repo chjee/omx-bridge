@@ -4,6 +4,7 @@ import {
   MAX_METADATA_BYTES,
   MAX_PROMPT_LENGTH,
 } from '../../src/jobs/dto/create-job.dto';
+import { createValidationPipe } from '../helpers';
 
 describe('CreateJobDto', () => {
   it('rejects an empty prompt', async () => {
@@ -88,6 +89,20 @@ describe('CreateJobDto', () => {
     const errors = await validate(dto);
 
     expect(errors).toHaveLength(0);
+  });
+
+  it('normalizes legacy synapse source to channel during request validation', async () => {
+    const pipe = createValidationPipe();
+
+    const dto = await pipe.transform(
+      { prompt: 'Implement phase 1', source: 'synapse' },
+      { type: 'body', metatype: CreateJobDto },
+    ) as CreateJobDto;
+    const errors = await validate(dto);
+
+    expect(errors).toHaveLength(0);
+    expect(dto.source).toBe('channel');
+    expect(dto.sourceName).toBe('claude-synapse');
   });
 
   it('rejects unknown source values', async () => {

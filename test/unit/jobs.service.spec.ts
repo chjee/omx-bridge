@@ -184,6 +184,25 @@ describe('JobsService.createJob', () => {
     }));
   });
 
+  it('normalizes legacy synapse source to channel on queued jobs', async () => {
+    const { service, repository } = createService();
+
+    const job = await service.createJob({
+      prompt: 'run from legacy synapse',
+      source: 'synapse',
+      originRoutingKey: 'telegram:direct:123',
+    } as unknown as Parameters<typeof service.createJob>[0]);
+
+    expect(job.source).toBe('channel');
+    expect(job.sourceName).toBe('claude-synapse');
+    expect(job.originRoutingKey).toBe('telegram:direct:123');
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'channel',
+      sourceName: 'claude-synapse',
+      originRoutingKey: 'telegram:direct:123',
+    }));
+  });
+
   it('returns an existing job for repeated source-scoped requestId submissions', async () => {
     const existingJob = createJob({
       prompt: 'same request retry',
