@@ -11,7 +11,7 @@ export const BRIDGE_EXECUTION_ERROR_TYPES = [
   "invalid_cwd",
 ] as const;
 export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
-export const JOB_SOURCE_VALUES = ["dispatch", "channel", "synapse", "openclaw"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "openclaw"] as const;
 export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
 export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
 export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;

@@ -16,10 +16,11 @@ Allowed values:
 
 - `dispatch`: Claude Code CLI / MCP dispatch session.
 - `channel`: broker-owned channel routing, for example `claude-chopper`.
-- `synapse`: legacy broker routing.
 - `openclaw`: direct OpenClaw integration.
 
 `source` is also part of request idempotency. A repeated `requestId` returns an existing job only when the `source` also matches.
+Legacy `source: "synapse"` input is accepted for compatibility and normalized
+to `source: "channel"` with `sourceName: "claude-synapse"`.
 
 ### `notifyUrl`
 
@@ -91,7 +92,6 @@ Avoid placing secrets in `metadata`; job files are persisted on disk.
 | --- | --- | --- | --- |
 | `dispatch` | Dispatch MCP process | `notifyUrl`, optional `requestId` | Sends completion to dispatch webhook. Dispatch queues notifications for polling/channel events. |
 | `channel` | Channel broker | `notifyUrl`, `originRoutingKey`, `sourceName` | Preserves routing fields and posts completion to broker webhook. Skips Telegram fallback. |
-| `synapse` | Legacy broker | `notifyUrl` or `CLAUDE_NOTIFY_URL`, legacy metadata as needed | Preserves compatibility fields. Treat as broker-owned routing. |
 | `openclaw` | Bridge/OpenClaw integration | OpenClaw hook config, optional Telegram config; optional `originRoutingKey` for correlation | In `NOTIFY_MODE=openclaw`, sends OpenClaw hook and Telegram notification when configured. In `NOTIFY_MODE=claude`, `originRoutingKey` alone does not make the job broker-owned. |
 
 ## Notification Modes

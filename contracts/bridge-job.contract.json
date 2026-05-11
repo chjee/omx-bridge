@@ -3,7 +3,7 @@
   "jobExecutionModes": ["exec", "tmux"],
   "executionErrorTypes": ["spawn_error", "timeout", "non_zero_exit", "cancelled", "execution_error", "invalid_cwd"],
   "tmuxSessionStatuses": ["starting", "running", "exited", "cancelled", "failed"],
-  "jobSources": ["dispatch", "channel", "synapse", "openclaw"],
+  "jobSources": ["dispatch", "channel", "openclaw"],
   "bridgeJob": {
     "id": "00000000-0000-4000-a000-000000000123",
     "prompt": "contract fixture prompt",
