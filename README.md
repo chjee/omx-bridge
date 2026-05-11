@@ -461,6 +461,16 @@ npm run build
 cd omx-dispatch && npm run build
 ```
 
+Run the public hygiene guard before public release or release-readiness changes:
+
+```bash
+npm run verify:public-hygiene
+```
+
+This checks tracked files for known local operator paths, live-looking hook
+session keys, and local OMX workflow artifacts that should not be part of the
+public source tree.
+
 Run the automated loopback runtime smoke:
 
 ```bash

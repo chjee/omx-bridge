@@ -74,6 +74,7 @@ Use the smallest meaningful subset while developing, then run the relevant
 full gate before claiming completion.
 
 - Documentation-only changes: `git diff --check`.
+- Public release or release-readiness changes: `npm run verify:public-hygiene`.
 - Standard code changes: `npm run verify`.
 - Runtime/API/dispatch/plugin/callback/tmux/job lifecycle changes:
   `npm run verify:runtime` after the relevant build/test gate.

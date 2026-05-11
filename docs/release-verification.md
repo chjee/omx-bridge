@@ -101,6 +101,8 @@ Deployment smoke should capture:
 
 A change is release-ready when:
 
+- `npm run verify:public-hygiene` has passed for public release or
+  release-readiness changes
 - required lane commands for the change type pass
 - any generated agent-surface sync has passed the manual harness-sync checklist
 - any operator-only live smoke failures are either fixed or explicitly classified as non-bridge local/model failures
