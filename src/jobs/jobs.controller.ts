@@ -13,7 +13,9 @@ import { CreateJobDto } from './dto/create-job.dto';
 import { JobCallbackDto } from './dto/job-callback.dto';
 import { ListJobsDto } from './dto/list-jobs.dto';
 import { JobsService } from './jobs.service';
+import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
+import { JsonContentTypeGuard } from './json-content-type.guard';
 
 @Controller('jobs')
 export class JobsController {
@@ -21,6 +23,7 @@ export class JobsController {
 
   @Post()
   @HttpCode(HttpStatus.ACCEPTED)
+  @UseGuards(ApiTokenGuard, JsonContentTypeGuard)
   async createJob(@Body() body: CreateJobDto): Promise<{ jobId: string; status: string }> {
     const job = await this.jobsService.createJob(body);
     return {
@@ -30,22 +33,43 @@ export class JobsController {
   }
 
   @Get()
+  @UseGuards(ApiTokenGuard)
   async listJobs(@Query() query: ListJobsDto) {
     return this.jobsService.listJobs(query.status);
   }
 
+  @Get('stats')
+  @UseGuards(ApiTokenGuard)
+  async getStats() {
+    return this.jobsService.getStats();
+  }
+
+  @Get(':id/session')
+  @UseGuards(ApiTokenGuard)
+  async getJobSession(@Param('id') id: string) {
+    return this.jobsService.getJobSessionOrThrow(id);
+  }
+
   @Get(':id')
+  @UseGuards(ApiTokenGuard)
   async getJob(@Param('id') id: string) {
     return this.jobsService.getJobOrThrow(id);
   }
 
   @Post(':id/callback')
-  @UseGuards(CallbackAuthGuard)  // Fix: 콜백 인증 — HMAC 서명 검증
+  @UseGuards(JsonContentTypeGuard, CallbackAuthGuard)
   async handleJobCallback(@Param('id') id: string, @Body() body: JobCallbackDto) {
     return this.jobsService.completeJobFromCallback(id, body);
   }
 
+  @Post(':id/notify/retry')
+  @UseGuards(ApiTokenGuard)
+  async retryNotify(@Param('id') id: string) {
+    return this.jobsService.triggerNotifyRetry(id);
+  }
+
   @Post(':id/cancel')
+  @UseGuards(ApiTokenGuard)
   async cancelJob(@Param('id') id: string) {
     return this.jobsService.cancelJob(id);
   }

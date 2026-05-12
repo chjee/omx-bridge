@@ -4,11 +4,15 @@ coverage/
 .DS_Store
 result.txt
 .env
+
+# OMX local runtime/workflow artifacts. Durable public decisions belong in docs/.
+.omx/cache/
+.omx/context/
+.omx/notepad.md
+.omx/plans/
 .omx/logs/
 .omx/state/
+.omx/tmp/
 .omx/metrics.json
 .omx/tmux-hook.json
 .codex
-
-
-can_write_test.txt

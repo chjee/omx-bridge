@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "./dist"
+  },
+  "include": [
+    "./bridge-client.ts",
+    "./index.ts",
+    "./job-operations.ts",
+    "./notification-store.ts",
+    "./runtime-config.ts",
+    "./tool-handlers.ts",
+    "./webhook-codec.ts",
+    "./webhook-server.ts"
+  ]
+}

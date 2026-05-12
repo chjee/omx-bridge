@@ -7,4 +7,4 @@
   - 존 노트북에도 pnpm 설치 필요
 
 ## 📋 기타
-- [ ] omx-bridge-plugin bridgeUrl을 3992로 openclaw 설정 업데이트 확인
+- [x] omx-bridge-plugin bridgeUrl을 3992로 openclaw 설정 업데이트 확인

@@ -6,8 +6,16 @@ import { JobQueueRepository } from './job-queue.repository';
 import { JobRunnerService } from './job-runner.service';
 import { JobsService } from './jobs.service';
 import { defaultSpawn, OMX_SPAWN, OmxExecService } from './omx-exec.service';
+import { ApiTokenGuard } from './api-token.guard';
 import { CallbackAuthGuard } from './callback-auth.guard';
-import { TelegramNotifyService } from './telegram-notify.service';
+import { JsonContentTypeGuard } from './json-content-type.guard';
+import { JobNotifyService } from './job-notify.service';
+import { BridgeInstanceLockService } from './bridge-instance-lock.service';
+import {
+  defaultTmuxSpawn,
+  TMUX_SPAWN,
+  TmuxSessionRunnerService,
+} from './tmux-session-runner.service';
 
 @Module({
   controllers: [JobsController],
@@ -21,12 +29,20 @@ import { TelegramNotifyService } from './telegram-notify.service';
       provide: OMX_SPAWN,
       useValue: defaultSpawn,
     },
+    {
+      provide: TMUX_SPAWN,
+      useValue: defaultTmuxSpawn,
+    },
     JobQueueRepository,
     JobsService,
     OmxExecService,
+    TmuxSessionRunnerService,
     JobRunnerService,
+    BridgeInstanceLockService,
+    ApiTokenGuard,
     CallbackAuthGuard,
-    TelegramNotifyService,
+    JsonContentTypeGuard,
+    JobNotifyService,
   ],
 })
 export class JobsModule {}

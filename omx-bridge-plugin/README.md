@@ -6,6 +6,7 @@ OpenClaw plugin that exposes the local `omx-bridge` NestJS service as agent tool
 
 - `omx_submit_job`
 - `omx_get_job`
+- `omx_get_job_session`
 - `omx_list_jobs`
 - `omx_cancel_job`
 
@@ -21,7 +22,7 @@ OpenClaw plugin that exposes the local `omx-bridge` NestJS service as agent tool
 2. Install dependencies inside the plugin directory:
 
 ```bash
-npm install
+npm ci
 ```
 
 3. Enable the plugin in your OpenClaw config:
@@ -31,14 +32,14 @@ npm install
   "plugins": {
     "load": {
       "paths": [
-        "/home/chjee/workspace/omx-bridge/omx-bridge-plugin"
+        "/path/to/omx-bridge/omx-bridge-plugin"
       ]
     },
     "entries": {
       "omx-bridge-plugin": {
         "enabled": true,
         "config": {
-          "bridgeUrl": "http://localhost:3000"
+          "bridgeUrl": "http://localhost:3992"
         }
       }
     }
@@ -68,6 +69,7 @@ If your OpenClaw tool policy uses allowlists, allow either the whole plugin id o
             "omx-bridge-plugin",
             "omx_submit_job",
             "omx_get_job",
+            "omx_get_job_session",
             "omx_list_jobs",
             "omx_cancel_job"
           ]
@@ -80,14 +82,18 @@ If your OpenClaw tool policy uses allowlists, allow either the whole plugin id o
 
 ## Configuration
 
-The plugin accepts one config field:
+The plugin accepts these config fields:
 
-- `bridgeUrl`: Base URL for the bridge service. Default: `http://localhost:3000`
+- `bridgeUrl`: Base URL for the bridge service. Default: `http://localhost:3992`
+- `callbackSecret`: HMAC secret for signing callback requests. Must match `BRIDGE_CALLBACK_SECRET` unless the bridge explicitly runs insecure loopback mode.
+- `apiToken`: Bearer token for non-callback bridge routes. Must match `BRIDGE_API_TOKEN` unless the bridge explicitly runs insecure loopback mode.
+- `requestTimeoutMs`: Timeout in milliseconds for each bridge HTTP request. Default: `10000`
 
 ## Bridge API mapping
 
 - `omx_submit_job` -> `POST /jobs`
 - `omx_get_job` -> `GET /jobs/:id`
+- `omx_get_job_session` -> `GET /jobs/:id/session`
 - `omx_list_jobs` -> `GET /jobs?status=...`
 - `omx_cancel_job` -> `POST /jobs/:id/cancel`
 
@@ -95,3 +101,5 @@ The plugin accepts one config field:
 
 - OpenClaw can load TypeScript extension entries directly from `openclaw.extensions`.
 - The plugin also ships `openclaw.plugin.json`, which current native plugin discovery uses for config validation.
+- Dependencies are pinned with `package-lock.json`; use `npm install` only when
+  intentionally updating the locked OpenClaw SDK version.

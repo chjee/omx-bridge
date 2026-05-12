@@ -3,11 +3,27 @@ import { Type, type Static } from "@sinclair/typebox";
 import {
   definePluginEntry,
   type OpenClawPluginApi,
+  type OpenClawPluginConfigSchema,
 } from "openclaw/plugin-sdk/plugin-entry";
 
 const PLUGIN_ID = "omx-bridge-plugin";
-const DEFAULT_BRIDGE_URL = "http://localhost:3000";
-const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+const DEFAULT_BRIDGE_URL = "http://localhost:3992";
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+export const JOB_STATUS_VALUES = ["queued", "running", "succeeded", "failed", "cancelled"] as const;
+export const JOB_EXECUTION_MODE_VALUES = ["exec", "tmux"] as const;
+export const BRIDGE_EXECUTION_ERROR_TYPES = [
+  "spawn_error",
+  "timeout",
+  "non_zero_exit",
+  "cancelled",
+  "execution_error",
+  "invalid_cwd",
+] as const;
+export const TMUX_SESSION_STATUS_VALUES = ["starting", "running", "exited", "cancelled", "failed"] as const;
+export const JOB_SOURCE_VALUES = ["dispatch", "channel", "openclaw"] as const;
+export const NOTIFY_MODE_VALUES = ["openclaw", "claude"] as const;
+export const NOTIFY_TRIGGER_VALUES = ["auto", "manual"] as const;
+export const NOTIFY_CHANNEL_STATUS_VALUES = ["ok", "failed", "skipped"] as const;
 
 const pluginConfigSchema = Type.Object(
   {
@@ -19,7 +35,19 @@ const pluginConfigSchema = Type.Object(
     ),
     callbackSecret: Type.Optional(
       Type.String({
-        description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET on the server.",
+        description: "HMAC-SHA256 secret for signing callback requests. Must match BRIDGE_CALLBACK_SECRET unless the server explicitly runs insecure loopback mode.",
+      }),
+    ),
+    apiToken: Type.Optional(
+      Type.String({
+        description: "Bearer token for non-callback bridge routes (POST /jobs etc.). Must match BRIDGE_API_TOKEN unless the server explicitly runs insecure loopback mode.",
+      }),
+    ),
+    requestTimeoutMs: Type.Optional(
+      Type.Number({
+        minimum: 1,
+        default: DEFAULT_REQUEST_TIMEOUT_MS,
+        description: "Timeout in milliseconds for each omx-bridge HTTP request.",
       }),
     ),
   },
@@ -28,6 +56,10 @@ const pluginConfigSchema = Type.Object(
   },
 );
 
+const openClawConfigSchema: OpenClawPluginConfigSchema = {
+  jsonSchema: pluginConfigSchema as OpenClawPluginConfigSchema["jsonSchema"],
+};
+
 const submitJobParameters = Type.Object(
   {
     prompt: Type.String({
@@ -35,10 +67,40 @@ const submitJobParameters = Type.Object(
       maxLength: 4000,
       description: "Prompt to submit to the omx-bridge service.",
     }),
+    executionMode: Type.Optional(
+      Type.Union(
+        JOB_EXECUTION_MODE_VALUES.map((mode) => Type.Literal(mode)),
+        { description: "Execution backend. Defaults to exec; use tmux for long-running session-backed jobs." },
+      ),
+    ),
+    cwd: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Working directory for the job. Must be an absolute path when provided.",
+      }),
+    ),
     requestId: Type.Optional(
       Type.String({
         maxLength: 200,
         description: "Optional request correlation identifier.",
+      }),
+    ),
+    originRoutingKey: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Conversation key to preserve for correlation. For OpenClaw jobs, this is correlation-only; callback ownership is controlled by notifyUrl.",
+      }),
+    ),
+    notifyUrl: Type.Optional(
+      Type.String({
+        maxLength: 500,
+        description: "Loopback webhook URL to receive job completion callbacks.",
+      }),
+    ),
+    sourceName: Type.Optional(
+      Type.String({
+        maxLength: 200,
+        description: "Optional concrete OpenClaw integration name for routing diagnostics.",
       }),
     ),
     metadata: Type.Optional(
@@ -93,15 +155,51 @@ interface BridgeJobExecution {
   durationMs?: number;
   timedOut?: boolean;
   outputTruncated?: boolean;
-  errorType?: "spawn_error" | "timeout" | "non_zero_exit" | "cancelled";
+  errorType?: (typeof BRIDGE_EXECUTION_ERROR_TYPES)[number];
   recoveredFromRestart?: boolean;
+}
+
+interface TmuxSessionState {
+  backend: "tmux";
+  sessionName: string;
+  status: (typeof TMUX_SESSION_STATUS_VALUES)[number];
+  createdAt: string;
+  updatedAt: string;
+  attachCommand: string;
+  cwd?: string;
+  lastExitCode?: number | null;
+}
+
+interface NotifyChannelResult {
+  status: (typeof NOTIFY_CHANNEL_STATUS_VALUES)[number];
+  error?: string;
+  httpStatus?: number;
+  attempts?: number;
+  skippedReason?: string;
+}
+
+interface NotifyOutcome {
+  attemptedAt: string;
+  mode: (typeof NOTIFY_MODE_VALUES)[number];
+  trigger?: (typeof NOTIFY_TRIGGER_VALUES)[number];
+  attemptIndex?: number;
+  claudeWebhook?: NotifyChannelResult;
+  openclaw?: NotifyChannelResult;
+  telegram?: NotifyChannelResult;
 }
 
 interface BridgeJob {
   id: string;
   prompt: string;
+  executionMode?: (typeof JOB_EXECUTION_MODE_VALUES)[number];
+  cwd?: string;
+  originRoutingKey?: string;
+  source?: (typeof JOB_SOURCE_VALUES)[number];
+  sourceName?: string;
+  notifyUrl?: string;
   queueOrder: string;
   requestId?: string;
+  requestFingerprint?: string;
   metadata?: Record<string, unknown>;
   status: (typeof JOB_STATUS_VALUES)[number];
   createdAt: string;
@@ -111,6 +209,17 @@ interface BridgeJob {
   stdout: string;
   stderr: string;
   execution: BridgeJobExecution;
+  session?: TmuxSessionState;
+  notifyOutcome?: NotifyOutcome;
+  notifyHistory?: NotifyOutcome[];
+}
+
+interface BridgeJobSession {
+  jobId: string;
+  jobStatus: BridgeJob["status"];
+  executionMode: (typeof JOB_EXECUTION_MODE_VALUES)[number];
+  attachCommand: string | null;
+  session: TmuxSessionState | null;
 }
 
 interface CreateJobResponse {
@@ -129,6 +238,13 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
     return { bridgeUrl: DEFAULT_BRIDGE_URL };
   }
 
+  const requestTimeoutMs =
+    typeof pluginConfig.requestTimeoutMs === "number" &&
+    Number.isFinite(pluginConfig.requestTimeoutMs) &&
+    pluginConfig.requestTimeoutMs > 0
+      ? Math.floor(pluginConfig.requestTimeoutMs)
+      : DEFAULT_REQUEST_TIMEOUT_MS;
+
   return {
     bridgeUrl:
       typeof pluginConfig.bridgeUrl === "string" && pluginConfig.bridgeUrl.length > 0
@@ -138,21 +254,39 @@ function getPluginConfig(api: OpenClawPluginApi): PluginConfig {
       typeof pluginConfig.callbackSecret === "string" && pluginConfig.callbackSecret.length > 0
         ? pluginConfig.callbackSecret
         : undefined,
+    apiToken:
+      typeof pluginConfig.apiToken === "string" && pluginConfig.apiToken.length > 0
+        ? pluginConfig.apiToken
+        : undefined,
+    requestTimeoutMs,
   };
 }
 
 /**
- * 콜백 요청에 붙일 HMAC-SHA256 서명 헤더를 생성합니다.
- * 서버의 CallbackAuthGuard와 동일한 방식:
- *   HMAC-SHA256(key=callbackSecret, message=`${jobId}:${JSON.stringify(body)}`)
- *   헤더: X-Callback-Signature: sha256=<hex>
+ * Callback signature protocol — MIRRORS src/jobs/callback-signature.ts.
+ *
+ * All three implementations must stay byte-for-byte equivalent:
+ *   - src/jobs/callback-signature.ts        (server, source of truth)
+ *   - omx-dispatch/index.ts
+ *   - omx-bridge-plugin/index.ts            (this file)
+ *
+ * Protocol contract:
+ *   header  = X-Callback-Signature
+ *   value   = "sha256=" + hex(HMAC_SHA256(secret, jobId + ":" + body))
+ *
+ * Note: this plugin is sender-only. The body is JSON.stringify()-ed at the
+ * call site and that exact string is both signed here AND sent as the HTTP
+ * body. The receiver verifies against raw bytes, so don't re-stringify.
+ *
+ * If you change anything here, update the other two and the vectors in
+ * test/unit/callback-signature.spec.ts in the same change.
  */
 function buildCallbackSignatureHeader(
   secret: string,
   jobId: string,
-  body: unknown,
+  body: string,
 ): string {
-  const message = `${jobId}:${JSON.stringify(body)}`;
+  const message = `${jobId}:${body}`;
   const hex = createHmac("sha256", secret).update(message).digest("hex");
   return `sha256=${hex}`;
 }
@@ -166,21 +300,45 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
+async function fetchWithTimeout(
+  url: URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 async function requestJson<T>(
   api: OpenClawPluginApi,
   path: string,
   init?: RequestInit,
   signatureHeader?: string,
 ): Promise<T> {
-  const response = await fetch(buildBridgeUrl(api, path), {
+  const pluginConfig = getPluginConfig(api);
+  const response = await fetchWithTimeout(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(pluginConfig.apiToken ? { Authorization: `Bearer ${pluginConfig.apiToken}` } : {}),
       ...(signatureHeader ? { "X-Callback-Signature": signatureHeader } : {}),
       ...(init?.headers ?? {}),
     },
-  });
+  }, pluginConfig.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
   const text = await response.text();
   const data = text.length > 0 ? safeJsonParse(text) : null;
@@ -202,6 +360,15 @@ function safeJsonParse(value: string): unknown {
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
 function toTextResult(payload: unknown) {
   return {
     content: [
@@ -210,6 +377,7 @@ function toTextResult(payload: unknown) {
         text: JSON.stringify(payload, null, 2),
       },
     ],
+    details: payload,
   };
 }
 
@@ -217,19 +385,27 @@ export default definePluginEntry({
   id: PLUGIN_ID,
   name: "OMX Bridge Plugin",
   description: "Agent tools for submitting, inspecting, listing, and cancelling jobs on omx-bridge.",
-  configSchema: pluginConfigSchema,
+  configSchema: openClawConfigSchema,
   register(api: OpenClawPluginApi) {
     api.registerTool({
       name: "omx_submit_job",
+      label: "Submit OMX Job",
       description: "Submit a new prompt to the local omx-bridge service and return the assigned job id.",
       parameters: submitJobParameters,
-      async execute(_id: string, params: SubmitJobParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as SubmitJobParameters;
         const result = await requestJson<CreateJobResponse>(api, "jobs", {
           method: "POST",
           body: JSON.stringify({
-            prompt: params.prompt,
-            ...(params.requestId ? { requestId: params.requestId } : {}),
-            ...(params.metadata ? { metadata: params.metadata } : {}),
+            prompt: input.prompt,
+            source: "openclaw",
+            ...(input.executionMode ? { executionMode: input.executionMode } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+            ...(input.requestId ? { requestId: input.requestId } : {}),
+            ...(input.originRoutingKey ? { originRoutingKey: input.originRoutingKey } : {}),
+            ...(input.notifyUrl ? { notifyUrl: input.notifyUrl } : {}),
+            ...(input.sourceName ? { sourceName: input.sourceName } : {}),
+            ...(input.metadata ? { metadata: input.metadata } : {}),
           }),
         });
 
@@ -239,10 +415,12 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_get_job",
+      label: "Get OMX Job",
       description: "Fetch the full status and result payload for a specific omx-bridge job.",
       parameters: jobIdParameters,
-      async execute(_id: string, params: JobIdParameters) {
-        const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(params.jobId)}`, {
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
+        const result = await requestJson<BridgeJob>(api, `jobs/${encodeURIComponent(input.jobId)}`, {
           method: "GET",
         });
 
@@ -251,13 +429,34 @@ export default definePluginEntry({
     });
 
     api.registerTool({
+      name: "omx_get_job_session",
+      label: "Get OMX Job Session",
+      description: "Fetch compact tmux session status and attach command details for a specific omx-bridge job.",
+      parameters: jobIdParameters,
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
+        const result = await requestJson<BridgeJobSession>(
+          api,
+          `jobs/${encodeURIComponent(input.jobId)}/session`,
+          {
+            method: "GET",
+          },
+        );
+
+        return toTextResult(result);
+      },
+    });
+
+    api.registerTool({
       name: "omx_list_jobs",
+      label: "List OMX Jobs",
       description: "List omx-bridge jobs, optionally filtered by job status.",
       parameters: listJobsParameters,
-      async execute(_id: string, params: ListJobsParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as ListJobsParameters;
         const search = new URLSearchParams();
-        if (params.status) {
-          search.set("status", params.status);
+        if (input.status) {
+          search.set("status", input.status);
         }
 
         const suffix = search.size > 0 ? `?${search.toString()}` : "";
@@ -271,12 +470,14 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_cancel_job",
+      label: "Cancel OMX Job",
       description: "Cancel a queued or running omx-bridge job and return the updated job record.",
       parameters: jobIdParameters,
-      async execute(_id: string, params: JobIdParameters) {
+      async execute(_id: string, params: unknown) {
+        const input = params as JobIdParameters;
         const result = await requestJson<BridgeJob>(
           api,
-          `jobs/${encodeURIComponent(params.jobId)}/cancel`,
+          `jobs/${encodeURIComponent(input.jobId)}/cancel`,
           {
             method: "POST",
           },
@@ -288,6 +489,7 @@ export default definePluginEntry({
 
     api.registerTool({
       name: "omx_callback_job",
+      label: "Callback OMX Job",
       description: "Send a callback to mark an omx-bridge job as completed (used by external processes). Automatically signs the request with X-Callback-Signature when callbackSecret is configured.",
       parameters: Type.Object(
         {
@@ -302,26 +504,29 @@ export default definePluginEntry({
         },
         { additionalProperties: false },
       ),
-      async execute(_id: string, params: { jobId: string; status: string; stdout?: string; stderr?: string; exitCode?: number | null }) {
+      async execute(_id: string, params: unknown) {
+        const input = params as { jobId: string; status: string; stdout?: string; stderr?: string; exitCode?: number | null };
         const body = {
-          status: params.status,
-          ...(params.stdout !== undefined ? { stdout: params.stdout } : {}),
-          ...(params.stderr !== undefined ? { stderr: params.stderr } : {}),
-          ...(params.exitCode !== undefined ? { exitCode: params.exitCode } : {}),
+          status: input.status,
+          ...(input.stdout !== undefined ? { stdout: input.stdout } : {}),
+          ...(input.stderr !== undefined ? { stderr: input.stderr } : {}),
+          ...(input.exitCode !== undefined ? { exitCode: input.exitCode } : {}),
         };
+        // Stringify once; sign and send the SAME bytes so the receiver's
+        // raw-body HMAC verification cannot drift on key reordering.
+        const bodyText = JSON.stringify(body);
 
-        // 콜백시크릿이 설정된 경우 HMAC 서명 헤더 생성
         const config = getPluginConfig(api);
         const signatureHeader = config.callbackSecret
-          ? buildCallbackSignatureHeader(config.callbackSecret, params.jobId, body)
+          ? buildCallbackSignatureHeader(config.callbackSecret, input.jobId, bodyText)
           : undefined;
 
         const result = await requestJson<BridgeJob>(
           api,
-          `jobs/${encodeURIComponent(params.jobId)}/callback`,
+          `jobs/${encodeURIComponent(input.jobId)}/callback`,
           {
             method: "POST",
-            body: JSON.stringify(body),
+            body: bodyText,
           },
           signatureHeader,
         );

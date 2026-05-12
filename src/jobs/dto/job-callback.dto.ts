@@ -1,9 +1,33 @@
-import { IsIn, IsInt, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
-import { JOB_STATUSES, type TerminalJobStatus } from '../job.types';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  EXECUTION_ERROR_TYPES,
+  JOB_STATUSES,
+  type JobExecutionMetadata,
+  type TerminalJobStatus,
+} from '../job.types';
 
 const TERMINAL_JOB_STATUSES = JOB_STATUSES.filter(
   (status): status is TerminalJobStatus => status !== 'queued' && status !== 'running',
 );
+
+export class JobCallbackExecutionDto {
+  @IsOptional()
+  @IsInt()
+  durationMs?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  timedOut?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  outputTruncated?: boolean;
+
+  @IsOptional()
+  @IsIn(EXECUTION_ERROR_TYPES)
+  errorType?: JobExecutionMetadata['errorType'];
+}
 
 export class JobCallbackDto {
   @IsIn(TERMINAL_JOB_STATUSES)
@@ -24,6 +48,7 @@ export class JobCallbackDto {
   exitCode?: number | null;
 
   @IsOptional()
-  @IsObject()
-  execution?: Record<string, unknown>;
+  @ValidateNested()
+  @Type(() => JobCallbackExecutionDto)
+  execution?: JobCallbackExecutionDto;
 }

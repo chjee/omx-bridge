@@ -3,7 +3,32 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
-import type { BridgeJob, JobStatus } from './job.types';
+import {
+  EXECUTION_ERROR_TYPES,
+  JOB_SOURCE_VALUES,
+  JOB_EXECUTION_MODES,
+  JOB_STATUSES,
+  NOTIFY_CHANNEL_STATUSES,
+  NOTIFY_MODE_VALUES,
+  NOTIFY_TRIGGER_VALUES,
+  TMUX_SESSION_STATUSES,
+  type BridgeJob,
+  type JobStatus,
+} from './job.types';
+
+const TERMINAL_STATUSES = new Set<JobStatus>(['succeeded', 'failed', 'cancelled']);
+const INVALID_JOBS_DIRECTORY = 'invalid';
+
+export interface CleanupTerminalJobsOptions {
+  retentionDays: number;
+  maxTerminalJobs: number;
+  now?: Date;
+}
+
+export interface CleanupTerminalJobsResult {
+  deleted: number;
+  retained: number;
+}
 
 @Injectable()
 export class JobQueueRepository {
@@ -17,20 +42,16 @@ export class JobQueueRepository {
     await fs.mkdir(this.config.jobsDirectory, { recursive: true });
   }
 
-  async create(job: BridgeJob): Promise<BridgeJob> {
-    await this.writeJob(job);
-    return job;
-  }
-
   async save(job: BridgeJob): Promise<BridgeJob> {
     await this.writeJob(job);
     return job;
   }
 
   async getById(id: string): Promise<BridgeJob | null> {
+    const jobPath = this.jobPath(id);
     try {
-      const raw = await fs.readFile(this.jobPath(id), 'utf8');
-      return this.parseJob(raw, id);
+      const raw = await fs.readFile(jobPath, 'utf8');
+      return await this.parseJob(raw, id, jobPath);
     } catch (error) {
       if (this.isMissingFile(error)) {
         return null;
@@ -47,9 +68,10 @@ export class JobQueueRepository {
         .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
         .map(async (entry) => {
           const jobId = entry.name.replace(/\.json$/, '');
+          const filePath = path.join(this.config.jobsDirectory, entry.name);
           try {
-            const raw = await fs.readFile(this.jobPath(jobId), 'utf8');
-            return this.parseJob(raw, jobId);
+            const raw = await fs.readFile(filePath, 'utf8');
+            return await this.parseJob(raw, jobId, filePath);
           } catch (error) {
             this.logger.warn(
               `Skipping unreadable job file ${entry.name}: ${this.describeError(error)}`,
@@ -81,8 +103,45 @@ export class JobQueueRepository {
     return jobs.filter((job) => job.status === status);
   }
 
+  async countActive(): Promise<number> {
+    const jobs = await this.listAll();
+    return jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+  }
+
+  async cleanupTerminalJobs(
+    options: CleanupTerminalJobsOptions,
+  ): Promise<CleanupTerminalJobsResult> {
+    const now = options.now ?? new Date();
+    const cutoffMs = now.getTime() - options.retentionDays * 24 * 60 * 60 * 1000;
+    const terminalJobs = (await this.listAll())
+      .filter((job) => TERMINAL_STATUSES.has(job.status))
+      .sort((left, right) => this.terminalSortKey(left).localeCompare(this.terminalSortKey(right)));
+
+    const deleteIds = new Set<string>();
+    for (const job of terminalJobs) {
+      const terminalAtMs = this.terminalTimestampMs(job);
+      if (Number.isFinite(terminalAtMs) && terminalAtMs < cutoffMs) {
+        deleteIds.add(job.id);
+      }
+    }
+
+    const remainingAfterAge = terminalJobs.filter((job) => !deleteIds.has(job.id));
+    const overflow = Math.max(0, remainingAfterAge.length - options.maxTerminalJobs);
+    for (const job of remainingAfterAge.slice(0, overflow)) {
+      deleteIds.add(job.id);
+    }
+
+    for (const id of deleteIds) {
+      await fs.rm(this.jobPath(id), { force: true });
+    }
+
+    return {
+      deleted: deleteIds.size,
+      retained: terminalJobs.length - deleteIds.size,
+    };
+  }
+
   private jobPath(id: string): string {
-    // Fix: Path Traversal — UUID 포맷 검증으로 디렉터리 탈출 방지
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new BadRequestException(`Invalid job id: ${id}`);
     }
@@ -92,20 +151,61 @@ export class JobQueueRepository {
   private async writeJob(job: BridgeJob): Promise<void> {
     await this.ensureReady();
     const targetPath = this.jobPath(job.id);
-    // Fix: tmp 파일 레이스 — 랜덤 suffix로 동시 쓰기 충돌 방지
     const tempPath = `${targetPath}.${randomUUID()}.tmp`;
     await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
     await fs.rename(tempPath, targetPath);
   }
 
-  private parseJob(raw: string, jobId: string): BridgeJob | null {
+  private async parseJob(raw: string, jobId: string, filePath: string): Promise<BridgeJob | null> {
     try {
-      return JSON.parse(raw) as BridgeJob;
+      const parsed = this.normalizeLegacyJobSource(JSON.parse(raw) as unknown);
+      if (!this.isBridgeJob(parsed, jobId)) {
+        this.logger.warn(`Skipping invalid job file for ${jobId}`);
+        await this.quarantineInvalidJobFile(filePath, jobId, 'invalid');
+        return null;
+      }
+      return parsed;
     } catch (error) {
       this.logger.warn(
         `Skipping malformed job file for ${jobId}: ${this.describeError(error)}`,
       );
+      await this.quarantineInvalidJobFile(filePath, jobId, 'malformed');
       return null;
+    }
+  }
+
+  private normalizeLegacyJobSource(value: unknown): unknown {
+    if (!this.isRecord(value) || value.source !== 'synapse') {
+      return value;
+    }
+
+    return {
+      ...value,
+      source: 'channel',
+      sourceName: typeof value.sourceName === 'string' ? value.sourceName : 'claude-synapse',
+    };
+  }
+
+  private async quarantineInvalidJobFile(
+    filePath: string,
+    jobId: string,
+    reason: 'invalid' | 'malformed',
+  ): Promise<void> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const quarantineDir = path.join(this.config.jobsDirectory, INVALID_JOBS_DIRECTORY);
+    const quarantinePath = path.join(quarantineDir, `${jobId}.${reason}.${stamp}.json`);
+
+    try {
+      await fs.mkdir(quarantineDir, { recursive: true });
+      await fs.rename(filePath, quarantinePath);
+      this.logger.warn(`Quarantined ${reason} job file for ${jobId} at ${quarantinePath}`);
+    } catch (error) {
+      if (this.isMissingFile(error)) {
+        return;
+      }
+      this.logger.warn(
+        `Failed to quarantine ${reason} job file for ${jobId}: ${this.describeError(error)}`,
+      );
     }
   }
 
@@ -120,5 +220,122 @@ export class JobQueueRepository {
 
   private describeError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private terminalSortKey(job: BridgeJob): string {
+    return `${job.finishedAt || job.createdAt}:${job.queueOrder ?? ''}:${job.id}`;
+  }
+
+  private terminalTimestampMs(job: BridgeJob): number {
+    return Date.parse(job.finishedAt || job.createdAt);
+  }
+
+  private isBridgeJob(value: unknown, jobId: string): value is BridgeJob {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    const execution = value.execution;
+    return (
+      value.id === jobId &&
+      typeof value.prompt === 'string' &&
+      (value.executionMode === undefined || this.isOneOf(value.executionMode, JOB_EXECUTION_MODES)) &&
+      (value.queueOrder === undefined || typeof value.queueOrder === 'string') &&
+      (value.cwd === undefined || typeof value.cwd === 'string') &&
+      (value.requestId === undefined || typeof value.requestId === 'string') &&
+      (value.requestFingerprint === undefined || typeof value.requestFingerprint === 'string') &&
+      (value.originRoutingKey === undefined || typeof value.originRoutingKey === 'string') &&
+      (value.source === undefined || this.isOneOf(value.source, JOB_SOURCE_VALUES)) &&
+      (value.sourceName === undefined || typeof value.sourceName === 'string') &&
+      (value.metadata === undefined || this.isRecord(value.metadata)) &&
+      (value.notifyUrl === undefined || typeof value.notifyUrl === 'string') &&
+      typeof value.createdAt === 'string' &&
+      (value.startedAt === undefined || typeof value.startedAt === 'string') &&
+      (value.finishedAt === undefined || typeof value.finishedAt === 'string') &&
+      (value.exitCode === undefined || value.exitCode === null || typeof value.exitCode === 'number') &&
+      typeof value.stdout === 'string' &&
+      typeof value.stderr === 'string' &&
+      typeof value.status === 'string' &&
+      JOB_STATUSES.includes(value.status as JobStatus) &&
+      this.isExecutionMetadata(execution) &&
+      (value.session === undefined || this.isTmuxSessionState(value.session)) &&
+      (value.notifyOutcome === undefined || this.isNotifyOutcome(value.notifyOutcome)) &&
+      (
+        value.notifyHistory === undefined ||
+        (Array.isArray(value.notifyHistory) && value.notifyHistory.every((entry) => this.isNotifyOutcome(entry)))
+      )
+    );
+  }
+
+  private isExecutionMetadata(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      typeof value.command === 'string' &&
+      typeof value.timeoutMs === 'number' &&
+      typeof value.maxOutputChars === 'number' &&
+      (value.durationMs === undefined || typeof value.durationMs === 'number') &&
+      (value.timedOut === undefined || typeof value.timedOut === 'boolean') &&
+      (value.outputTruncated === undefined || typeof value.outputTruncated === 'boolean') &&
+      (value.errorType === undefined || this.isOneOf(value.errorType, EXECUTION_ERROR_TYPES)) &&
+      (value.recoveredFromRestart === undefined || typeof value.recoveredFromRestart === 'boolean')
+    );
+  }
+
+  private isTmuxSessionState(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      value.backend === 'tmux' &&
+      typeof value.sessionName === 'string' &&
+      this.isOneOf(value.status, TMUX_SESSION_STATUSES) &&
+      typeof value.createdAt === 'string' &&
+      typeof value.updatedAt === 'string' &&
+      typeof value.attachCommand === 'string' &&
+      (value.cwd === undefined || typeof value.cwd === 'string') &&
+      (value.lastExitCode === undefined || value.lastExitCode === null || typeof value.lastExitCode === 'number')
+    );
+  }
+
+  private isNotifyOutcome(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      typeof value.attemptedAt === 'string' &&
+      this.isOneOf(value.mode, NOTIFY_MODE_VALUES) &&
+      (value.trigger === undefined || this.isOneOf(value.trigger, NOTIFY_TRIGGER_VALUES)) &&
+      (value.attemptIndex === undefined || typeof value.attemptIndex === 'number') &&
+      (value.claudeWebhook === undefined || this.isNotifyChannelResult(value.claudeWebhook)) &&
+      (value.openclaw === undefined || this.isNotifyChannelResult(value.openclaw)) &&
+      (value.telegram === undefined || this.isNotifyChannelResult(value.telegram))
+    );
+  }
+
+  private isNotifyChannelResult(value: unknown): boolean {
+    if (!this.isRecord(value)) {
+      return false;
+    }
+
+    return (
+      this.isOneOf(value.status, NOTIFY_CHANNEL_STATUSES) &&
+      (value.error === undefined || typeof value.error === 'string') &&
+      (value.httpStatus === undefined || typeof value.httpStatus === 'number') &&
+      (value.attempts === undefined || typeof value.attempts === 'number') &&
+      (value.skippedReason === undefined || typeof value.skippedReason === 'string')
+    );
+  }
+
+  private isOneOf<const T extends readonly unknown[]>(value: unknown, values: T): value is T[number] {
+    return values.includes(value);
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 }
