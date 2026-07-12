@@ -63,6 +63,8 @@ describe('JobQueueRepository', () => {
     repository = new JobQueueRepository(config);
   });
 
+  afterEach(() => jest.restoreAllMocks());
+
   it('creates the queue directory if missing', async () => {
     await fs.rm(jobsDirectory, { recursive: true, force: true });
 
@@ -79,6 +81,56 @@ describe('JobQueueRepository', () => {
     const jobPath = path.join(jobsDirectory, `${job.id}.json`);
     await expect(fs.stat(jobPath)).resolves.toBeDefined();
     await expect(repository.getById(job.id)).resolves.toEqual(job);
+  });
+
+  it('serializes conditional transitions per job so the first durable terminal write wins', async () => {
+    const job = createJob({ status: 'running' });
+    await repository.save(job);
+    const originalRename = fs.rename.bind(fs);
+    let entered!: () => void;
+    let release!: () => void;
+    const atRename = new Promise<void>((resolve) => { entered = resolve; });
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    let blocked = false;
+    jest.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+      if (!blocked) {
+        blocked = true;
+        entered();
+        await barrier;
+      }
+      return originalRename(from, to);
+    });
+
+    const winner = repository.transition(job.id, ['running'], (current) => ({ ...current, status: 'succeeded' }));
+    await atRename;
+    const loser = repository.transition(job.id, ['running'], (current) => ({ ...current, status: 'failed' }));
+    release();
+
+    await expect(winner).resolves.toMatchObject({ transitioned: true, job: { status: 'succeeded' } });
+    await expect(loser).resolves.toMatchObject({ transitioned: false, job: { status: 'succeeded' } });
+  });
+
+  it('removes its owned temp file after rename failure and preserves the primary error', async () => {
+    const job = createJob();
+    const failure = Object.assign(new Error('rename failed'), { code: 'EIO' });
+    jest.spyOn(fs, 'rename').mockRejectedValueOnce(failure);
+
+    await expect(repository.save(job)).rejects.toBe(failure);
+    expect((await fs.readdir(jobsDirectory)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    await expect(repository.getById(job.id)).resolves.toBeNull();
+  });
+
+  it('removes its owned temp file after a partial write failure', async () => {
+    const job = createJob();
+    const originalWrite = fs.writeFile.bind(fs);
+    const failure = Object.assign(new Error('write failed'), { code: 'ENOSPC' });
+    jest.spyOn(fs, 'writeFile').mockImplementationOnce(async (file, data, options) => {
+      await originalWrite(file, data, options);
+      throw failure;
+    });
+
+    await expect(repository.save(job)).rejects.toBe(failure);
+    expect((await fs.readdir(jobsDirectory)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('updates status fields without dropping existing fields', async () => {

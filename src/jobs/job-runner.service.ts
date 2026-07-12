@@ -80,19 +80,19 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
       }
-      await this.repository.save({
-        ...job,
+      await this.repository.transition(job.id, ['running'], (current) => ({
+        ...current,
         status: 'failed',
         finishedAt: new Date().toISOString(),
         exitCode: null,
         stdout: '',
-        stderr: job.stderr ? `${job.stderr}\n${RESTART_INTERRUPTED_MESSAGE}` : RESTART_INTERRUPTED_MESSAGE,
+        stderr: current.stderr ? `${current.stderr}\n${RESTART_INTERRUPTED_MESSAGE}` : RESTART_INTERRUPTED_MESSAGE,
         execution: {
-          ...job.execution,
+          ...current.execution,
           errorType: 'execution_error',
           recoveredFromRestart: true,
         },
-      });
+      }));
     }
   }
 
@@ -156,7 +156,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (job?.executionMode === 'tmux' && job.session) {
       const session = await this.tmuxSessionRunner?.cancel(job);
       if (session) {
-        await this.repository.save({ ...job, session });
+        await this.repository.transition(jobId, ['running'], (current) => ({ ...current, session }));
       }
       return Boolean(session);
     }
@@ -208,8 +208,17 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       if (!candidate) {
         return null;
       }
+      const claimed = await this.repository.transition(candidate.id, ['queued'], (current) => ({
+        ...current,
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        finishedAt: undefined,
+        stdout: '',
+        stderr: '',
+      }));
+      if (!claimed.transitioned || !claimed.job) return null;
       this.inFlight.add(candidate.id);
-      return candidate;
+      return claimed.job;
     } finally {
       release();
     }
@@ -225,7 +234,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   private async executeJob(job: BridgeJob): Promise<void> {
     const currentJob = await this.repository.getById(job.id);
-    if (!currentJob || currentJob.status !== 'queued') {
+    if (!currentJob || currentJob.status !== 'running') {
       return;
     }
     if (currentJob.executionMode === 'tmux') {
@@ -234,17 +243,6 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(`Running job ${job.id}`);
-    const runningJob: BridgeJob = {
-      ...currentJob,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      finishedAt: undefined,
-      stdout: '',
-      stderr: '',
-    };
-
-    await this.repository.save(runningJob);
-
     const abortController = new AbortController();
     this.abortControllers.set(job.id, abortController);
 
@@ -253,12 +251,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         signal: abortController.signal,
         cwd: job.cwd,
       });
-      const latestJob = await this.repository.getById(job.id);
-      if (!latestJob || latestJob.status !== 'running') {
-        return;
-      }
-
-      const savedJob = await this.repository.save({
+      const transition = await this.repository.transition(job.id, ['running'], (latestJob) => ({
         ...latestJob,
         status: result.status,
         finishedAt: new Date().toISOString(),
@@ -266,8 +259,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         stderr: result.stderr,
         exitCode: result.exitCode,
         execution: result.execution,
-      });
-      this.trackCompletionNotification(savedJob);
+      }));
+      if (transition.transitioned && transition.job) this.trackCompletionNotification(transition.job);
     } catch (error) {
       await this.markRunningJobFailed(job.id, error);
     } finally {
@@ -277,14 +270,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   private async startTmuxJob(job: BridgeJob): Promise<void> {
     this.logger.log(`Starting tmux job ${job.id}`);
-    const runningJob = await this.repository.save({
-      ...job,
-      status: 'running',
-      startedAt: new Date().toISOString(),
-      finishedAt: undefined,
-      stdout: '',
-      stderr: '',
-    });
+    const runningJob = job;
 
     if (!this.tmuxSessionRunner) {
       await this.markRunningJobFailed(job.id, new Error(TMUX_RUNNER_UNAVAILABLE_MESSAGE));
@@ -293,10 +279,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const session = await this.tmuxSessionRunner.start(runningJob);
-      await this.repository.save({
-        ...runningJob,
-        session,
-      });
+      await this.repository.transition(job.id, ['running'], (current) => ({ ...current, session }));
     } catch (error) {
       await this.markRunningJobFailed(job.id, error);
     }
@@ -322,12 +305,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
-    const latestJob = await this.repository.getById(job.id);
-    if (!latestJob || latestJob.status !== 'running') {
-      return false;
-    }
-
-    const savedJob = await this.repository.save({
+    const transition = await this.repository.transition(job.id, ['running'], (latestJob) => ({
       ...latestJob,
       status: collected.result.status,
       finishedAt: new Date().toISOString(),
@@ -336,19 +314,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       exitCode: collected.result.exitCode,
       execution: collected.result.execution,
       session: collected.session,
-    });
-    this.trackCompletionNotification(savedJob);
+    }));
+    if (!transition.transitioned || !transition.job) return false;
+    this.trackCompletionNotification(transition.job);
     return true;
   }
 
   private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {
-    const latestJob = await this.repository.getById(jobId);
-    if (!latestJob || latestJob.status !== 'running') {
-      return;
-    }
-
     const message = error instanceof Error ? error.message : String(error);
-    const savedJob = await this.repository.save({
+    const transition = await this.repository.transition(jobId, ['running'], (latestJob) => ({
       ...latestJob,
       status: 'failed',
       finishedAt: new Date().toISOString(),
@@ -358,9 +332,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         ...latestJob.execution,
         errorType: 'execution_error',
       },
-    });
+    }));
+    if (!transition.transitioned || !transition.job) return;
     this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
-    this.trackCompletionNotification(savedJob);
+    this.trackCompletionNotification(transition.job);
   }
 
   trackCompletionNotification(job: BridgeJob): void {
