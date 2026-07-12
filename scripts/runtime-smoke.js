@@ -739,7 +739,6 @@ function startBridge({
       HOME: process.env.HOME ?? '',
       USER: process.env.USER ?? '',
       TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
-      ...bridgeEnv,
       PORT: String(port),
       BRIDGE_HOST: '127.0.0.1',
       BRIDGE_JOBS_DIR: jobsDir,
@@ -761,6 +760,7 @@ function startBridge({
       TELEGRAM_NOTIFY_CHAT_ID: '',
       OPENCLAW_HOOKS_URL: '',
       OPENCLAW_HOOKS_TOKEN: '',
+      ...bridgeEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -1178,6 +1178,9 @@ async function smokeTmuxCancelRuntime() {
       bridgeEnv: {
         FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
         BRIDGE_JOB_TIMEOUT_MS: '10000',
+        // The cancellation request owns this fixture's terminal write. Keep
+        // the periodic collector out of the fake tmux teardown window.
+        BRIDGE_JOB_POLL_INTERVAL_MS: '10000',
       },
     });
     await waitForBridge(port);

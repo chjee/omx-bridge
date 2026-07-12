@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -6,6 +7,11 @@ import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { OmxExecService, type SpawnFunction } from '../../src/jobs/omx-exec.service';
+import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
+import { JobRunnerService } from '../../src/jobs/job-runner.service';
+import type { JobNotifyService } from '../../src/jobs/job-notify.service';
+import type { BridgeJob } from '../../src/jobs/job.types';
+import { createTempDir, waitFor } from '../helpers';
 
 class MockChildProcess extends EventEmitter {
   pid: number | undefined = 424242;
@@ -21,6 +27,49 @@ function captureStdin(child: MockChildProcess): () => string {
     chunks.push(chunk.toString());
   });
   return () => chunks.join('');
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+async function isAlive(pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw error;
+  }
+  // A group KILL can leave a short-lived zombie until init reaps it. It is no
+  // longer executable and must not be treated as a surviving descendant.
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+    return !stat.includes(') Z ');
+  } catch {
+    return true;
+  }
+}
+
+function processTreeSpawn(ignoreTerm: boolean, ready: ReturnType<typeof deferred<{ parent: number; descendant: number }>>): SpawnFunction {
+  const descendant = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+  const parentTermHandler = ignoreTerm ? `process.on('SIGTERM', () => {});` : '';
+  const parent = [
+    "const { spawn } = require('node:child_process');",
+    parentTermHandler,
+    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'ignore' });`,
+    "process.stdout.write(`${process.pid}:${child.pid}\\n`);",
+    'setInterval(() => {}, 1000);',
+  ].join('');
+  return (_command, _args, options) => {
+    const child = spawn(process.execPath, ['-e', parent], options) as ChildProcessWithoutNullStreams;
+    child.stdout.once('data', (chunk: Buffer) => {
+      const [parentPid, descendantPid] = chunk.toString().trim().split(':').map(Number);
+      ready.resolve({ parent: parentPid, descendant: descendantPid });
+    });
+    return child;
+  };
 }
 
 function createService(
@@ -435,6 +484,79 @@ describe('OmxExecService', () => {
     await expect(deniedPending).resolves.toMatchObject({
       status: 'failed', stderr: expect.stringContaining('Failed to signal owned process: denied'),
       execution: { errorType: 'execution_error' },
+    });
+  });
+
+  describe('POSIX detached process-group cleanup', () => {
+    const skipOnWindows = process.platform === 'win32';
+
+    it('removes an actual detached descendant after timeout and bounded TERM-to-KILL escalation', async () => {
+      if (skipOnWindows) return;
+      const ready = deferred<{ parent: number; descendant: number }>();
+      const service = createService(processTreeSpawn(true, ready), { jobTimeoutMs: 1_000, sigkillGraceMs: 50 });
+      const result = service.execute('timeout tree');
+      const tree = await ready.promise;
+
+      await expect(result).resolves.toMatchObject({ execution: { errorType: 'timeout', timedOut: true } });
+      await waitFor(async () => isAlive(tree.descendant), (alive) => !alive, 1_000, 10);
+    });
+
+    it('aborts an actual detached process group and cancels delayed KILL when the child exits first', async () => {
+      if (skipOnWindows) return;
+      const ready = deferred<{ parent: number; descendant: number }>();
+      const signals: Array<[number, NodeJS.Signals]> = [];
+      const originalKill = process.kill.bind(process);
+      const kill = jest.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+        if (typeof signal === 'string') signals.push([pid, signal]);
+        return originalKill(pid, signal as NodeJS.Signals);
+      }) as typeof process.kill);
+      const service = createService(processTreeSpawn(false, ready), { jobTimeoutMs: 1_000, sigkillGraceMs: 50 });
+      const controller = new AbortController();
+      const result = service.execute('abort tree', { signal: controller.signal });
+      const tree = await ready.promise;
+      controller.abort();
+
+      await expect(result).resolves.toMatchObject({ status: 'cancelled' });
+      await waitFor(async () => isAlive(tree.descendant), (alive) => !alive, 1_000, 10);
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(signals).toEqual([[-tree.parent, 'SIGTERM']]);
+      kill.mockRestore();
+    });
+
+    it('aborts the actual detached process group during runner shutdown', async () => {
+      if (skipOnWindows) return;
+      const jobsDirectory = await createTempDir('omx-shutdown-tree');
+      const config: BridgeConfig = {
+        host: '127.0.0.1', jobsDirectory, omxCommand: 'omx', tmuxCommand: 'tmux',
+        tmuxSessionsDirectory: `${jobsDirectory}/sessions`, jobPollIntervalMs: 60_000,
+        jobTimeoutMs: 1_000, maxOutputChars: 1_000, sigkillGraceMs: 50,
+        maxConcurrency: 1, maxActiveJobs: 50, jobRetentionDays: 7, maxTerminalJobs: 1000,
+        jobCleanupIntervalMs: 60_000, notifyTimeoutMs: 1_000, notifyMode: 'openclaw',
+        insecureLoopback: false, allowedCwdPrefixes: ['/workspace'],
+      };
+      const ready = deferred<{ parent: number; descendant: number }>();
+      const repository = new JobQueueRepository(config);
+      await repository.ensureReady();
+      const bridgeJob: BridgeJob = {
+        id: '00000000-0000-4000-a000-000000000009', prompt: 'shutdown tree',
+        queueOrder: '0000000000001-000001', status: 'queued', createdAt: new Date().toISOString(),
+        exitCode: null, stdout: '', stderr: '',
+        execution: { command: 'omx', timeoutMs: config.jobTimeoutMs, maxOutputChars: config.maxOutputChars },
+      };
+      await repository.save(bridgeJob);
+      const runner = new JobRunnerService(
+        repository,
+        new OmxExecService(config, processTreeSpawn(false, ready)),
+        { notifyJobComplete: jest.fn().mockResolvedValue(undefined) } as unknown as JobNotifyService,
+        config,
+      );
+      const run = runner.runOnce();
+      const tree = await ready.promise;
+      await runner.onModuleDestroy();
+      await run;
+
+      await expect(repository.getById(bridgeJob.id)).resolves.toMatchObject({ status: 'cancelled' });
+      await waitFor(async () => isAlive(tree.descendant), (alive) => !alive, 1_000, 10);
     });
   });
 });
