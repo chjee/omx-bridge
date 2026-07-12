@@ -2,6 +2,12 @@
 
 Use this checklist after changing bridge runtime code, dispatch tooling, OpenClaw plugin config, auth settings, or systemd service wiring.
 
+## Process cleanup platform contract
+
+On POSIX, direct `omx exec` children are deliberately owned process-group leaders. Timeout, abort, and
+shutdown target the owned group with one bounded TERM-to-KILL escalation. On Windows the bridge uses
+`child.kill` for the direct child only; descendant cleanup is not guaranteed by this fallback.
+
 For merge/release gate selection, start with [release-verification.md](release-verification.md). This document contains the detailed runtime smoke procedures.
 
 The checks assume the default local bridge URL:

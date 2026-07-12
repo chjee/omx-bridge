@@ -134,25 +134,25 @@ export class JobsService {
   }
 
   async completeJobFromCallback(id: string, input: JobCallbackDto): Promise<BridgeJob> {
-    const job = await this.getJobOrThrow(id);
-    if (this.isTerminal(job.status)) {
-      // 잡이 이미 terminal이면 callback을 idempotent하게 처리.
-      // cancel 직후 callback이 늦게 도착하는 정상 race 등에서 caller에게 409를 던지지 않도록.
-      return job;
-    }
-
-    const savedJob = await this.repository.save({
+    const transition = await this.repository.transition(id, ['queued', 'running'], (job) => ({
       ...job,
       status: input.status,
       finishedAt: new Date().toISOString(),
-      exitCode: input.exitCode ?? job.exitCode ?? null,
+      exitCode: Object.prototype.hasOwnProperty.call(input, 'exitCode')
+        ? input.exitCode ?? null
+        : job.exitCode ?? null,
       stdout: input.stdout ?? job.stdout,
       stderr: input.stderr ?? job.stderr,
-      execution: {
-        ...job.execution,
-        ...this.projectCallbackExecution(input.execution),
-      },
-    });
+      execution: { ...job.execution, ...this.projectCallbackExecution(input.execution) },
+    }));
+    if (!transition.job) throw new NotFoundException(`Job ${id} not found`);
+    if (!transition.transitioned) {
+      if (this.isTerminal(transition.job.status) && this.isEquivalentCallbackReplay(transition.job, input)) {
+        return transition.job;
+      }
+      throw new ConflictException(`Callback conflicts with stored ${transition.job.status} result for job ${id}`);
+    }
+    const savedJob = transition.job;
     await this.jobRunnerService.cancel(id);
     this.jobRunnerService.trackCompletionNotification(savedJob);
     return savedJob;
@@ -189,17 +189,21 @@ export class JobsService {
       jobToCancel = await this.getJobOrThrow(id);
     }
 
-    const savedJob = await this.repository.save({
-      ...jobToCancel,
+    const transition = await this.repository.transition(id, ['queued', 'running'], (current) => ({
+      ...current,
+      ...(jobToCancel.session ? { session: jobToCancel.session } : {}),
       status: 'cancelled',
       finishedAt: new Date().toISOString(),
-      exitCode: jobToCancel.exitCode ?? null,
-      stderr: jobToCancel.stderr || 'Cancelled by API request',
-      execution: {
-        ...jobToCancel.execution,
-        errorType: 'cancelled',
-      },
-    });
+      exitCode: current.exitCode ?? null,
+      stderr: current.stderr || 'Cancelled by API request',
+      execution: { ...current.execution, errorType: 'cancelled' },
+    }));
+    if (!transition.job) throw new NotFoundException(`Job ${id} not found`);
+    if (!transition.transitioned) {
+      if (transition.job.status === 'cancelled') return transition.job;
+      throw new ConflictException(`Job ${id} is already ${transition.job.status}`);
+    }
+    const savedJob = transition.job;
     if (!runnerCancelAlreadyRequested) {
       await this.jobRunnerService.cancel(id);
     }
@@ -217,6 +221,21 @@ export class JobsService {
     if (execution.outputTruncated !== undefined) patch.outputTruncated = execution.outputTruncated;
     if (execution.errorType !== undefined) patch.errorType = execution.errorType;
     return patch;
+  }
+
+  private isEquivalentCallbackReplay(job: BridgeJob, input: JobCallbackDto): boolean {
+    if (job.status !== input.status) return false;
+    if (Object.prototype.hasOwnProperty.call(input, 'stdout') && job.stdout !== input.stdout) return false;
+    if (Object.prototype.hasOwnProperty.call(input, 'stderr') && job.stderr !== input.stderr) return false;
+    if (Object.prototype.hasOwnProperty.call(input, 'exitCode') && job.exitCode !== input.exitCode) return false;
+    const execution = input.execution;
+    if (!execution) return true;
+    for (const key of ['durationMs', 'timedOut', 'outputTruncated', 'errorType'] as const) {
+      if (Object.prototype.hasOwnProperty.call(execution, key) && job.execution[key] !== execution[key]) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private isTerminal(status: JobStatus): boolean {

@@ -30,9 +30,15 @@ export interface CleanupTerminalJobsResult {
   retained: number;
 }
 
+export interface ConditionalJobTransitionResult {
+  transitioned: boolean;
+  job: BridgeJob | null;
+}
+
 @Injectable()
 export class JobQueueRepository {
   private readonly logger = new Logger(JobQueueRepository.name);
+  private readonly jobLocks = new Map<string, Promise<void>>();
 
   constructor(
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
@@ -43,8 +49,26 @@ export class JobQueueRepository {
   }
 
   async save(job: BridgeJob): Promise<BridgeJob> {
-    await this.writeJob(job);
-    return job;
+    return this.withJobLock(job.id, async () => {
+      await this.writeJob(job);
+      return job;
+    });
+  }
+
+  async transition(
+    id: string,
+    expectedStatuses: readonly JobStatus[],
+    update: (current: BridgeJob) => BridgeJob,
+  ): Promise<ConditionalJobTransitionResult> {
+    return this.withJobLock(id, async () => {
+      const current = await this.getById(id);
+      if (!current || !expectedStatuses.includes(current.status)) {
+        return { transitioned: false, job: current };
+      }
+      const next = update(current);
+      await this.writeJob(next);
+      return { transitioned: true, job: next };
+    });
   }
 
   async getById(id: string): Promise<BridgeJob | null> {
@@ -152,8 +176,31 @@ export class JobQueueRepository {
     await this.ensureReady();
     const targetPath = this.jobPath(job.id);
     const tempPath = `${targetPath}.${randomUUID()}.tmp`;
-    await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
-    await fs.rename(tempPath, targetPath);
+    try {
+      await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+      await fs.rename(tempPath, targetPath);
+    } catch (error) {
+      try {
+        await fs.rm(tempPath, { force: true });
+      } catch {
+        // The write/rename failure is the authoritative persistence error.
+      }
+      throw error;
+    }
+  }
+
+  private async withJobLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.jobLocks.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.jobLocks.set(id, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.jobLocks.get(id) === current) this.jobLocks.delete(id);
+    }
   }
 
   private async parseJob(raw: string, jobId: string, filePath: string): Promise<BridgeJob | null> {

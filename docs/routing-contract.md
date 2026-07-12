@@ -2,6 +2,13 @@
 
 This document defines how `omx-bridge` routes job completion results back to callers. It is the ownership contract for `source`, `notifyUrl`, `originRoutingKey`, and routing metadata.
 
+## Terminal callback replay
+
+Terminal callback replay compares only callback-owned result fields. Exact or omission-normalized
+replay returns HTTP 200 with the stored job; a mismatch returns HTTP 409. Both outcomes leave the
+durable job file untouched, including after API cancellation. `omx-dispatch` exposes callback 409 as
+`CallbackConflictError`; unrelated 409 responses remain generic `BridgeHttpError` instances.
+
 ## Core Rule
 
 The bridge executes jobs and reports terminal state. It does not own chat-specific routing unless the selected notification mode explicitly says so.

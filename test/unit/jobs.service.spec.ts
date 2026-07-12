@@ -83,6 +83,13 @@ function createService(
   const repository = {
     create: jest.fn(async (job: BridgeJob) => { jobs.set(job.id, job); return job; }),
     save: jest.fn(async (job: BridgeJob) => { jobs.set(job.id, job); return job; }),
+    transition: jest.fn(async (id: string, expected: readonly BridgeJob['status'][], update: (job: BridgeJob) => BridgeJob) => {
+      const current = jobs.get(id) ?? null;
+      if (!current || !expected.includes(current.status)) return { transitioned: false, job: current };
+      const next = update(current);
+      jobs.set(id, next);
+      return { transitioned: true, job: next };
+    }),
     getById: jest.fn(async (id: string) => jobs.get(id) ?? null),
     listAll: jest.fn(async () => [...jobs.values()]),
     listByStatus: jest.fn(async (status: string) => [...jobs.values()].filter((j) => j.status === status)),
@@ -477,7 +484,7 @@ describe('JobsService.cancelJob', () => {
       },
       execution: { errorType: 'cancelled' },
     });
-    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(repository.transition).toHaveBeenCalledTimes(1);
     expect(jobRunnerService.cancel).toHaveBeenCalledTimes(1);
   });
 
@@ -522,7 +529,7 @@ describe('JobsService.completeJobFromCallback', () => {
     expect(result.execution.durationMs).toBe(1234);
     expect(result.execution.timedOut).toBe(false);
     expect(result.execution.outputTruncated).toBe(true);
-    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(repository.transition).toHaveBeenCalledTimes(1);
   });
 
   it('does not allow callback to overwrite server-owned execution fields', async () => {
@@ -570,19 +577,37 @@ describe('JobsService.completeJobFromCallback', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it('returns the existing terminal job idempotently without modification', async () => {
+  it('returns an omission-normalized terminal replay without modification', async () => {
     const job = createJob({ status: 'succeeded', stdout: 'original' });
     const jobs = new Map([[job.id, job]]);
     const { service, jobNotify } = createService(jobs);
 
-    const result = await service.completeJobFromCallback(job.id, {
-      status: 'failed',
-      stdout: 'should-not-overwrite',
-    });
+    const result = await service.completeJobFromCallback(job.id, { status: 'succeeded' });
 
     expect(result.status).toBe('succeeded');
     expect(result.stdout).toBe('original');
     expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+
+  it('rejects a mismatched terminal replay without modification', async () => {
+    const job = createJob({ status: 'succeeded', stdout: 'original', exitCode: 0 });
+    const jobs = new Map([[job.id, job]]);
+    const { service } = createService(jobs);
+
+    await expect(service.completeJobFromCallback(job.id, {
+      status: 'succeeded', stdout: 'different', exitCode: 0,
+    })).rejects.toThrow(ConflictException);
+    expect(jobs.get(job.id)).toEqual(job);
+  });
+
+  it('distinguishes explicit null exitCode from omission', async () => {
+    const job = createJob({ status: 'failed', exitCode: 2 });
+    const jobs = new Map([[job.id, job]]);
+    const { service } = createService(jobs);
+
+    await expect(service.completeJobFromCallback(job.id, { status: 'failed' })).resolves.toBe(job);
+    await expect(service.completeJobFromCallback(job.id, { status: 'failed', exitCode: null }))
+      .rejects.toThrow(ConflictException);
   });
 
   it('tracks completion notification after saving', async () => {
@@ -597,6 +622,44 @@ describe('JobsService.completeJobFromCallback', () => {
       expect.objectContaining({ id: job.id, status: 'succeeded' }),
     );
     expect(jobNotify.notifyJobComplete).not.toHaveBeenCalled();
+  });
+});
+
+describe('JobsService callback durable replay', () => {
+  it('preserves exact bytes, hash, and mtime for normalized 200 and mismatched 409 replays after cancel', async () => {
+    const jobsDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'jobs-replay-'));
+    const config = createConfig({ jobsDirectory });
+    const repository = new JobQueueRepository(config);
+    const runner = {
+      cancel: jest.fn().mockResolvedValue(false),
+      trackCompletionNotification: jest.fn(),
+      trigger: jest.fn(),
+    } as unknown as JobRunnerService;
+    const notify = { notifyJobComplete: jest.fn() } as unknown as JobNotifyService;
+    const service = new JobsService(repository, runner, notify, config);
+    const cancelled = createJob({
+      status: 'cancelled', stderr: 'Cancelled by API request', finishedAt: '2026-07-13T00:00:00.000Z',
+      execution: { command: 'omx', timeoutMs: 900_000, maxOutputChars: 32_000, errorType: 'cancelled' },
+    });
+    await repository.save(cancelled);
+    const jobPath = path.join(jobsDirectory, `${cancelled.id}.json`);
+    const snapshot = async () => {
+      const bytes = await fs.readFile(jobPath);
+      const stat = await fs.stat(jobPath);
+      return { bytes, hash: createHash('sha256').update(bytes).digest('hex'), mtimeMs: stat.mtimeMs };
+    };
+    const before = await snapshot();
+
+    await expect(service.completeJobFromCallback(cancelled.id, { status: 'cancelled' })).resolves.toEqual(cancelled);
+    const after200 = await snapshot();
+    await expect(service.completeJobFromCallback(cancelled.id, { status: 'cancelled', stderr: 'different' }))
+      .rejects.toThrow(ConflictException);
+    const after409 = await snapshot();
+
+    expect(after200.bytes.equals(before.bytes)).toBe(true);
+    expect(after200).toMatchObject({ hash: before.hash, mtimeMs: before.mtimeMs });
+    expect(after409.bytes.equals(before.bytes)).toBe(true);
+    expect(after409).toMatchObject({ hash: before.hash, mtimeMs: before.mtimeMs });
   });
 });
 
