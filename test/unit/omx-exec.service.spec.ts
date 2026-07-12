@@ -8,6 +8,7 @@ import type { BridgeConfig } from '../../src/config/bridge-config';
 import { OmxExecService, type SpawnFunction } from '../../src/jobs/omx-exec.service';
 
 class MockChildProcess extends EventEmitter {
+  pid: number | undefined = 424242;
   stdin = new PassThrough();
   stdout = new PassThrough();
   stderr = new PassThrough();
@@ -56,6 +57,7 @@ describe('OmxExecService', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
     process.env = originalEnv;
   });
 
@@ -265,6 +267,7 @@ describe('OmxExecService', () => {
 
   it('maps timeout into a failed result', async () => {
     jest.useFakeTimers();
+    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
 
     const child = new MockChildProcess();
     const service = createService(
@@ -283,7 +286,7 @@ describe('OmxExecService', () => {
       exitCode: null,
       execution: { errorType: 'timeout', timedOut: true },
     });
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(processKill).toHaveBeenCalledWith(-424242, 'SIGTERM');
   });
 
   it('keeps head and tail when captured output exceeds the limit', async () => {
@@ -353,6 +356,7 @@ describe('OmxExecService', () => {
   });
 
   it('maps abort signals into cancelled results', async () => {
+    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
@@ -368,6 +372,69 @@ describe('OmxExecService', () => {
       exitCode: null,
       execution: { errorType: 'cancelled' },
     });
-    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(processKill).toHaveBeenCalledWith(-424242, 'SIGTERM');
+  });
+
+  it('sends one bounded TERM-to-KILL escalation to the owned POSIX group', async () => {
+    if (process.platform === 'win32') return;
+    jest.useFakeTimers();
+    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const child = new MockChildProcess();
+    const service = createService(jest.fn(() => child as unknown as ChildProcessWithoutNullStreams), {
+      jobTimeoutMs: 50, sigkillGraceMs: 25,
+    });
+
+    const pending = service.execute('slow');
+    jest.advanceTimersByTime(75);
+    expect(processKill.mock.calls).toEqual([[-424242, 'SIGTERM'], [-424242, 'SIGKILL']]);
+    child.emit('close', null);
+    await pending;
+  });
+
+  it('clears owned-group escalation on close and never signals an invalid pid', async () => {
+    if (process.platform === 'win32') return;
+    jest.useFakeTimers();
+    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const child = new MockChildProcess();
+    child.pid = 0;
+    const controller = new AbortController();
+    const service = createService(jest.fn(() => child as unknown as ChildProcessWithoutNullStreams));
+    const pending = service.execute('cancel', { signal: controller.signal });
+    controller.abort();
+    child.emit('close', null);
+    jest.runAllTimers();
+    await pending;
+    expect(processKill).not.toHaveBeenCalled();
+  });
+
+  it('treats POSIX ESRCH as already clean and exposes other signal failures', async () => {
+    if (process.platform === 'win32') return;
+    const esrchChild = new MockChildProcess();
+    jest.spyOn(process, 'kill').mockImplementationOnce(() => {
+      throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+    });
+    const esrchController = new AbortController();
+    const esrchPending = createService(jest.fn(() => esrchChild as unknown as ChildProcessWithoutNullStreams))
+      .execute('cancel', { signal: esrchController.signal });
+    esrchController.abort();
+    esrchChild.emit('close', null);
+    await expect(esrchPending).resolves.toMatchObject({ status: 'cancelled' });
+
+    jest.restoreAllMocks();
+    const deniedChild = new MockChildProcess();
+    jest.spyOn(process, 'kill').mockImplementationOnce(() => {
+      throw Object.assign(new Error('denied'), { code: 'EPERM' });
+    });
+    const deniedController = new AbortController();
+    const deniedPending = createService(
+      jest.fn(() => deniedChild as unknown as ChildProcessWithoutNullStreams),
+      { maxOutputChars: 100 },
+    )
+      .execute('cancel', { signal: deniedController.signal });
+    deniedController.abort();
+    await expect(deniedPending).resolves.toMatchObject({
+      status: 'failed', stderr: expect.stringContaining('Failed to signal owned process: denied'),
+      execution: { errorType: 'execution_error' },
+    });
   });
 });

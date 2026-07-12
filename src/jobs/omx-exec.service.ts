@@ -51,6 +51,8 @@ export class OmxExecService {
       let stdinWriteFailed = false;
       let exitCode: number | null = null;
       let sigkillHandle: NodeJS.Timeout | undefined;
+      let ownedProcessGroupPid: number | undefined;
+      let terminationStarted = false;
 
       const child = this.spawnFn(
         this.config.omxCommand,
@@ -58,9 +60,13 @@ export class OmxExecService {
         {
           stdio: 'pipe',
           env: this.buildChildEnv(),
+          ...(process.platform !== 'win32' ? { detached: true } : {}),
           ...(executionCwd ? { cwd: executionCwd } : {}),
         },
       );
+      if (this.isValidPid(child.pid)) {
+        ownedProcessGroupPid = child.pid;
+      }
       child.stdin.once('error', (error: NodeJS.ErrnoException) => {
         stdinWriteFailed = true;
         if (stderrCapture.length === 0) {
@@ -106,6 +112,12 @@ export class OmxExecService {
         });
       };
 
+      const clearProcessOwnership = (): void => {
+        clearTimeout(sigkillHandle);
+        sigkillHandle = undefined;
+        ownedProcessGroupPid = undefined;
+      };
+
       child.stdout.on('data', (chunk: Buffer | string) => {
         appendOutput(chunk.toString(), 'stdout');
       });
@@ -114,6 +126,7 @@ export class OmxExecService {
       });
 
       child.once('error', (error: NodeJS.ErrnoException) => {
+        clearProcessOwnership();
         if (stderrCapture.length === 0) {
           stderrCapture = this.appendCapturedOutput(stderrCapture, error.message);
         }
@@ -123,6 +136,7 @@ export class OmxExecService {
       });
 
       child.once('close', (code) => {
+        clearProcessOwnership();
         exitCode = code;
         if (cancelled) {
           finish('cancelled', { errorType: 'cancelled' });
@@ -147,10 +161,44 @@ export class OmxExecService {
         });
       });
 
+      const signalOwnedProcess = (signal: NodeJS.Signals): boolean => {
+        try {
+          if (process.platform === 'win32') {
+            // Windows can terminate only the direct child here; descendant cleanup is not guaranteed.
+            if (ownedProcessGroupPid === undefined) return false;
+            child.kill(signal);
+          } else if (ownedProcessGroupPid !== undefined) {
+            process.kill(-ownedProcessGroupPid, signal);
+          } else {
+            return false;
+          }
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
+            clearProcessOwnership();
+            return false;
+          }
+          stderrCapture = this.appendCapturedOutput(
+            stderrCapture,
+            `Failed to signal owned process: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          clearProcessOwnership();
+          finish('failed', { errorType: 'execution_error' });
+          return false;
+        }
+      };
+
       const sendSigkillAfterDelay = (): void => {
         sigkillHandle = setTimeout(() => {
-          child.kill('SIGKILL');
+          sigkillHandle = undefined;
+          signalOwnedProcess('SIGKILL');
         }, this.config.sigkillGraceMs);
+      };
+
+      const terminate = (): void => {
+        if (terminationStarted || settled) return;
+        terminationStarted = true;
+        if (signalOwnedProcess('SIGTERM')) sendSigkillAfterDelay();
       };
 
       const timeoutHandle = setTimeout(() => {
@@ -161,8 +209,7 @@ export class OmxExecService {
             `Command timed out after ${this.config.jobTimeoutMs}ms`,
           );
         }
-        child.kill('SIGTERM');
-        sendSigkillAfterDelay();
+        terminate();
       }, this.config.jobTimeoutMs);
 
       const handleAbort = (): void => {
@@ -170,8 +217,7 @@ export class OmxExecService {
         if (stderrCapture.length === 0) {
           stderrCapture = this.appendCapturedOutput(stderrCapture, 'Command cancelled');
         }
-        child.kill('SIGTERM');
-        sendSigkillAfterDelay();
+        terminate();
       };
 
       if (options.signal) {
@@ -182,6 +228,10 @@ export class OmxExecService {
         }
       }
     });
+  }
+
+  private isValidPid(pid: number | undefined): pid is number {
+    return typeof pid === 'number' && Number.isFinite(pid) && Number.isInteger(pid) && pid > 0;
   }
 
   private buildChildEnv(): NodeJS.ProcessEnv {
