@@ -1,4 +1,4 @@
-import type { BridgeClient } from "./bridge-client.js";
+import { BridgeHttpError, type BridgeClient } from "./bridge-client.js";
 import type { JobNotification, NotificationStats } from "./notification-store.js";
 import type {
   BridgeJob,
@@ -33,6 +33,15 @@ export interface JobOperationsDependencies {
   describeError?: (error: unknown) => string;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+}
+
+export class CallbackConflictError extends Error {
+  readonly status = 409;
+
+  constructor(public readonly details: unknown, cause: BridgeHttpError) {
+    super(`Bridge callback conflicts with the stored terminal result: ${cause.message}`, { cause });
+    this.name = "CallbackConflictError";
+  }
 }
 
 export class JobOperations {
@@ -111,11 +120,18 @@ export class JobOperations {
     const signatureHeader = this.config.callbackSecret
       ? this.deps.buildCallbackSignatureHeader(jobId, bodyText)
       : undefined;
-    return this.requestJson<BridgeJob>(
-      `jobs/${encodeURIComponent(jobId)}/callback`,
-      { method: "POST", body: bodyText },
-      signatureHeader,
-    );
+    try {
+      return await this.requestJson<BridgeJob>(
+        `jobs/${encodeURIComponent(jobId)}/callback`,
+        { method: "POST", body: bodyText },
+        signatureHeader,
+      );
+    } catch (error) {
+      if (error instanceof BridgeHttpError && error.status === 409) {
+        throw new CallbackConflictError(error.details, error);
+      }
+      throw error;
+    }
   }
 
   async getDispatchHealth(): Promise<DispatchHealthResult> {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { JobOperations, type JobOperationsConfig } from "./job-operations.js";
+import { BridgeHttpError } from "./bridge-client.js";
+import { CallbackConflictError, JobOperations, type JobOperationsConfig } from "./job-operations.js";
 import type { JobNotification, NotificationStats } from "./notification-store.js";
 import type { BridgeJob, JobStatus } from "./tool-handlers.js";
 
@@ -94,6 +95,25 @@ function createOperations(overrides: {
 
   return { operations, requests, sleeps };
 }
+
+test("classifies callback-only HTTP 409 responses as typed conflicts", async () => {
+  const details = { statusCode: 409, message: "stored terminal result differs" };
+  const { operations } = createOperations({
+    requestJson: async (path) => {
+      if (path.endsWith("/callback")) throw new BridgeHttpError(409, "Conflict", details);
+      throw new BridgeHttpError(409, "Conflict", { message: "generic conflict" });
+    },
+  });
+
+  await assert.rejects(
+    () => operations.callbackBridgeJob({ jobId: "job-1", status: "failed" }),
+    (error: unknown) => error instanceof CallbackConflictError && error.status === 409 && error.details === details,
+  );
+  await assert.rejects(
+    () => operations.cancelBridgeJob("job-1"),
+    (error: unknown) => error instanceof BridgeHttpError && !(error instanceof CallbackConflictError),
+  );
+});
 
 test("submits jobs with the session notify URL when no explicit notify URL is supplied", async () => {
   const { operations, requests } = createOperations({

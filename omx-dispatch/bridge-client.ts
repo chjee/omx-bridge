@@ -7,6 +7,17 @@ export interface BridgeClientOptions {
   fetchImpl?: BridgeFetch;
 }
 
+export class BridgeHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly statusText: string,
+    public readonly details: unknown,
+  ) {
+    super(`Bridge request failed (${status} ${statusText}): ${formatDetails(details)}`);
+    this.name = "BridgeHttpError";
+  }
+}
+
 export class BridgeClient {
   private readonly fetchImpl: BridgeFetch;
 
@@ -34,11 +45,7 @@ export class BridgeClient {
     const data = text.length > 0 ? safeJsonParse(text) : null;
 
     if (!response.ok) {
-      const details =
-        data && typeof data === "object"
-          ? JSON.stringify(data, null, 2)
-          : text || response.statusText;
-      throw new Error(`Bridge request failed (${response.status} ${response.statusText}): ${details}`);
+      throw new BridgeHttpError(response.status, response.statusText, data ?? (text || response.statusText));
     }
 
     return data as T;
@@ -65,6 +72,10 @@ export class BridgeClient {
       clearTimeout(timeoutHandle);
     }
   }
+}
+
+function formatDetails(details: unknown): string {
+  return details && typeof details === "object" ? JSON.stringify(details, null, 2) : String(details);
 }
 
 function ensureTrailingSlash(value: string): string {
