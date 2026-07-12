@@ -85,6 +85,14 @@ describe('Jobs HTTP auth and media type guards (e2e)', () => {
       .expect(401);
   });
 
+  it('does not accept a callback HMAC as API bearer authentication', async () => {
+    await request(app.getHttpServer())
+      .post('/jobs')
+      .set('Authorization', 'Bearer test-callback-secret')
+      .send({ prompt: 'blocked' })
+      .expect(401);
+  });
+
   it('accepts authenticated JSON job creation', async () => {
     await request(app.getHttpServer())
       .post('/jobs')
@@ -100,6 +108,16 @@ describe('Jobs HTTP auth and media type guards (e2e)', () => {
       .type('form')
       .send({ prompt: 'csrf shaped form' })
       .expect(415);
+  });
+
+  it('rejects a cwd outside the configured allowed prefixes', async () => {
+    const forbiddenCwd = await createTempDir('bridge-forbidden-cwd');
+
+    await request(app.getHttpServer())
+      .post('/jobs')
+      .set('Authorization', 'Bearer test-api-token')
+      .send({ prompt: 'blocked cwd', cwd: forbiddenCwd })
+      .expect(400);
   });
 
   it('accepts signed JSON callbacks using the raw request body bytes', async () => {
@@ -127,6 +145,18 @@ describe('Jobs HTTP auth and media type guards (e2e)', () => {
 
     await request(app.getHttpServer())
       .post(`/jobs/${jobId}/callback`)
+      .set('Content-Type', 'application/json')
+      .send(bodyText)
+      .expect(401);
+  });
+
+  it('does not accept API bearer authentication in place of a callback HMAC', async () => {
+    const jobId = await createQueuedJob();
+    const { bodyText } = signedCallbackBody(jobId);
+
+    await request(app.getHttpServer())
+      .post(`/jobs/${jobId}/callback`)
+      .set('Authorization', 'Bearer test-api-token')
       .set('Content-Type', 'application/json')
       .send(bodyText)
       .expect(401);
