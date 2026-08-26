@@ -51,8 +51,10 @@ export class OmxExecService {
       let stdinWriteFailed = false;
       let exitCode: number | null = null;
       let sigkillHandle: NodeJS.Timeout | undefined;
+      let groupExitPollHandle: NodeJS.Timeout | undefined;
       let ownedProcessGroupPid: number | undefined;
       let terminationStarted = false;
+      let childClosed = false;
 
       const child = this.spawnFn(
         this.config.omxCommand,
@@ -93,6 +95,7 @@ export class OmxExecService {
         settled = true;
         clearTimeout(timeoutHandle);
         clearTimeout(sigkillHandle);
+        clearInterval(groupExitPollHandle);
         options.signal?.removeEventListener('abort', handleAbort);
 
         resolve({
@@ -114,8 +117,39 @@ export class OmxExecService {
 
       const clearProcessOwnership = (): void => {
         clearTimeout(sigkillHandle);
+        clearInterval(groupExitPollHandle);
         sigkillHandle = undefined;
+        groupExitPollHandle = undefined;
         ownedProcessGroupPid = undefined;
+      };
+
+      const finishTerminated = (): void => {
+        if (!childClosed || settled) return;
+        clearProcessOwnership();
+        if (cancelled) {
+          finish('cancelled', { errorType: 'cancelled' });
+          return;
+        }
+        finish('failed', { errorType: 'timeout' });
+      };
+
+      const isOwnedProcessGroupAlive = (): boolean => {
+        if (process.platform === 'win32' || ownedProcessGroupPid === undefined) return false;
+        try {
+          process.kill(-ownedProcessGroupPid, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException)?.code !== 'ESRCH';
+        }
+      };
+
+      const waitForOwnedProcessGroupExit = (): void => {
+        if (groupExitPollHandle || settled) return;
+        const observe = (): void => {
+          if (!isOwnedProcessGroupAlive()) finishTerminated();
+        };
+        groupExitPollHandle = setInterval(observe, 10);
+        observe();
       };
 
       child.stdout.on('data', (chunk: Buffer | string) => {
@@ -136,16 +170,17 @@ export class OmxExecService {
       });
 
       child.once('close', (code) => {
-        clearProcessOwnership();
+        childClosed = true;
         exitCode = code;
-        if (cancelled) {
-          finish('cancelled', { errorType: 'cancelled' });
+        if (cancelled || timedOut) {
+          if (terminationStarted && isOwnedProcessGroupAlive()) {
+            waitForOwnedProcessGroupExit();
+          } else {
+            finishTerminated();
+          }
           return;
         }
-        if (timedOut) {
-          finish('failed', { errorType: 'timeout' });
-          return;
-        }
+        clearProcessOwnership();
         if (stdinWriteFailed) {
           finish('failed', { errorType: 'execution_error' });
           return;
@@ -192,6 +227,8 @@ export class OmxExecService {
         sigkillHandle = setTimeout(() => {
           sigkillHandle = undefined;
           signalOwnedProcess('SIGKILL');
+          clearProcessOwnership();
+          finishTerminated();
         }, this.config.sigkillGraceMs);
       };
 

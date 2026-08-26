@@ -8,6 +8,15 @@ On POSIX, direct `omx exec` children are deliberately owned process-group leader
 shutdown target the owned group with one bounded TERM-to-KILL escalation. On Windows the bridge uses
 `child.kill` for the direct child only; descendant cleanup is not guaranteed by this fallback.
 
+The supported production abnormal-exit boundary is the provided systemd unit:
+`KillMode=control-group`, `TimeoutStopSec=30s`, and `SendSIGKILL=yes`. Its
+30-second stop window leaves headroom over the default 5-second child escalation
+and the runner's bounded in-flight, notification, and cleanup waits. The
+deterministic runtime smoke inspects and signals only the uniquely owned fake
+process trees it creates. A forced bridge kill outside systemd is diagnostic
+evidence only: descendant cleanup after `SIGKILL`, a host crash, or supervisor
+failure is not guaranteed without cgroup-aware containment.
+
 For merge/release gate selection, start with [release-verification.md](release-verification.md). This document contains the detailed runtime smoke procedures.
 
 The checks assume the default local bridge URL:
@@ -61,6 +70,8 @@ This starts temporary loopback bridge instances from build artifacts with isolat
 - per-job `notifyUrl` delivery to a local webhook
 - OpenClaw `source`, `sourceName`, `originRoutingKey`, and `metadata` preservation
 - cancellation terminal state and notification persistence
+- owned direct-exec descendant cleanup for cancel, timeout, and graceful shutdown,
+  plus a separately reported non-systemd forced-termination diagnostic
 - `omx-dispatch` MCP `omx_health` and `omx_submit_job_and_wait`
 - live OMX smoke wiring with a fake OMX command
 - optional OpenClaw plugin discovery when the `openclaw` CLI is installed
