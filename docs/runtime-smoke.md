@@ -311,9 +311,26 @@ curl -sS "$BRIDGE_URL/jobs/<job id>" \
 ```
 
 2. Check `notifyOutcome` and `notifyHistory`.
-3. In dispatch, run `omx_notification_stats`.
-4. If a notification is pending and should be consumed, run `omx_wait_for_job` for the specific job or `omx_get_notifications` for all pending notifications.
-5. Check bridge logs with `journalctl --user -u omx-bridge -n 120 --no-pager`.
+   - If `notifyOutcome` is absent, startup reconciliation treats the notification
+     as never attempted and runs one reconciliation delivery operation. That
+     operation still uses the configured per-delivery retry delays.
+   - If `notifyOutcome` records a failed or skipped delivery, a service restart
+     does not retry it automatically. This prevents restart-driven webhook storms;
+     use the authenticated manual retry endpoint when another attempt is intended.
+3. Retry a recorded failure only when delivery should be attempted again:
+
+```bash
+curl -sS -X POST "$BRIDGE_URL/jobs/<job id>/notify/retry" \
+  ${BRIDGE_API_TOKEN:+-H "Authorization: Bearer $BRIDGE_API_TOKEN"}
+```
+
+The job must be terminal. The retry result is appended to the bounded
+`notifyHistory`, which retains the latest 10 attempts.
+
+4. In dispatch, run `omx_notification_stats`.
+5. If a notification is pending and should be consumed, run `omx_wait_for_job`
+   for the specific job or `omx_get_notifications` for all pending notifications.
+6. Check bridge logs with `journalctl --user -u omx-bridge -n 120 --no-pager`.
 
 ## 9. Completion Criteria
 

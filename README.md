@@ -142,11 +142,17 @@ Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAY
 fetch attempt is bounded by `BRIDGE_NOTIFY_TIMEOUT_MS` (default: `5000`); this is
 separate from `BRIDGE_JOB_TIMEOUT_MS`.
 
-On startup, the runner also reconciles retained terminal jobs whose completion
-notification was never recorded, or whose latest notification attempt has no
-successful channel and at least one failed channel. Terminal jobs whose channels
-were only skipped, such as an intentionally unconfigured delivery target, are not
-retried repeatedly.
+On startup, the runner reconciles retained terminal jobs only when no completion
+notification attempt was recorded (`notifyOutcome` is absent). Once a
+`notifyOutcome` exists, including a failed or skipped outcome, restarting the
+service does not automatically retry delivery. This missing-only policy prevents
+restarts from repeatedly hitting downstream webhooks when the bounded
+`notifyHistory` cannot serve as a durable retry budget.
+
+To retry a recorded notification failure, send an authenticated
+`POST /jobs/:id/notify/retry` request with the bridge Bearer token. The job must
+already be terminal. Each manual retry appends its outcome to `notifyHistory`,
+which retains the latest 10 attempts.
 
 For Claude mode:
 
