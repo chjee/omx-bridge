@@ -85,6 +85,12 @@ async function createConfig(overrides: Partial<BridgeConfig> = {}): Promise<Brid
 describe('TmuxSessionRunnerService', () => {
   it('starts a detached tmux session and writes the session runner files', async () => {
     const config = await createConfig();
+    const sessionDirectory = path.join(config.tmuxSessionsDirectory, '00000000-0000-4000-a000-000000000001');
+    if (process.platform !== 'win32') {
+      await fs.mkdir(sessionDirectory, { recursive: true, mode: 0o755 });
+      await fs.chmod(config.tmuxSessionsDirectory, 0o755);
+      await fs.chmod(sessionDirectory, 0o755);
+    }
     const child = new MockChildProcess();
     const spawnFn = jest.fn(() => {
       setImmediate(() => child.emit('close', 0));
@@ -92,7 +98,6 @@ describe('TmuxSessionRunnerService', () => {
     });
     const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
     const session = await service.start(createJob());
-    const sessionDirectory = path.join(config.tmuxSessionsDirectory, '00000000-0000-4000-a000-000000000001');
 
     expect(spawnFn).toHaveBeenCalledWith(
       'tmux',
@@ -100,10 +105,29 @@ describe('TmuxSessionRunnerService', () => {
       expect.objectContaining({ stdio: 'pipe' }),
     );
     await expect(fs.readFile(path.join(sessionDirectory, 'prompt.txt'), 'utf8')).resolves.toBe('hello from tmux');
-    await expect(fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8')).resolves.toContain(
+    const runnerScript = await fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8');
+    expect(runnerScript).toContain(
       "'omx' 'exec' '--full-auto' '-s' 'danger-full-access' '-'",
     );
+    expect(runnerScript.split('\n').slice(0, 3)).toEqual([
+      '#!/usr/bin/env bash',
+      'original_umask="$(umask)"',
+      'umask 077',
+    ]);
+    expect(runnerScript).toContain('umask "$original_umask"\nset +e');
     await expect(fs.readFile(path.join(sessionDirectory, 'session.json'), 'utf8')).resolves.toContain(session.sessionName);
+    if (process.platform !== 'win32') {
+      const sessionRootStat = await fs.stat(config.tmuxSessionsDirectory);
+      const sessionDirectoryStat = await fs.stat(sessionDirectory);
+      const promptStat = await fs.stat(path.join(sessionDirectory, 'prompt.txt'));
+      const runnerStat = await fs.stat(path.join(sessionDirectory, 'run.sh'));
+      const sessionStat = await fs.stat(path.join(sessionDirectory, 'session.json'));
+      expect(sessionRootStat.mode & 0o777).toBe(0o700);
+      expect(sessionDirectoryStat.mode & 0o777).toBe(0o700);
+      expect(promptStat.mode & 0o777).toBe(0o600);
+      expect(runnerStat.mode & 0o777).toBe(0o700);
+      expect(sessionStat.mode & 0o777).toBe(0o600);
+    }
     expect(session).toMatchObject({
       backend: 'tmux',
       status: 'running',
@@ -176,6 +200,101 @@ describe('TmuxSessionRunnerService', () => {
     ]);
     await expect(fs.access(injectedFile)).rejects.toThrow();
     await expect(fs.access(substitutionFile)).rejects.toThrow();
+  });
+
+  it('creates redirected tmux output and exit files with private modes', async () => {
+    if (process.platform === 'win32') return;
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'private-output-omx.sh');
+    const inheritedUmaskFile = path.join(root, 'child-umask.txt');
+    const workspaceFile = path.join(root, 'workspace-file.txt');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        'umask > "$UMASK_FILE"',
+        ': > "$WORKSPACE_FILE"',
+        "printf 'stdout-data'",
+        "printf 'stderr-data' >&2",
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      spawnFn as TmuxSpawnFunction,
+    );
+    const job = createJob();
+
+    await service.start(job);
+    const sessionDirectory = path.join(config.tmuxSessionsDirectory, job.id);
+    await runShellScript(path.join(sessionDirectory, 'run.sh'), {
+      UMASK_FILE: inheritedUmaskFile,
+      WORKSPACE_FILE: workspaceFile,
+    });
+
+    await expect(fs.readFile(path.join(sessionDirectory, 'stdout.log'), 'utf8')).resolves.toBe('stdout-data');
+    await expect(fs.readFile(path.join(sessionDirectory, 'stderr.log'), 'utf8')).resolves.toBe('stderr-data');
+    await expect(fs.readFile(path.join(sessionDirectory, 'exit-code'), 'utf8')).resolves.toBe('0\n');
+    for (const fileName of ['stdout.log', 'stderr.log', 'exit-code']) {
+      const stat = await fs.stat(path.join(sessionDirectory, fileName));
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
+    const inheritedMask = process.umask();
+    const workspaceStat = await fs.stat(workspaceFile);
+    expect((await fs.readFile(inheritedUmaskFile, 'utf8')).trim()).toBe(
+      inheritedMask.toString(8).padStart(4, '0'),
+    );
+    expect(workspaceStat.mode & 0o777).toBe(0o666 & ~inheritedMask);
+  });
+
+  it('does not chmod a tmux root with unrelated entries', async () => {
+    if (process.platform === 'win32') return;
+    const config = await createConfig();
+    await fs.mkdir(config.tmuxSessionsDirectory, { recursive: true, mode: 0o755 });
+    await fs.chmod(config.tmuxSessionsDirectory, 0o755);
+    await fs.writeFile(path.join(config.tmuxSessionsDirectory, 'unrelated.txt'), 'keep', 'utf8');
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+
+    await expect(service.ensureReady()).resolves.toBeUndefined();
+
+    const stat = await fs.stat(config.tmuxSessionsDirectory);
+    expect(stat.mode & 0o777).toBe(0o755);
+  });
+
+  it('rejects a symlinked tmux ancestor without changing the target mode and can retry', async () => {
+    if (process.platform === 'win32') return;
+    const config = await createConfig();
+    const targetDirectory = await createTempDir('tmux-target');
+    const linkedAncestor = path.dirname(config.tmuxSessionsDirectory);
+    const linkedRoot = `${linkedAncestor}-link`;
+    config.tmuxSessionsDirectory = path.join(linkedRoot, 'sessions');
+    await fs.chmod(targetDirectory, 0o755);
+    await fs.symlink(targetDirectory, linkedRoot, 'dir');
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+
+    await expect(service.ensureReady()).rejects.toThrow('symbolic link');
+
+    const stat = await fs.stat(targetDirectory);
+    expect(stat.mode & 0o777).toBe(0o755);
+    await expect(fs.stat(path.join(targetDirectory, 'sessions'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await fs.rm(linkedRoot);
+    await fs.mkdir(config.tmuxSessionsDirectory, { recursive: true, mode: 0o700 });
+    await expect(service.ensureReady()).resolves.toBeUndefined();
   });
 
   it('collects exit code and captured output from a finished session', async () => {

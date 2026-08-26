@@ -34,12 +34,18 @@ function lockPath(jobsDirectory: string): string {
 describe('BridgeInstanceLockService', () => {
   it('creates and removes the instance lock', async () => {
     const jobsDirectory = await createTempDir('bridge-lock');
+    await fs.rm(jobsDirectory, { recursive: true, force: true });
     const service = new BridgeInstanceLockService(createConfig(jobsDirectory));
 
     await service.acquire();
 
     const stat = await fs.stat(lockPath(jobsDirectory));
     expect(stat.isFile()).toBe(true);
+    if (process.platform !== 'win32') {
+      const directoryStat = await fs.stat(jobsDirectory);
+      expect(directoryStat.mode & 0o777).toBe(0o700);
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
 
     await service.release();
 
@@ -78,7 +84,27 @@ describe('BridgeInstanceLockService', () => {
 
     const raw = await fs.readFile(lockPath(jobsDirectory), 'utf8');
     expect(raw).toContain(`"pid":${process.pid}`);
+    if (process.platform !== 'win32') {
+      const stat = await fs.stat(lockPath(jobsDirectory));
+      expect(stat.mode & 0o777).toBe(0o600);
+    }
 
+    await service.release();
+  });
+
+  it('does not chmod a non-dedicated jobs directory when creating a private lock', async () => {
+    if (process.platform === 'win32') return;
+    const jobsDirectory = await createTempDir('bridge-lock-external');
+    await fs.chmod(jobsDirectory, 0o755);
+    await fs.writeFile(path.join(jobsDirectory, 'unrelated.txt'), 'keep', 'utf8');
+    const service = new BridgeInstanceLockService(createConfig(jobsDirectory));
+
+    await service.acquire();
+
+    const directoryStat = await fs.stat(jobsDirectory);
+    expect(directoryStat.mode & 0o777).toBe(0o755);
+    const lockStat = await fs.stat(lockPath(jobsDirectory));
+    expect(lockStat.mode & 0o777).toBe(0o600);
     await service.release();
   });
 });

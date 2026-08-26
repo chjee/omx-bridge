@@ -866,4 +866,22 @@ describe('JobRunnerService', () => {
       await runner.onModuleDestroy();
     }
   });
+
+  it('prepares the tmux state boundary during module initialization', async () => {
+    const ensureReady = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { ensureReady, collect: jest.fn().mockResolvedValue(null) } as unknown as TmuxSessionRunnerService,
+    );
+
+    try {
+      await runner.onModuleInit();
+      expect(ensureReady).toHaveBeenCalledTimes(1);
+    } finally {
+      await runner.onModuleDestroy();
+    }
+  });
 });

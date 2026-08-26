@@ -4,6 +4,12 @@ import { promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
+import {
+  ensurePrivateOwnedDirectory,
+  JOB_STATE_FILE_PATTERN,
+  PRIVATE_FILE_MODE,
+  tightenPrivateOwnedFile,
+} from './private-state-directory';
 
 interface LockFilePayload {
   token: string;
@@ -25,7 +31,7 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
       return;
     }
 
-    await fs.mkdir(this.config.jobsDirectory, { recursive: true });
+    await this.ensureJobsDirectory();
     await this.acquireFreshLock();
   }
 
@@ -49,7 +55,7 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
 
   private async acquireFreshLock(): Promise<void> {
     try {
-      this.lockHandle = await fs.open(this.lockPath(), 'wx');
+      this.lockHandle = await fs.open(this.lockPath(), 'wx', PRIVATE_FILE_MODE);
       await this.lockHandle.writeFile(`${JSON.stringify(this.lockPayload())}\n`, 'utf8');
       return;
     } catch (error) {
@@ -58,6 +64,7 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
       }
     }
 
+    await tightenPrivateOwnedFile(this.lockPath(), 'Bridge instance lock');
     const existing = await this.readExistingLock();
     if (existing && this.isPidAlive(existing.pid)) {
       throw new Error(
@@ -69,7 +76,7 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
       `Removing stale omx-bridge instance lock for ${this.config.jobsDirectory}`,
     );
     await fs.rm(this.lockPath(), { force: true });
-    this.lockHandle = await fs.open(this.lockPath(), 'wx');
+    this.lockHandle = await fs.open(this.lockPath(), 'wx', PRIVATE_FILE_MODE);
     await this.lockHandle.writeFile(`${JSON.stringify(this.lockPayload())}\n`, 'utf8');
   }
 
@@ -113,6 +120,27 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
 
   private lockPath(): string {
     return path.join(this.config.jobsDirectory, '.omx-bridge-instance.lock');
+  }
+
+  private async ensureJobsDirectory(): Promise<void> {
+    const nestedTmuxDirectory = path.dirname(path.resolve(this.config.tmuxSessionsDirectory)) ===
+      path.resolve(this.config.jobsDirectory)
+      ? path.basename(this.config.tmuxSessionsDirectory)
+      : undefined;
+    await ensurePrivateOwnedDirectory(
+      this.config.jobsDirectory,
+      'Bridge jobs directory',
+      (entry) => (
+        (entry.isFile() && (
+          entry.name === '.omx-bridge-instance.lock' ||
+          JOB_STATE_FILE_PATTERN.test(entry.name)
+        )) ||
+        (entry.isDirectory() && (
+          entry.name === 'invalid' ||
+          entry.name === nestedTmuxDirectory
+        ))
+      ),
+    );
   }
 
   private isPidAlive(pid: number): boolean {
