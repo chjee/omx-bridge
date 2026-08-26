@@ -4,9 +4,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import {
+  assertPrivateOwnedFile,
   ensurePrivateOwnedDirectory,
   JOB_STATE_FILE_PATTERN,
   PRIVATE_FILE_MODE,
+  QUARANTINE_FILE_PATTERN,
+  tightenPrivateOwnedFile,
 } from './private-state-directory';
 import {
   EXECUTION_ERROR_TYPES,
@@ -282,7 +285,14 @@ export class JobQueueRepository {
     const quarantinePath = path.join(quarantineDir, `${jobId}.${reason}.${stamp}.json`);
 
     try {
-      await fs.mkdir(quarantineDir, { recursive: true });
+      await assertPrivateOwnedFile(filePath, 'Invalid bridge job file');
+      await ensurePrivateOwnedDirectory(
+        quarantineDir,
+        'Bridge invalid jobs directory',
+        (entry) => entry.isFile() && QUARANTINE_FILE_PATTERN.test(entry.name),
+        { requireDedicated: true },
+      );
+      await tightenPrivateOwnedFile(filePath, 'Invalid bridge job file');
       await fs.rename(filePath, quarantinePath);
       this.logger.warn(`Quarantined ${reason} job file for ${jobId} at ${quarantinePath}`);
     } catch (error) {

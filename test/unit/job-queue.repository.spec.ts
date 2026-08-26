@@ -470,7 +470,109 @@ describe('JobQueueRepository', () => {
     const invalidEntries = await fs.readdir(path.join(jobsDirectory, 'invalid'));
     expect(invalidEntries).toHaveLength(1);
     expect(invalidEntries[0]).toMatch(new RegExp(`^${brokenId}\\.malformed\\..+\\.json$`));
+    if (process.platform !== 'win32') {
+      const quarantineDirectoryStat = await fs.stat(path.join(jobsDirectory, 'invalid'));
+      const quarantineFileStat = await fs.stat(path.join(jobsDirectory, 'invalid', invalidEntries[0]!));
+      expect(quarantineDirectoryStat.mode & 0o777).toBe(0o700);
+      expect(quarantineFileStat.mode & 0o777).toBe(0o600);
+    }
     await expect(repository.listAll()).resolves.toEqual([]);
+  });
+
+  it('does not quarantine through an exact invalid-directory symlink', async () => {
+    if (process.platform === 'win32') return;
+    const brokenId = '11111111-1111-4111-b111-111111111111';
+    const brokenPath = path.join(jobsDirectory, `${brokenId}.json`);
+    const externalTarget = await createTempDir('bridge-invalid-target');
+    await fs.chmod(externalTarget, 0o755);
+    await fs.symlink(externalTarget, path.join(jobsDirectory, 'invalid'), 'dir');
+    await fs.writeFile(brokenPath, '{not-json', { encoding: 'utf8', mode: 0o644 });
+
+    await expect(repository.getById(brokenId)).resolves.toBeNull();
+
+    await expect(fs.readFile(brokenPath, 'utf8')).resolves.toBe('{not-json');
+    expect(await fs.readdir(externalTarget)).toEqual([]);
+    const targetStat = await fs.stat(externalTarget);
+    expect(targetStat.mode & 0o777).toBe(0o755);
+  });
+
+  it('does not quarantine through a symlinked jobs ancestor', async () => {
+    if (process.platform === 'win32') return;
+    const brokenId = '11111111-1111-4111-b111-111111111111';
+    const externalTarget = await createTempDir('bridge-invalid-ancestor-target');
+    const linkParent = await createTempDir('bridge-invalid-ancestor-link');
+    const linkedAncestor = path.join(linkParent, 'linked');
+    const realJobsDirectory = path.join(externalTarget, 'jobs');
+    const linkedJobsDirectory = path.join(linkedAncestor, 'jobs');
+    await fs.mkdir(realJobsDirectory, { mode: 0o755 });
+    await fs.symlink(externalTarget, linkedAncestor, 'dir');
+    const brokenPath = path.join(realJobsDirectory, `${brokenId}.json`);
+    await fs.writeFile(brokenPath, '{not-json', { encoding: 'utf8', mode: 0o644 });
+    const linkedRepository = new JobQueueRepository({
+      ...config,
+      jobsDirectory: linkedJobsDirectory,
+      tmuxSessionsDirectory: path.join(linkedJobsDirectory, 'sessions'),
+    });
+
+    await expect(linkedRepository.getById(brokenId)).resolves.toBeNull();
+
+    await expect(fs.readFile(brokenPath, 'utf8')).resolves.toBe('{not-json');
+    await expect(fs.stat(path.join(realJobsDirectory, 'invalid'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const jobsStat = await fs.stat(realJobsDirectory);
+    expect(jobsStat.mode & 0o777).toBe(0o755);
+  });
+
+  it('does not use an invalid directory that contains unrelated entries', async () => {
+    if (process.platform === 'win32') return;
+    const brokenId = '11111111-1111-4111-b111-111111111111';
+    const brokenPath = path.join(jobsDirectory, `${brokenId}.json`);
+    const quarantineDirectory = path.join(jobsDirectory, 'invalid');
+    await fs.mkdir(quarantineDirectory, { mode: 0o755 });
+    await fs.writeFile(path.join(quarantineDirectory, 'unrelated.txt'), 'keep', 'utf8');
+    await fs.writeFile(brokenPath, '{not-json', { encoding: 'utf8', mode: 0o644 });
+
+    await expect(repository.getById(brokenId)).resolves.toBeNull();
+
+    await expect(fs.readFile(brokenPath, 'utf8')).resolves.toBe('{not-json');
+    await expect(fs.readFile(path.join(quarantineDirectory, 'unrelated.txt'), 'utf8')).resolves.toBe('keep');
+    const quarantineStat = await fs.stat(quarantineDirectory);
+    expect(quarantineStat.mode & 0o777).toBe(0o755);
+  });
+
+  it('does not quarantine a job path that is itself a symlink', async () => {
+    if (process.platform === 'win32') return;
+    const brokenId = '11111111-1111-4111-b111-111111111111';
+    const externalFile = path.join(await createTempDir('bridge-invalid-file-target'), 'external.json');
+    const brokenPath = path.join(jobsDirectory, `${brokenId}.json`);
+    await fs.writeFile(externalFile, '{not-json', { encoding: 'utf8', mode: 0o644 });
+    await fs.symlink(externalFile, brokenPath, 'file');
+
+    await expect(repository.getById(brokenId)).resolves.toBeNull();
+
+    const brokenStat = await fs.lstat(brokenPath);
+    const externalStat = await fs.stat(externalFile);
+    expect(brokenStat.isSymbolicLink()).toBe(true);
+    expect(externalStat.mode & 0o777).toBe(0o644);
+    await expect(fs.readFile(externalFile, 'utf8')).resolves.toBe('{not-json');
+    await expect(fs.stat(path.join(jobsDirectory, 'invalid'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('continues quarantining after a non-UUID malformed JSON filename', async () => {
+    const foreignPath = path.join(jobsDirectory, 'foreign.json');
+    const uuidPath = path.join(jobsDirectory, `${TEST_ID_1}.json`);
+    await fs.writeFile(foreignPath, '{not-json', 'utf8');
+
+    await expect(repository.listAll()).resolves.toEqual([]);
+
+    await fs.writeFile(uuidPath, '{not-json', 'utf8');
+    await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
+
+    const quarantined = await fs.readdir(path.join(jobsDirectory, 'invalid'));
+    expect(quarantined).toHaveLength(2);
+    expect(quarantined).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^foreign\.malformed\..+\.json$/),
+      expect.stringMatching(new RegExp(`^${TEST_ID_1}\\.malformed\\..+\\.json$`)),
+    ]));
   });
 
   it('skips structurally invalid job files without breaking cleanup', async () => {
@@ -515,7 +617,10 @@ describe('JobQueueRepository', () => {
 
     try {
       await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
-      await expect(fs.stat(invalidPath)).resolves.toBeDefined();
+      const originalStat = await fs.stat(invalidPath);
+      if (process.platform !== 'win32') {
+        expect(originalStat.mode & 0o777).toBe(0o600);
+      }
       await expect(repository.listAll()).resolves.toEqual([]);
     } finally {
       renameSpy.mockRestore();

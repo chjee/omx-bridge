@@ -10,11 +10,21 @@ export const JOB_STATE_FILE_PATTERN = new RegExp(
   `^${JOB_ID_SOURCE}\\.json(?:\\.${JOB_ID_SOURCE}\\.tmp)?$`,
   'i',
 );
+export const QUARANTINE_FILE_PATTERN = new RegExp(
+  '^[^/\\\\]+\\.(?:invalid|malformed)\\.' +
+  '\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z\\.json$',
+  'i',
+);
+
+export interface PrivateOwnedDirectoryOptions {
+  requireDedicated?: boolean;
+}
 
 export async function ensurePrivateOwnedDirectory(
   directory: string,
   label: string,
   acceptsEntry: (entry: Dirent) => boolean,
+  options: PrivateOwnedDirectoryOptions = {},
 ): Promise<void> {
   if (process.platform === 'win32') {
     await fs.mkdir(directory, { recursive: true });
@@ -47,13 +57,16 @@ export async function ensurePrivateOwnedDirectory(
   const entries = await fs.readdir(directory, { withFileTypes: true });
   const unrelated = entries.find((entry) => entry.isSymbolicLink() || !acceptsEntry(entry));
   if (unrelated) {
+    if (options.requireDedicated) {
+      throw new Error(`${label} contains unrelated entry ${unrelated.name}: ${directory}`);
+    }
     return;
   }
 
   await fs.chmod(directory, PRIVATE_DIRECTORY_MODE);
 }
 
-export async function tightenPrivateOwnedFile(filePath: string, label: string): Promise<void> {
+export async function assertPrivateOwnedFile(filePath: string, label: string): Promise<void> {
   if (process.platform === 'win32') return;
   await assertNoSymlinkComponents(filePath, label);
   const stat = await fs.lstat(filePath);
@@ -64,6 +77,11 @@ export async function tightenPrivateOwnedFile(filePath: string, label: string): 
   if (uid !== undefined && stat.uid !== uid) {
     throw new Error(`${label} is not owned by the current user: ${filePath}`);
   }
+}
+
+export async function tightenPrivateOwnedFile(filePath: string, label: string): Promise<void> {
+  await assertPrivateOwnedFile(filePath, label);
+  if (process.platform === 'win32') return;
   await fs.chmod(filePath, PRIVATE_FILE_MODE);
 }
 
