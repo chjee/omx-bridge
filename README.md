@@ -90,6 +90,14 @@ services do not always inherit your interactive shell `PATH`; if `node` or
 or add a service `Environment=PATH=...` line, and set `OMX_COMMAND` in `.env`
 to an absolute `omx` path when needed.
 
+The provided unit is the supported production containment boundary for direct
+`omx exec` children. `KillMode=control-group`, `TimeoutStopSec=30s`, and
+`SendSIGKILL=yes` make systemd stop the complete service cgroup within a bounded
+window. The 30-second window leaves headroom over the default 5-second child
+TERM-to-KILL grace and the bridge's bounded shutdown waits. Deployments outside
+systemd or another cgroup-aware supervisor cannot guarantee descendant cleanup
+after bridge `SIGKILL`, a host crash, or supervisor failure.
+
 ## Bridge Service Configuration
 
 Important root `.env` values:
@@ -514,7 +522,7 @@ This is an operator smoke, not a deterministic CI gate: it uses local provider c
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
 - The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in the shared JSONL store, uses a file lock for cross-process drain, and deduplicates by job id before returning notifications.
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
-- On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
+- On POSIX timeout, cancellation, or graceful bridge shutdown, the bridge signals only the process group it created for the direct `omx exec` child and escalates from SIGTERM to SIGKILL after the configured grace (5 seconds by default). The provided systemd unit additionally contains abnormal service termination at the cgroup boundary; non-systemd forced-crash cleanup is not guaranteed.
 - `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header unless the bridge explicitly runs `BRIDGE_INSECURE_LOOPBACK=1`. The MCP server and plugin sign callback requests automatically when the secret is configured.
 - `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Channel brokers such as `claude-chopper` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; `originRoutingKey` takes precedence.
 - `source` accepts `dispatch`, `channel`, and `openclaw`. New broker-owned chat integrations should use `source: "channel"` plus `sourceName` (for example `claude-chopper`) instead of adding app-specific source enum values. Legacy `source: "synapse"` submissions are normalized to `source: "channel"` with `sourceName: "claude-synapse"`.

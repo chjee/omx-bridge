@@ -661,6 +661,31 @@ function createWaitShim(dir) {
   return filePath;
 }
 
+function createDirectExecTreeShim(dir) {
+  const filePath = path.join(dir, 'fake-omx-process-tree.js');
+  const ignoringDescendant = [
+    "const fs = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    "fs.writeFileSync(process.env.OMX_PROCESS_TREE_PID_FILE, process.ppid + ':' + process.pid + '\\n', { mode: 0o600 });",
+    'setInterval(() => {}, 1000);',
+  ].join('');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env node',
+    "'use strict';",
+    "const { spawn } = require('node:child_process');",
+    'const pidFile = process.env.OMX_PROCESS_TREE_PID_FILE;',
+    "if (!pidFile) { process.stderr.write('missing OMX_PROCESS_TREE_PID_FILE\\n'); process.exit(64); }",
+    "const ignoreTerm = process.env.OMX_PROCESS_TREE_IGNORE_TERM === '1';",
+    `const descendantSource = ${JSON.stringify(ignoringDescendant)};`,
+    "const descendant = spawn(process.execPath, ['-e', descendantSource], { stdio: 'ignore' });",
+    "if (ignoreTerm) process.on('SIGTERM', () => {});",
+    "descendant.once('exit', (code) => process.exit(code ?? 0));",
+    'setInterval(() => {}, 1000);',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -882,6 +907,65 @@ function isProcessGroupAlive(pid) {
   }
 }
 
+function isOwnedProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return false;
+    throw error;
+  }
+  if (process.platform === 'linux') {
+    try {
+      return !fs.readFileSync(`/proc/${pid}/stat`, 'utf8').includes(') Z ');
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return false;
+      throw error;
+    }
+  }
+  return true;
+}
+
+function readOwnedProcessTree(pidFile) {
+  const raw = fs.readFileSync(pidFile, 'utf8').trim();
+  const [parent, descendant] = raw.split(':').map((value) => Number.parseInt(value, 10));
+  assert(Number.isInteger(parent) && parent > 1, `owned process-tree parent pid was invalid: ${raw}`);
+  assert(Number.isInteger(descendant) && descendant > 1, `owned process-tree descendant pid was invalid: ${raw}`);
+  assert(parent !== process.pid && descendant !== process.pid, 'owned process-tree fixture resolved to the smoke runner');
+  return { parent, descendant };
+}
+
+async function waitForOwnedProcessTreeExit(tree, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isOwnedProcessAlive(tree.parent) && !isOwnedProcessAlive(tree.descendant)) return;
+    await delay(50);
+  }
+  throw new Error(`owned process tree did not exit: parent=${tree.parent}, descendant=${tree.descendant}`);
+}
+
+async function cleanupOwnedProcessTree(tree) {
+  if (!tree) return;
+  if (!isOwnedProcessAlive(tree.parent) && !isOwnedProcessAlive(tree.descendant)) return;
+  try {
+    process.kill(-tree.parent, 'SIGKILL');
+  } catch (error) {
+    if (!error || error.code !== 'ESRCH') throw error;
+  }
+  await waitForOwnedProcessTreeExit(tree);
+}
+
+async function forceStopChild(child, timeoutMs = 2_000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`child ${child.pid} did not exit after SIGKILL`)), timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.kill('SIGKILL');
+  });
+}
+
 async function waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, pid) {
   const deadline = Date.now() + 5_000;
   const runningFile = path.join(fakeTmuxStateDir, `${sessionName}.running`);
@@ -1100,6 +1184,83 @@ async function smokeCancelPath() {
     cleanupTempDir(tempDir, failed);
   }
   log('cancel path passed');
+}
+
+async function smokeDirectExecContainment() {
+  if (process.platform === 'win32') {
+    log('direct exec process-tree containment smoke skipped on Windows');
+    return;
+  }
+
+  const tempDir = makeTempDir('omx-bridge-smoke-exec-containment-');
+  const ownedTrees = [];
+  const bridges = [];
+  let failed = false;
+  const treeCommand = createDirectExecTreeShim(tempDir);
+
+  const startTreeJob = async (label, { ignoreTerm = false, timeoutMs = 10_000 } = {}) => {
+    const pidFile = path.join(tempDir, `${label}.pids`);
+    const port = await getFreePort();
+    const bridge = startBridge({
+      port,
+      jobsDir: path.join(tempDir, `${label}-jobs`),
+      omxCommand: treeCommand,
+      omxEnvAllowlist: 'PATH,OMX_PROCESS_TREE_PID_FILE,OMX_PROCESS_TREE_IGNORE_TERM',
+      bridgeEnv: {
+        OMX_PROCESS_TREE_PID_FILE: pidFile,
+        OMX_PROCESS_TREE_IGNORE_TERM: ignoreTerm ? '1' : '0',
+        BRIDGE_JOB_TIMEOUT_MS: String(timeoutMs),
+        BRIDGE_SIGKILL_GRACE_MS: '50',
+      },
+    });
+    bridges.push(bridge);
+    await waitForBridge(port);
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt: `runtime smoke direct exec ${label}`,
+      requestId: `runtime-smoke-direct-exec-${label}`,
+      source: 'dispatch',
+    });
+    await waitForRunningJob(port, submit.jobId);
+    await waitForPathState(pidFile, true);
+    const tree = readOwnedProcessTree(pidFile);
+    ownedTrees.push(tree);
+    return { bridge, port, jobId: submit.jobId, tree };
+  };
+
+  try {
+    const cancelled = await startTreeJob('cancel');
+    await requestJson(cancelled.port, 'POST', `/jobs/${encodeURIComponent(cancelled.jobId)}/cancel`);
+    await waitForTerminalJob(cancelled.port, cancelled.jobId);
+    await waitForOwnedProcessTreeExit(cancelled.tree);
+
+    const timedOut = await startTreeJob('timeout', { ignoreTerm: true, timeoutMs: 1_000 });
+    const timeoutJob = await waitForTerminalJob(timedOut.port, timedOut.jobId);
+    assertEqual(timeoutJob.execution?.errorType, 'timeout', 'direct exec tree did not time out', compactJobDiagnostic(timeoutJob));
+    await waitForOwnedProcessTreeExit(timedOut.tree);
+
+    const graceful = await startTreeJob('graceful');
+    await stopChild(graceful.bridge, 5_000);
+    await waitForOwnedProcessTreeExit(graceful.tree);
+
+    const forced = await startTreeJob('forced');
+    await forceStopChild(forced.bridge);
+    const forcedTreeSurvived = isOwnedProcessAlive(forced.tree.parent) || isOwnedProcessAlive(forced.tree.descendant);
+    log(`non-systemd forced bridge termination diagnostic: owned descendant survived=${forcedTreeSurvived}`);
+    await cleanupOwnedProcessTree(forced.tree);
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('direct exec process-tree containment', tempDir, bridges);
+    throw error;
+  } finally {
+    const teardownResults = await Promise.allSettled([
+      ...ownedTrees.map((tree) => cleanupOwnedProcessTree(tree)),
+      ...bridges.map((bridge) => stopChild(bridge, 5_000)),
+    ]);
+    const teardownFailure = teardownResults.find((result) => result.status === 'rejected');
+    cleanupTempDir(tempDir, failed);
+    if (teardownFailure?.status === 'rejected') throw teardownFailure.reason;
+  }
+  log('direct exec process-tree containment smoke passed');
 }
 
 async function smokeTmuxRuntime() {
@@ -1536,6 +1697,7 @@ async function smokeLoopbackRuntime() {
   await smokeDiagnosticsFixture();
   await smokeBridgeApi();
   await smokeCancelPath();
+  await smokeDirectExecContainment();
   await smokeTmuxRuntime();
   await smokeTmuxCancelRuntime();
   await smokeTmuxTimeoutRuntime();
