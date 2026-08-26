@@ -1173,8 +1173,8 @@ async function smokeTmuxRuntime() {
     assert(fs.existsSync(retainedSessionDir), 'latest retained tmux session directory was removed');
     assert(fs.existsSync(path.join(retainedSessionDir, 'session.json')), 'latest retained session state was removed');
 
-    const liveId = '00000000-0000-4000-a000-000000000099';
-    const liveSessionName = 'runtime-smoke-live-retention';
+    const liveId = '90000000-0000-4000-a000-000000000099';
+    const liveSessionName = `omx-bridge-${liveId.replace(/-/g, '').slice(0, 24)}`;
     const liveSessionDir = path.join(tmuxSessionsDir, liveId);
     fs.mkdirSync(liveSessionDir, { recursive: true });
     fs.writeFileSync(path.join(liveSessionDir, 'session.json'), JSON.stringify({ sessionName: liveSessionName }));
@@ -1188,11 +1188,12 @@ async function smokeTmuxRuntime() {
     children.push(liveProbe);
     fs.writeFileSync(path.join(fakeTmuxStateDir, `${liveSessionName}.running`), '');
     fs.writeFileSync(path.join(fakeTmuxStateDir, `${liveSessionName}.pid`), `${liveProbe.pid}\n`);
-    const inactiveSentinelId = '00000000-0000-4000-a000-000000000098';
+    const inactiveSentinelId = '80000000-0000-4000-a000-000000000098';
+    const inactiveSentinelName = `omx-bridge-${inactiveSentinelId.replace(/-/g, '').slice(0, 24)}`;
     const inactiveSentinelDir = path.join(tmuxSessionsDir, inactiveSentinelId);
     fs.mkdirSync(inactiveSentinelDir, { recursive: true });
     fs.writeFileSync(path.join(inactiveSentinelDir, 'session.json'), JSON.stringify({
-      sessionName: 'runtime-smoke-inactive-sentinel',
+      sessionName: inactiveSentinelName,
     }));
     fs.utimesSync(inactiveSentinelDir, oldTime, oldTime);
     fs.utimesSync(path.join(inactiveSentinelDir, 'session.json'), oldTime, oldTime);

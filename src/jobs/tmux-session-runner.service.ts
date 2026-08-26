@@ -260,6 +260,10 @@ export class TmuxSessionRunnerService {
 
   async removeArtifacts(jobId: string, expectedSessionName: string): Promise<ArtifactCleanupResult> {
     if (!JOB_ID_PATTERN.test(jobId)) return { jobId, status: 'failed', detail: 'invalid_job_id' };
+    const canonicalSessionName = this.buildSessionName(jobId);
+    if (expectedSessionName !== canonicalSessionName) {
+      return { jobId, status: 'liveness_unknown', detail: 'non_canonical_session' };
+    }
     const directory = this.sessionDirectory(jobId);
     let stat: Awaited<ReturnType<typeof fs.lstat>>;
     try {
@@ -282,7 +286,7 @@ export class TmuxSessionRunnerService {
     }
 
     const sessionName = await this.readPersistedSessionName(jobId);
-    if (!sessionName || sessionName !== expectedSessionName) {
+    if (!sessionName || sessionName !== canonicalSessionName) {
       return { jobId, status: 'liveness_unknown', detail: 'unreadable_session' };
     }
     const liveness = await this.runTmux(['has-session', '-t', expectedSessionName]);
@@ -291,6 +295,15 @@ export class TmuxSessionRunnerService {
       return { jobId, status: 'liveness_unknown', detail: liveness.stderr || 'tmux_unavailable' };
     }
     try {
+      await assertPrivateOwnedDirectory(
+        directory,
+        'Bridge tmux cleanup directory',
+        (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+      );
+      const finalStat = await fs.lstat(directory);
+      if (finalStat.dev !== stat.dev || finalStat.ino !== stat.ino) {
+        return { jobId, status: 'failed', detail: 'artifact_identity_changed' };
+      }
       await fs.rm(directory, { recursive: true });
       return { jobId, status: 'removed' };
     } catch (error) {
@@ -321,11 +334,12 @@ export class TmuxSessionRunnerService {
       }
       if (newest >= cutoff) continue;
       const sessionName = await this.readPersistedSessionName(entry.name);
-      if (!sessionName) {
+      const canonicalSessionName = this.buildSessionName(entry.name);
+      if (!sessionName || sessionName !== canonicalSessionName) {
         results.push({ jobId: entry.name, status: 'liveness_unknown', detail: 'unreadable_session' });
         continue;
       }
-      results.push(await this.removeArtifacts(entry.name, sessionName));
+      results.push(await this.removeArtifacts(entry.name, canonicalSessionName));
     }
     return results;
   }

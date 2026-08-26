@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
@@ -19,7 +19,7 @@ interface LockFilePayload {
 }
 
 @Injectable()
-export class BridgeInstanceLockService implements OnModuleDestroy {
+export class BridgeInstanceLockService {
   private readonly logger = new Logger(BridgeInstanceLockService.name);
   private readonly token = randomUUID();
   private lockHandle?: FileHandle;
@@ -47,10 +47,6 @@ export class BridgeInstanceLockService implements OnModuleDestroy {
     } finally {
       await this.unlinkOwnLock();
     }
-  }
-
-  async onModuleDestroy(): Promise<void> {
-    await this.release();
   }
 
   private async acquireFreshLock(): Promise<void> {
