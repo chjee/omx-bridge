@@ -6,6 +6,7 @@ import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import {
   assertPrivateOwnedFile,
   ensurePrivateOwnedDirectory,
+  JOB_ID_PATTERN,
   JOB_STATE_FILE_PATTERN,
   PRIVATE_FILE_MODE,
   QUARANTINE_FILE_PATTERN,
@@ -36,6 +37,13 @@ export interface CleanupTerminalJobsOptions {
 export interface CleanupTerminalJobsResult {
   deleted: number;
   retained: number;
+  deletedEntries: CleanupTerminalJobEntry[];
+}
+
+export interface CleanupTerminalJobEntry {
+  jobId: string;
+  executionMode: NonNullable<BridgeJob['executionMode']>;
+  sessionName?: string;
 }
 
 export interface ConditionalJobTransitionResult {
@@ -150,6 +158,15 @@ export class JobQueueRepository {
     return jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
   }
 
+  async listDurableJobIds(): Promise<string[]> {
+    await this.ensureReady();
+    const entries = await fs.readdir(this.config.jobsDirectory, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => entry.name.slice(0, -'.json'.length))
+      .filter((id) => JOB_ID_PATTERN.test(id));
+  }
+
   async cleanupTerminalJobs(
     options: CleanupTerminalJobsOptions,
   ): Promise<CleanupTerminalJobsResult> {
@@ -177,9 +194,20 @@ export class JobQueueRepository {
       await fs.rm(this.jobPath(id), { force: true });
     }
 
+    const deletedEntries = terminalJobs
+      .filter((job) => deleteIds.has(job.id))
+      .map((job) => ({
+        jobId: job.id,
+        executionMode: job.executionMode ?? 'exec',
+        ...(job.executionMode === 'tmux' && job.session?.sessionName
+          ? { sessionName: job.session.sessionName }
+          : {}),
+      }));
+
     return {
       deleted: deleteIds.size,
       retained: terminalJobs.length - deleteIds.size,
+      deletedEntries,
     };
   }
 

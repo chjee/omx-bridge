@@ -478,4 +478,170 @@ describe('TmuxSessionRunnerService', () => {
 
     await expect(service.cancel(job)).resolves.toBeNull();
   });
+
+  it('removes inactive artifacts and retains live or unreadable sessions', async () => {
+    const config = await createConfig();
+    const job = createJob();
+    const sessionDirectory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(sessionDirectory, { recursive: true });
+    await fs.writeFile(path.join(sessionDirectory, 'session.json'), JSON.stringify({
+      sessionName: 'omx-bridge-cleanup',
+    }));
+    const inactive = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(config, jest.fn(() => {
+      setImmediate(() => {
+        inactive.stderr.write("can't find session: omx-bridge-cleanup");
+        inactive.emit('close', 1);
+      });
+      return inactive as unknown as ChildProcessWithoutNullStreams;
+    }) as TmuxSpawnFunction);
+
+    await expect(service.removeArtifacts(job.id, 'omx-bridge-cleanup')).resolves.toEqual({
+      jobId: job.id,
+      status: 'removed',
+    });
+    await expect(service.removeArtifacts(job.id, 'omx-bridge-cleanup')).resolves.toEqual({
+      jobId: job.id,
+      status: 'not_found',
+    });
+
+    await fs.mkdir(sessionDirectory, { recursive: true });
+    await fs.writeFile(path.join(sessionDirectory, 'session.json'), '{bad-json');
+    await expect(service.removeArtifacts(job.id, 'omx-bridge-cleanup')).resolves.toMatchObject({
+      status: 'liveness_unknown',
+    });
+  });
+
+  it('retains artifacts when code one reports a tmux command failure', async () => {
+    const config = await createConfig();
+    const job = createJob();
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'session.json'), JSON.stringify({ sessionName: 'owned-session' }));
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(config, jest.fn(() => {
+      setImmediate(() => {
+        child.stderr.write('permission denied');
+        child.emit('close', 1);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as TmuxSpawnFunction);
+
+    await expect(service.removeArtifacts(job.id, 'owned-session')).resolves.toMatchObject({
+      status: 'liveness_unknown',
+    });
+    await expect(fs.stat(directory)).resolves.toBeDefined();
+  });
+
+  it('rejects invalid and non-dedicated artifact paths without deleting them', async () => {
+    const config = await createConfig();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    await expect(service.removeArtifacts('../outside', 'session')).resolves.toMatchObject({ status: 'failed' });
+    const id = '00000000-0000-4000-a000-000000000021';
+    const directory = path.join(config.tmuxSessionsDirectory, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'session.json'), JSON.stringify({ sessionName: 'session' }));
+    await fs.writeFile(path.join(directory, 'unrelated.txt'), 'keep');
+
+    await expect(service.removeArtifacts(id, 'session')).resolves.toMatchObject({ status: 'failed' });
+    await expect(fs.readFile(path.join(directory, 'unrelated.txt'), 'utf8')).resolves.toBe('keep');
+  });
+
+  it('collects large output with bounded head and tail reads', async () => {
+    const config = await createConfig({ maxOutputChars: 100 });
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-large',
+        status: 'running',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        attachCommand: 'tmux attach -t omx-bridge-large',
+      },
+    });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), `HEAD${'x'.repeat(10 * 1024 * 1024)}TAIL`);
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'exit-code'), '0\n');
+
+    const readSpy = jest.spyOn(fs, 'readFile');
+    const collected = await service.collect(job);
+
+    expect(collected?.result.stdout.length).toBeLessThanOrEqual(100);
+    expect(collected?.result.stdout).toContain('HEAD');
+    expect(collected?.result.stdout).toContain('TAIL');
+    expect(collected?.result.execution.outputTruncated).toBe(true);
+    expect(readSpy).not.toHaveBeenCalledWith(path.join(directory, 'stdout.log'), expect.anything());
+  });
+
+  it('does not split UTF-8 surrogate pairs at bounded output edges', async () => {
+    const config = await createConfig({ maxOutputChars: 40 });
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'unicode', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t unicode',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), `HEAD${'😀'.repeat(100)}TAIL`);
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'exit-code'), '0\n');
+
+    const collected = await service.collect(job);
+
+    expect(collected?.result.stdout).not.toContain('\uFFFD');
+    expect(collected?.result.stdout.length).toBeLessThanOrEqual(40);
+  });
+
+  it('sweeps only stale inactive orphan directories', async () => {
+    const config = await createConfig();
+    const ids = [
+      '00000000-0000-4000-a000-000000000011',
+      '00000000-0000-4000-a000-000000000012',
+      '00000000-0000-4000-a000-000000000013',
+      '00000000-0000-4000-a000-000000000014',
+    ];
+    for (const [index, id] of ids.entries()) {
+      const directory = path.join(config.tmuxSessionsDirectory, id);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, 'session.json'), JSON.stringify({
+        sessionName: index === 1 ? 'live-session' : `inactive-${index}`,
+      }));
+      const time = index === 2 ? new Date() : new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      await fs.utimes(directory, time, time);
+      await fs.utimes(path.join(directory, 'session.json'), time, time);
+    }
+    const spawnFn = jest.fn((_command, args) => {
+      const child = new MockChildProcess();
+      setImmediate(() => {
+        if (!args?.includes('live-session')) child.stderr.write("can't find session: inactive");
+        child.emit('close', args?.includes('live-session') ? 0 : 1);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
+
+    const results = await service.cleanupStaleOrphans([], 7, [ids[3]]);
+
+    expect(results).toEqual(expect.arrayContaining([
+      { jobId: ids[0], status: 'removed' },
+      { jobId: ids[1], status: 'retained_live' },
+    ]));
+    await expect(fs.stat(path.join(config.tmuxSessionsDirectory, ids[0]))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(path.join(config.tmuxSessionsDirectory, ids[1]))).resolves.toBeDefined();
+    await expect(fs.stat(path.join(config.tmuxSessionsDirectory, ids[2]))).resolves.toBeDefined();
+    await expect(fs.stat(path.join(config.tmuxSessionsDirectory, ids[3]))).resolves.toBeDefined();
+  });
 });

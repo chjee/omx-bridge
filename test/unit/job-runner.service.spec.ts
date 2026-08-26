@@ -884,4 +884,63 @@ describe('JobRunnerService', () => {
       await runner.onModuleDestroy();
     }
   });
+
+  it('cleans only deleted tmux entries and isolates artifact failures', async () => {
+    config.jobRetentionDays = 1;
+    const removeArtifacts = jest.fn().mockRejectedValue(new Error('cleanup failed'));
+    const cleanupStaleOrphans = jest.fn().mockResolvedValue([]);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { removeArtifacts, cleanupStaleOrphans } as unknown as TmuxSessionRunnerService,
+    );
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000001',
+      status: 'succeeded',
+      executionMode: 'tmux',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:01:00.000Z',
+      session: {
+        backend: 'tmux', sessionName: 'owned-session', status: 'exited',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z',
+        attachCommand: 'tmux attach -t owned-session',
+      },
+    }));
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000002', status: 'failed',
+      createdAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
+    }));
+
+    await expect(runner.cleanupTerminalJobs()).resolves.toBeUndefined();
+
+    expect(removeArtifacts).toHaveBeenCalledTimes(1);
+    expect(removeArtifacts).toHaveBeenCalledWith('00000000-0000-4000-a000-000000000001', 'owned-session');
+    expect(cleanupStaleOrphans).toHaveBeenCalledTimes(1);
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toBeNull();
+    await expect(repository.getById('00000000-0000-4000-a000-000000000002')).resolves.toBeNull();
+  });
+
+  it('serializes concurrent cleanup requests', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const cleanupSpy = jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
+      await barrier;
+      return { deleted: 0, retained: 0, deletedEntries: [] };
+    });
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    const first = runner.cleanupTerminalJobs();
+    const second = runner.cleanupTerminalJobs();
+    release();
+    await Promise.all([first, second]);
+
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
 });

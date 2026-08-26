@@ -67,6 +67,11 @@ This starts temporary loopback bridge instances from build artifacts with isolat
 
 The automated smoke does not run the real OMX CLI and does not contact live Telegram or OpenClaw hooks. Keep the manual checks below for deployed service wiring, real OMX execution, and external notification delivery.
 
+Tmux collection reads only bounded head/tail regions and retained terminal/session
+artifacts follow the configured job retention policy. This does not cap the live
+growth of stdout/stderr files while a tmux job is still running. Treat live-output
+limiting as a separate follow-up; it is not part of the current retention cleanup.
+
 Run the opt-in live OMX execution smoke only when local model credentials and `omx` are configured:
 
 ```bash
