@@ -25,6 +25,7 @@ function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
     stderr: overrides.stderr ?? '',
     requestId: overrides.requestId,
     metadata: overrides.metadata,
+    session: overrides.session,
     execution: overrides.execution ?? {
       command: 'omx',
       timeoutMs: 1000,
@@ -375,7 +376,11 @@ describe('JobQueueRepository', () => {
       now: new Date('2026-04-27T00:00:00.000Z'),
     });
 
-    expect(result).toEqual({ deleted: 1, retained: 1 });
+    expect(result).toEqual({
+      deleted: 1,
+      retained: 1,
+      deletedEntries: [{ jobId: TEST_ID_1, executionMode: 'exec' }],
+    });
     await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
     await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
     await expect(repository.getById(TEST_ID_3)).resolves.toMatchObject({ status: 'queued' });
@@ -401,7 +406,11 @@ describe('JobQueueRepository', () => {
       now: new Date('2026-04-27T00:00:00.000Z'),
     });
 
-    expect(result).toEqual({ deleted: 1, retained: 1 });
+    expect(result).toEqual({
+      deleted: 1,
+      retained: 1,
+      deletedEntries: [{ jobId: TEST_ID_1, executionMode: 'exec' }],
+    });
     await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
     await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
   });
@@ -426,7 +435,11 @@ describe('JobQueueRepository', () => {
       now: new Date('2026-04-27T00:00:00.000Z'),
     });
 
-    expect(result).toEqual({ deleted: 1, retained: 1 });
+    expect(result).toEqual({
+      deleted: 1,
+      retained: 1,
+      deletedEntries: [{ jobId: TEST_ID_1, executionMode: 'exec' }],
+    });
     await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
     await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
   });
@@ -454,10 +467,42 @@ describe('JobQueueRepository', () => {
       now: new Date('2026-04-27T00:00:00.000Z'),
     });
 
-    expect(result).toEqual({ deleted: 1, retained: 2 });
+    expect(result).toEqual({
+      deleted: 1,
+      retained: 2,
+      deletedEntries: [{ jobId: TEST_ID_1, executionMode: 'exec' }],
+    });
     await expect(repository.getById(TEST_ID_1)).resolves.toBeNull();
     await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
     await expect(repository.getById(TEST_ID_3)).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
+  it('returns persisted tmux cleanup evidence for deleted terminal jobs', async () => {
+    await repository.save(createJob({
+      status: 'succeeded',
+      executionMode: 'tmux',
+      finishedAt: '2026-04-01T00:00:00.000Z',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-cleanup',
+        status: 'exited',
+        createdAt: '2026-04-01T00:00:00.000Z',
+        updatedAt: '2026-04-01T00:01:00.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-cleanup',
+      },
+    }));
+
+    const result = await repository.cleanupTerminalJobs({
+      retentionDays: 7,
+      maxTerminalJobs: 1000,
+      now: new Date('2026-04-27T00:00:00.000Z'),
+    });
+
+    expect(result.deletedEntries).toEqual([{
+      jobId: TEST_ID_1,
+      executionMode: 'tmux',
+      sessionName: 'omx-bridge-cleanup',
+    }]);
   });
 
   it('handles malformed job files predictably', async () => {
@@ -601,7 +646,7 @@ describe('JobQueueRepository', () => {
         maxTerminalJobs: 1,
         now: new Date('2026-04-27T00:00:00.000Z'),
       }),
-    ).resolves.toEqual({ deleted: 0, retained: 0 });
+    ).resolves.toEqual({ deleted: 0, retained: 0, deletedEntries: [] });
   });
 
   it('continues skipping invalid job files when quarantine fails', async () => {

@@ -1,15 +1,37 @@
+import { EventEmitter } from 'node:events';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
 import { JobRunnerService } from '../../src/jobs/job-runner.service';
 import type { BridgeJob, OmxExecutionResult } from '../../src/jobs/job.types';
 import type { OmxExecService } from '../../src/jobs/omx-exec.service';
 import type { JobNotifyService } from '../../src/jobs/job-notify.service';
-import type { TmuxSessionRunnerService } from '../../src/jobs/tmux-session-runner.service';
+import { TmuxSessionRunnerService, type TmuxSpawnFunction } from '../../src/jobs/tmux-session-runner.service';
+import type { BridgeInstanceLockService } from '../../src/jobs/bridge-instance-lock.service';
 import { createTempDir, waitFor } from '../helpers';
 
 const mockJobNotify = {
   notifyJobComplete: jest.fn().mockResolvedValue(undefined),
 } as unknown as JobNotifyService;
+
+function canonicalSessionName(jobId: string): string {
+  return `omx-bridge-${jobId.replace(/-/g, '').slice(0, 24)}`;
+}
+
+function tmuxProbe(code: number, stderr = ''): ReturnType<TmuxSpawnFunction> {
+  const child = new EventEmitter() as ReturnType<TmuxSpawnFunction>;
+  Object.assign(child, {
+    stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+    kill: jest.fn(() => true),
+  });
+  setImmediate(() => {
+    if (stderr) (child.stderr as PassThrough).write(stderr);
+    child.emit('close', code);
+  });
+  return child;
+}
 
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
@@ -883,5 +905,181 @@ describe('JobRunnerService', () => {
     } finally {
       await runner.onModuleDestroy();
     }
+  });
+
+  it('cleans only deleted tmux entries and isolates artifact failures', async () => {
+    config.jobRetentionDays = 1;
+    const removeArtifacts = jest.fn().mockRejectedValue(new Error('cleanup failed'));
+    const cleanupStaleOrphans = jest.fn().mockResolvedValue([]);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { removeArtifacts, cleanupStaleOrphans } as unknown as TmuxSessionRunnerService,
+    );
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000001',
+      status: 'succeeded',
+      executionMode: 'tmux',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:01:00.000Z',
+      session: {
+        backend: 'tmux', sessionName: 'owned-session', status: 'exited',
+        createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:01:00.000Z',
+        attachCommand: 'tmux attach -t owned-session',
+      },
+    }));
+    await repository.save(createJob({
+      id: '00000000-0000-4000-a000-000000000002', status: 'failed',
+      createdAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
+    }));
+
+    await expect(runner.cleanupTerminalJobs()).resolves.toBeUndefined();
+
+    expect(removeArtifacts).toHaveBeenCalledTimes(1);
+    expect(removeArtifacts).toHaveBeenCalledWith('00000000-0000-4000-a000-000000000001', 'owned-session');
+    expect(cleanupStaleOrphans).toHaveBeenCalledTimes(1);
+    await expect(repository.getById('00000000-0000-4000-a000-000000000001')).resolves.toBeNull();
+    await expect(repository.getById('00000000-0000-4000-a000-000000000002')).resolves.toBeNull();
+  });
+
+  it('serializes concurrent cleanup requests', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const cleanupSpy = jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
+      await barrier;
+      return { deleted: 0, retained: 0, deletedEntries: [] };
+    });
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+
+    const first = runner.cleanupTerminalJobs();
+    const second = runner.cleanupTerminalJobs();
+    release();
+    await Promise.all([first, second]);
+
+    expect(cleanupSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('isolates orphan discovery read failures after terminal cleanup', async () => {
+    const originalListAll = repository.listAll.bind(repository);
+    jest.spyOn(repository, 'listAll')
+      .mockImplementationOnce(originalListAll)
+      .mockRejectedValueOnce(new Error('durable scan failed'));
+    const cleanupStaleOrphans = jest.fn();
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { cleanupStaleOrphans } as unknown as TmuxSessionRunnerService,
+    );
+
+    await expect(runner.cleanupTerminalJobs()).resolves.toBeUndefined();
+    expect(cleanupStaleOrphans).not.toHaveBeenCalled();
+  });
+
+  it('isolates durable job-id discovery failures after terminal cleanup', async () => {
+    jest.spyOn(repository, 'listDurableJobIds').mockRejectedValueOnce(new Error('durable ids failed'));
+    const cleanupStaleOrphans = jest.fn();
+    const runner = new JobRunnerService(
+      repository, { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify, config,
+      { cleanupStaleOrphans } as unknown as TmuxSessionRunnerService,
+    );
+
+    await expect(runner.cleanupTerminalJobs()).resolves.toBeUndefined();
+    expect(cleanupStaleOrphans).not.toHaveBeenCalled();
+  });
+
+  it('waits for an in-flight cleanup during shutdown', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
+      await barrier;
+      return { deleted: 0, retained: 0, deletedEntries: [] };
+    });
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+    const cleanup = runner.cleanupTerminalJobs();
+    let destroyed = false;
+    const destroy = runner.onModuleDestroy().then(() => { destroyed = true; });
+    await Promise.resolve();
+    expect(destroyed).toBe(false);
+    release();
+    await Promise.all([cleanup, destroy]);
+    expect(destroyed).toBe(true);
+  });
+
+  it('retains the instance lock until stuck cleanup settles after shutdown timeout', async () => {
+    jest.useFakeTimers();
+    try {
+      config.sigkillGraceMs = 1;
+      let releaseCleanup!: () => void;
+      const barrier = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+      jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
+        await barrier;
+        return { deleted: 0, retained: 0, deletedEntries: [] };
+      });
+      const releaseLock = jest.fn().mockResolvedValue(undefined);
+      const runner = new JobRunnerService(
+        repository, { execute: jest.fn() } as unknown as OmxExecService,
+        mockJobNotify, config, undefined,
+        { release: releaseLock } as unknown as BridgeInstanceLockService,
+      );
+      const cleanup = runner.cleanupTerminalJobs();
+      const destroy = runner.onModuleDestroy();
+
+      await jest.advanceTimersByTimeAsync(2_002);
+      await destroy;
+      expect(releaseLock).not.toHaveBeenCalled();
+      releaseCleanup();
+      await cleanup;
+      await Promise.resolve();
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['age expiry', 1000, '2000-01-01T00:00:00.000Z'],
+    ['max overflow', 0, new Date().toISOString()],
+  ])('composes repository %s cleanup with real inactive artifact removal', async (_label, maxTerminalJobs, finishedAt) => {
+    config.maxTerminalJobs = maxTerminalJobs;
+    config.jobRetentionDays = 7;
+    const id = '00000000-0000-4000-a000-000000000041';
+    const sessionName = canonicalSessionName(id);
+    await repository.save(createJob({
+      id, status: 'succeeded', executionMode: 'tmux', finishedAt,
+      session: {
+        backend: 'tmux', sessionName, status: 'exited', createdAt: finishedAt,
+        updatedAt: finishedAt, attachCommand: `tmux attach -t ${sessionName}`,
+      },
+    }));
+    const directory = path.join(config.tmuxSessionsDirectory, id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'session.json'), JSON.stringify({ sessionName }));
+    const tmux = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => tmuxProbe(1, `can't find session: ${sessionName}`)) as TmuxSpawnFunction,
+    );
+    const runner = new JobRunnerService(
+      repository, { execute: jest.fn() } as unknown as OmxExecService, mockJobNotify, config, tmux,
+    );
+
+    await runner.cleanupTerminalJobs();
+
+    await expect(repository.getById(id)).resolves.toBeNull();
+    await expect(fs.stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

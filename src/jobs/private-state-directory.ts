@@ -66,8 +66,28 @@ export async function ensurePrivateOwnedDirectory(
   await fs.chmod(directory, PRIVATE_DIRECTORY_MODE);
 }
 
+export async function assertPrivateOwnedDirectory(
+  directory: string,
+  label: string,
+  acceptsEntry: (entry: Dirent) => boolean,
+): Promise<void> {
+  await assertNoSymlinkComponents(directory, label);
+  const stat = await fs.lstat(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`${label} must be a real directory: ${directory}`);
+  }
+  const uid = process.getuid?.();
+  if (uid !== undefined && stat.uid !== uid) {
+    throw new Error(`${label} is not owned by the current user: ${directory}`);
+  }
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  const unrelated = entries.find((entry) => entry.isSymbolicLink() || !acceptsEntry(entry));
+  if (unrelated) {
+    throw new Error(`${label} contains unrelated entry ${unrelated.name}: ${directory}`);
+  }
+}
+
 export async function assertPrivateOwnedFile(filePath: string, label: string): Promise<void> {
-  if (process.platform === 'win32') return;
   await assertNoSymlinkComponents(filePath, label);
   const stat = await fs.lstat(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) {

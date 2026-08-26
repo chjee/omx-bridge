@@ -314,8 +314,9 @@ function createFakeTmuxShim(dir) {
     '        *) shift ;;',
     '      esac',
     '    done',
-    '    [ -n "$target" ] && [ -f "$state_dir/$target.running" ]',
-    '    exit $?',
+    '    if [ -n "$target" ] && [ -f "$state_dir/$target.running" ]; then exit 0; fi',
+    '    echo "can\x27t find session: $target" >&2',
+    '    exit 1',
     '    ;;',
     '  kill-session)',
     '    target=""',
@@ -821,6 +822,15 @@ async function waitForTerminalJob(port, jobId, timeoutMs = 8_000) {
   throw new Error(`job ${jobId} did not reach a terminal state; latest=${JSON.stringify(latest)}`);
 }
 
+async function waitForPathState(filePath, exists, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(filePath) === exists) return;
+    await delay(50);
+  }
+  throw new Error(`path ${filePath} did not become ${exists ? 'present' : 'absent'}`);
+}
+
 async function waitForRunningJob(port, jobId) {
   const deadline = Date.now() + 8_000;
   let latest;
@@ -1095,6 +1105,7 @@ async function smokeCancelPath() {
 async function smokeTmuxRuntime() {
   const tempDir = makeTempDir('omx-bridge-smoke-tmux-');
   let bridge;
+  let liveProbe;
   let failed = false;
   try {
     const jobsDir = path.join(tempDir, 'jobs');
@@ -1113,6 +1124,8 @@ async function smokeTmuxRuntime() {
       omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR',
       bridgeEnv: {
         FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+        BRIDGE_MAX_TERMINAL_JOBS: '1',
+        BRIDGE_JOB_CLEANUP_INTERVAL_MS: '100',
       },
     });
     await waitForBridge(port);
@@ -1145,11 +1158,54 @@ async function smokeTmuxRuntime() {
     assertEqual(fs.readFileSync(path.join(sessionDir, 'exit-code'), 'utf8').trim(), '0', 'tmux exit-code file was not zero', { sessionDir });
     const sessionFile = JSON.parse(fs.readFileSync(path.join(sessionDir, 'session.json'), 'utf8'));
     assertEqual(sessionFile.status, 'exited', 'tmux session.json status mismatch', { sessionDir, sessionFile });
+
+    const retainedSubmit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke tmux retained',
+      requestId: 'runtime-smoke-tmux-retained',
+      source: 'dispatch',
+      cwd: tempDir,
+      executionMode: 'tmux',
+    });
+    const retainedJob = await waitForTerminalJob(port, retainedSubmit.jobId, 10_000);
+    assertEqual(retainedJob.status, 'succeeded', 'retained tmux job status mismatch', compactJobDiagnostic(retainedJob));
+    const retainedSessionDir = path.join(tmuxSessionsDir, retainedSubmit.jobId);
+    await waitForPathState(sessionDir, false);
+    assert(fs.existsSync(retainedSessionDir), 'latest retained tmux session directory was removed');
+    assert(fs.existsSync(path.join(retainedSessionDir, 'session.json')), 'latest retained session state was removed');
+
+    const liveId = '90000000-0000-4000-a000-000000000099';
+    const liveSessionName = `omx-bridge-${liveId.replace(/-/g, '').slice(0, 24)}`;
+    const liveSessionDir = path.join(tmuxSessionsDir, liveId);
+    fs.mkdirSync(liveSessionDir, { recursive: true });
+    fs.writeFileSync(path.join(liveSessionDir, 'session.json'), JSON.stringify({ sessionName: liveSessionName }));
+    const oldTime = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(liveSessionDir, oldTime, oldTime);
+    fs.utimesSync(path.join(liveSessionDir, 'session.json'), oldTime, oldTime);
+    liveProbe = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    children.push(liveProbe);
+    fs.writeFileSync(path.join(fakeTmuxStateDir, `${liveSessionName}.running`), '');
+    fs.writeFileSync(path.join(fakeTmuxStateDir, `${liveSessionName}.pid`), `${liveProbe.pid}\n`);
+    const inactiveSentinelId = '80000000-0000-4000-a000-000000000098';
+    const inactiveSentinelName = `omx-bridge-${inactiveSentinelId.replace(/-/g, '').slice(0, 24)}`;
+    const inactiveSentinelDir = path.join(tmuxSessionsDir, inactiveSentinelId);
+    fs.mkdirSync(inactiveSentinelDir, { recursive: true });
+    fs.writeFileSync(path.join(inactiveSentinelDir, 'session.json'), JSON.stringify({
+      sessionName: inactiveSentinelName,
+    }));
+    fs.utimesSync(inactiveSentinelDir, oldTime, oldTime);
+    fs.utimesSync(path.join(inactiveSentinelDir, 'session.json'), oldTime, oldTime);
+    await waitForPathState(inactiveSentinelDir, false);
+    assert(fs.existsSync(liveSessionDir), 'live orphan tmux session directory was removed');
+    assert(liveProbe.pid && isProcessGroupAlive(liveProbe.pid), 'live retention probe process was terminated');
   } catch (error) {
     failed = true;
     printSmokeDiagnostics('tmux session runtime smoke', tempDir, [bridge].filter(Boolean));
     throw error;
   } finally {
+    await stopChild(liveProbe);
     await stopChild(bridge);
     cleanupTempDir(tempDir, failed);
   }

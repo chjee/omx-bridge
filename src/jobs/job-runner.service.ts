@@ -20,6 +20,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly completionNotifications = new Map<string, Promise<void>>();
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
+  private cleanupPromise?: Promise<void>;
   private shuttingDown = false;
 
   constructor(
@@ -66,7 +67,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     await this.waitForInFlightRuns();
     this.abortControllers.clear();
     await this.waitForCompletionNotifications();
-    await this.instanceLock?.release();
+    const cleanupSettled = await this.waitForCleanup();
+    if (cleanupSettled) {
+      await this.instanceLock?.release();
+    } else if (this.cleanupPromise && this.instanceLock) {
+      this.logger.warn('Cleanup did not settle before shutdown timeout; retaining instance lock');
+      void this.cleanupPromise
+        .finally(() => this.instanceLock?.release())
+        .catch(() => undefined);
+    }
   }
 
   async recoverInterruptedJobs(): Promise<void> {
@@ -98,6 +107,17 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cleanupTerminalJobs(): Promise<void> {
+    if (this.cleanupPromise) return this.cleanupPromise;
+    const cleanup = this.performTerminalCleanup();
+    this.cleanupPromise = cleanup;
+    try {
+      await cleanup;
+    } finally {
+      if (this.cleanupPromise === cleanup) this.cleanupPromise = undefined;
+    }
+  }
+
+  private async performTerminalCleanup(): Promise<void> {
     const result = await this.repository.cleanupTerminalJobs({
       retentionDays: this.config.jobRetentionDays,
       maxTerminalJobs: this.config.maxTerminalJobs,
@@ -106,6 +126,35 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(
         `Cleaned up ${result.deleted} terminal job file(s); retained ${result.retained}`,
       );
+    }
+    for (const entry of result.deletedEntries) {
+      if (entry.executionMode !== 'tmux' || !entry.sessionName) continue;
+      try {
+        const cleanup = await this.tmuxSessionRunner?.removeArtifacts(entry.jobId, entry.sessionName);
+        if (cleanup) this.logger.log(
+          `Tmux artifact cleanup ${entry.jobId}: ${cleanup.status}${cleanup.detail ? ` (${cleanup.detail})` : ''}`,
+        );
+      } catch (error) {
+        this.logger.warn(`Tmux artifact cleanup ${entry.jobId}: failed (${String(error)})`);
+      }
+    }
+    if (this.tmuxSessionRunner) {
+      try {
+        const remainingJobs = await this.repository.listAll();
+        const durableJobIds = await this.repository.listDurableJobIds();
+        const orphanResults = await this.tmuxSessionRunner.cleanupStaleOrphans?.(
+          remainingJobs,
+          this.config.jobRetentionDays,
+          durableJobIds,
+        ) ?? [];
+        for (const cleanup of orphanResults) {
+          this.logger.log(
+            `Tmux orphan cleanup ${cleanup.jobId}: ${cleanup.status}${cleanup.detail ? ` (${cleanup.detail})` : ''}`,
+          );
+        }
+      } catch (error) {
+        this.logger.warn(`Tmux orphan cleanup failed: ${String(error)}`);
+      }
     }
   }
 
@@ -388,5 +437,18 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       }),
     ]);
     clearTimeout(timeoutHandle);
+  }
+
+  private async waitForCleanup(): Promise<boolean> {
+    const cleanup = this.cleanupPromise;
+    if (!cleanup) return true;
+    const timeoutMs = this.config.sigkillGraceMs + 2_000;
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const settled = await Promise.race([
+      cleanup.then(() => true, () => true),
+      new Promise<boolean>((resolve) => { timeoutHandle = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+    clearTimeout(timeoutHandle);
+    return settled;
   }
 }
