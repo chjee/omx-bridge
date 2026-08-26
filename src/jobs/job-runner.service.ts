@@ -35,6 +35,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.shuttingDown = false;
     await this.instanceLock?.acquire();
     await this.repository.ensureReady();
+    await this.tmuxSessionRunner?.ensureReady?.();
     await this.recoverInterruptedJobs();
     await this.cleanupTerminalJobs();
     void this.reconcileTerminalNotifications().catch((error) => {

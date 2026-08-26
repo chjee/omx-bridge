@@ -70,6 +70,14 @@ async function createStore(maxQueueSize = 10): Promise<{
 }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omx-dispatch-store-"));
   const storePath = path.join(dir, "notifications.jsonl");
+  return createStoreAt(storePath, maxQueueSize);
+}
+
+function createStoreAt(storePath: string, maxQueueSize = 10): {
+  store: NotificationStore<TestJob>;
+  storePath: string;
+  warnings: string[];
+} {
   const warnings: string[] = [];
   const store = new NotificationStore<TestJob>({
     storePath,
@@ -168,4 +176,63 @@ test("builds bounded notification previews", async () => {
   assert.equal(stats.preview?.[0]?.stdoutPreview, "12345678");
   assert.equal(stats.preview?.[0]?.stderrPreview, "abcdefgh");
   assert.equal(stats.preview?.[0]?.finishedAt, "2026-04-30T00:00:01.000Z");
+});
+
+test("creates the notification directory and store with private POSIX modes", async () => {
+  if (process.platform === "win32") return;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omx-dispatch-private-"));
+  const directory = path.join(root, "managed");
+  const storePath = path.join(directory, "notifications.jsonl");
+  const { store } = createStoreAt(storePath);
+
+  await store.enqueue(createNotification("job-1", "2026-04-30T00:00:00.000Z"));
+
+  const directoryStat = await fs.stat(directory);
+  const storeStat = await fs.stat(storePath);
+  assert.equal(directoryStat.mode & 0o777, 0o700);
+  assert.equal(storeStat.mode & 0o777, 0o600);
+});
+
+test("does not chmod or rewrite an existing notification parent and store", async () => {
+  if (process.platform === "win32") return;
+  const { store, storePath } = await createStore();
+  const directory = path.dirname(storePath);
+  const payload = `${JSON.stringify(createNotification("job-1", "2026-04-30T00:00:00.000Z"))}\n`;
+  await fs.chmod(directory, 0o755);
+  await fs.writeFile(storePath, payload, { encoding: "utf8", mode: 0o644 });
+  const before = await fs.stat(storePath);
+
+  const stats = await store.getStats();
+
+  const directoryStat = await fs.stat(directory);
+  const after = await fs.stat(storePath);
+  assert.equal(stats.pending, 1);
+  assert.equal(directoryStat.mode & 0o777, 0o755);
+  assert.equal(after.mode & 0o777, 0o644);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal(await fs.readFile(storePath, "utf8"), payload);
+});
+
+test("rejects a symlinked notification ancestor without changing the target mode", async () => {
+  if (process.platform === "win32") return;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "omx-dispatch-link-"));
+  const targetDirectory = path.join(root, "target");
+  const linkedAncestor = path.join(root, "linked");
+  const linkedDirectory = path.join(linkedAncestor, "state");
+  await fs.mkdir(targetDirectory, { mode: 0o755 });
+  await fs.symlink(targetDirectory, linkedAncestor, "dir");
+  const storePath = path.join(linkedDirectory, "notifications.jsonl");
+  const { store } = createStoreAt(storePath);
+
+  await assert.rejects(
+    store.enqueue(createNotification("job-1", "2026-04-30T00:00:00.000Z")),
+    /symbolic link/,
+  );
+
+  const targetStat = await fs.stat(targetDirectory);
+  assert.equal(targetStat.mode & 0o777, 0o755);
+  await assert.rejects(
+    fs.stat(path.join(targetDirectory, "state", "notifications.jsonl")),
+    { code: "ENOENT" },
+  );
 });

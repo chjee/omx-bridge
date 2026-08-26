@@ -238,6 +238,13 @@ history in plain text. Treat the directory as sensitive local state. If prompts
 or command output may contain tokens, customer data, or private paths, restrict
 filesystem access and shorten retention for the deployment:
 
+On POSIX, newly created bridge-owned directories use `0700`; existing dedicated
+job and tmux-session directories are validated before being tightened to `0700`.
+An existing parent of a custom dispatch notification-store file is never chmodded.
+New state files use `0600`, and executable tmux runner files use `0700`. Existing
+state payloads are not rewritten solely to normalize permissions. Run these
+components as one service user; cross-user state sharing is not supported.
+
 ```env
 BRIDGE_JOB_RETENTION_DAYS=1
 BRIDGE_MAX_TERMINAL_JOBS=100

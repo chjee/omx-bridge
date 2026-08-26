@@ -10,6 +10,11 @@ import {
 import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { BridgeJob, OmxExecutionResult, TmuxSessionState } from './job.types';
 import { buildOmxExecArgs } from './omx-exec-args';
+import {
+  ensurePrivateOwnedDirectory,
+  JOB_ID_PATTERN,
+  PRIVATE_FILE_MODE,
+} from './private-state-directory';
 
 export type TmuxSpawnFunction = (
   command: string,
@@ -43,9 +48,19 @@ const RUNNER_FILE = 'run.sh';
 const SESSION_FILE = 'session.json';
 const EXIT_CODE_GRACE_MS = 100;
 const EXIT_CODE_GRACE_INTERVAL_MS = 10;
+const SESSION_FILES = new Set([
+  PROMPT_FILE,
+  STDOUT_FILE,
+  STDERR_FILE,
+  EXIT_CODE_FILE,
+  RUNNER_FILE,
+  SESSION_FILE,
+]);
 
 @Injectable()
 export class TmuxSessionRunnerService {
+  private readyPromise?: Promise<void>;
+
   constructor(
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
     @Inject(TMUX_SPAWN) private readonly spawnFn: TmuxSpawnFunction,
@@ -54,7 +69,8 @@ export class TmuxSessionRunnerService {
   async start(job: BridgeJob): Promise<TmuxSessionState> {
     const now = new Date().toISOString();
     const sessionDirectory = this.sessionDirectory(job.id);
-    await fs.mkdir(sessionDirectory, { recursive: true });
+    await this.ensureReady();
+    await this.ensureSessionDirectory(sessionDirectory);
 
     const executionCwd = await this.resolveExecutionCwd(job.cwd);
     const sessionName = this.buildSessionName(job.id);
@@ -68,8 +84,14 @@ export class TmuxSessionRunnerService {
       ...(executionCwd ? { cwd: executionCwd } : {}),
     };
 
-    await fs.writeFile(this.sessionFile(job.id), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
-    await fs.writeFile(this.promptFile(job.id), job.prompt, { encoding: 'utf8', mode: 0o600 });
+    await fs.writeFile(this.sessionFile(job.id), `${JSON.stringify(session, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
+    await fs.writeFile(this.promptFile(job.id), job.prompt, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
     await fs.writeFile(this.runnerFile(job.id), this.buildRunnerScript(job.id), {
       encoding: 'utf8',
       mode: 0o700,
@@ -230,6 +252,12 @@ export class TmuxSessionRunnerService {
 
     return [
       '#!/usr/bin/env bash',
+      'original_umask="$(umask)"',
+      'umask 077',
+      `: > ${this.shellQuote(this.stdoutFile(jobId))}`,
+      `: > ${this.shellQuote(this.stderrFile(jobId))}`,
+      `: > ${this.shellQuote(this.exitCodeFile(jobId))}`,
+      'umask "$original_umask"',
       'set +e',
       `${omxCommand} < ${this.shellQuote(this.promptFile(jobId))} > ${this.shellQuote(this.stdoutFile(jobId))} 2> ${this.shellQuote(this.stderrFile(jobId))}`,
       'code=$?',
@@ -347,8 +375,47 @@ export class TmuxSessionRunnerService {
   }
 
   private async writeSessionState(jobId: string, session: TmuxSessionState): Promise<void> {
-    await fs.mkdir(this.sessionDirectory(jobId), { recursive: true });
-    await fs.writeFile(this.sessionFile(jobId), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await this.ensureReady();
+    await this.ensureSessionDirectory(this.sessionDirectory(jobId));
+    await fs.writeFile(this.sessionFile(jobId), `${JSON.stringify(session, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  async ensureReady(): Promise<void> {
+    if (!this.readyPromise) {
+      this.readyPromise = this.prepareDirectories();
+    }
+    const ready = this.readyPromise;
+    try {
+      await ready;
+    } catch (error) {
+      if (this.readyPromise === ready) this.readyPromise = undefined;
+      throw error;
+    }
+  }
+
+  private async prepareDirectories(): Promise<void> {
+    await ensurePrivateOwnedDirectory(
+      this.config.tmuxSessionsDirectory,
+      'Bridge tmux sessions directory',
+      (entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name),
+    );
+    const entries = await fs.readdir(this.config.tmuxSessionsDirectory, { withFileTypes: true });
+    for (const entry of entries.filter((candidate) => (
+      candidate.isDirectory() && JOB_ID_PATTERN.test(candidate.name)
+    ))) {
+      await this.ensureSessionDirectory(path.join(this.config.tmuxSessionsDirectory, entry.name));
+    }
+  }
+
+  private ensureSessionDirectory(directory: string): Promise<void> {
+    return ensurePrivateOwnedDirectory(
+      directory,
+      'Bridge tmux job directory',
+      (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+    );
   }
 
   private durationMs(job: BridgeJob): number {
