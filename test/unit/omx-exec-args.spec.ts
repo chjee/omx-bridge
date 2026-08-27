@@ -9,6 +9,7 @@ describe('buildOmxExecArgs', () => {
       omxModelReasoningEffort: 'xhigh',
     })).toEqual([
       'exec',
+      '--skip-git-repo-check',
       '--full-auto',
       '-s',
       'danger-full-access',
@@ -23,10 +24,19 @@ describe('buildOmxExecArgs', () => {
   it('uses stdin for the prompt instead of placing prompt content in argv', () => {
     expect(buildOmxExecArgs({})).toEqual([
       'exec',
+      '--skip-git-repo-check',
       '--full-auto',
       '-s',
       'danger-full-access',
       '-',
     ]);
+  });
+
+  it('adds the fixed non-git cwd flag exactly once before the stdin marker', () => {
+    const args = buildOmxExecArgs({});
+
+    expect(args.filter((arg) => arg === '--skip-git-repo-check')).toHaveLength(1);
+    expect(args.indexOf('--skip-git-repo-check')).toBe(args.indexOf('exec') + 1);
+    expect(args.indexOf('--skip-git-repo-check')).toBeLessThan(args.indexOf('-'));
   });
 });

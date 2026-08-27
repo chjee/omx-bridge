@@ -184,7 +184,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
     expect(readStdin()).toBe('hello world');
@@ -263,7 +263,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({
         env: {
           PATH: '/usr/bin',
@@ -295,6 +295,7 @@ describe('OmxExecService', () => {
       'omx',
       [
         'exec',
+        '--skip-git-repo-check',
         '--full-auto',
         '-s',
         'danger-full-access',
@@ -326,7 +327,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ cwd: await fs.realpath(project) }),
     );
   });
