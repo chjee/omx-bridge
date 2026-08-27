@@ -178,9 +178,12 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 ### Execution boundaries
 
-The bridge runs requested work through `omx exec --full-auto -s danger-full-access -`
-and writes the prompt to the child process stdin instead of passing it as an
-argv value. Optional `BRIDGE_OMX_MODEL` and
+After resolving the requested cwd against `BRIDGE_ALLOWED_CWD_PREFIXES`, the
+bridge runs work through
+`omx exec --skip-git-repo-check --full-auto -s danger-full-access -` and writes
+the prompt to the child process stdin instead of passing it as an argv value.
+The fixed skip flag disables Codex's git-only preflight; it does not bypass the
+bridge's canonical allowed-cwd check. Optional `BRIDGE_OMX_MODEL` and
 `BRIDGE_OMX_MODEL_REASONING_EFFORT` values add `--model <value>` and
 `-c model_reasoning_effort="<low|medium|high|xhigh>"` before the stdin marker.
 Bind and working-directory settings are part of the safety boundary.
