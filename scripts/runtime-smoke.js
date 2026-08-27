@@ -107,31 +107,31 @@ function assertIncludes(text, expected, message, context = undefined) {
   fail(`${message}: ${diagnosticValue(details, 2_500)}`);
 }
 
-function compactJobDiagnostic(job) {
+function compactJobDiagnostic(job, options = {}) {
   if (!job || typeof job !== 'object') {
     return job;
   }
   return {
-    id: job.id,
+    ...(!options.omitCorrelation ? { id: job.id } : {}),
     status: job.status,
     executionMode: job.executionMode,
     source: job.source,
     sourceName: job.sourceName,
-    originRoutingKey: job.originRoutingKey,
+    ...(!options.omitCorrelation ? { originRoutingKey: job.originRoutingKey } : {}),
     notifyUrl: job.notifyUrl ? '<redacted>' : undefined,
     stdout: summarizeTextField(job.stdout),
     stderr: summarizeTextField(job.stderr),
     execution: executionSummary(job.execution),
-    session: job.session,
+    ...(!options.omitSession ? { session: job.session } : {}),
     notifyOutcome: notifyOutcomeSummary(job.notifyOutcome),
   };
 }
 
-function compactNotifyRequests(requests) {
+function compactNotifyRequests(requests, options = {}) {
   return requests.map((request) => ({
     method: request.method,
     url: request.url ? redactDiagnosticText(request.url) : request.url,
-    jobId: request.json?.id,
+    ...(!options.omitCorrelation ? { jobId: request.json?.id } : {}),
     status: request.json?.status,
     source: request.json?.source,
     sourceName: request.json?.sourceName,
@@ -139,13 +139,13 @@ function compactNotifyRequests(requests) {
   }));
 }
 
-function assertNotifyRequestReceived(requests, jobId, label) {
+function assertNotifyRequestReceived(requests, jobId, label, options = {}) {
   if (requests.some((request) => request.json?.id === jobId)) {
     return;
   }
   fail(`${label} callback was not received: ${diagnosticValue({
-    expectedJobId: jobId,
-    receivedRequests: compactNotifyRequests(requests),
+    ...(!options.omitCorrelation ? { expectedJobId: jobId } : {}),
+    receivedRequests: compactNotifyRequests(requests, options),
   })}`);
 }
 
@@ -156,16 +156,61 @@ function truncateForDiagnostic(value, maxChars = 4_000) {
   if (value.length <= maxChars) {
     return value;
   }
-  return `${value.slice(0, 1_000)}\n...<truncated ${value.length - maxChars} chars>...\n${value.slice(-(maxChars - 1_000))}`;
+  let omitted = value.length - maxChars;
+  let marker = `\n...<truncated ${omitted} chars>...\n`;
+  let headLength = 0;
+  let tailLength = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const contentBudget = Math.max(0, maxChars - marker.length);
+    headLength = Math.min(1_000, Math.ceil(contentBudget * 0.8));
+    tailLength = contentBudget - headLength;
+    const nextOmitted = value.length - headLength - tailLength;
+    if (nextOmitted === omitted) break;
+    omitted = nextOmitted;
+    marker = `\n...<truncated ${omitted} chars>...\n`;
+  }
+  return `${value.slice(0, headLength)}${marker}${tailLength > 0 ? value.slice(-tailLength) : ''}`;
 }
 
-function redactDiagnosticText(value) {
+function replaceDiagnosticLiteral(value, literal, replacement) {
+  if (!literal) return value;
+  return value.split(literal).join(replacement);
+}
+
+function redactDiagnosticText(value, options = {}) {
   if (!value) {
     return '';
   }
-  return value
+  const secretValues = [
+    apiToken,
+    callbackSecret,
+    process.env.OPENAI_API_KEY,
+    process.env.ANTHROPIC_API_KEY,
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+    ...(options.literalSecrets ?? []),
+  ].filter(Boolean);
+  let redacted = String(value);
+  for (const secret of secretValues) {
+    redacted = replaceDiagnosticLiteral(redacted, secret, '<redacted>');
+  }
+  const privateRoots = [
+    ['CODEX_HOME', process.env.CODEX_HOME],
+    ['HOME', process.env.HOME],
+  ]
+    .filter(([, root]) => Boolean(root))
+    .sort((left, right) => right[1].length - left[1].length);
+  for (const [label, root] of privateRoots) {
+    redacted = replaceDiagnosticLiteral(redacted, root, `<${label.toLowerCase()}>`);
+  }
+  return redacted
+    .replace(/(["']authorization["']\s*:\s*["'])[^"']*(["'])/gi, '$1<redacted>$2')
+    .replace(/(["'](?:api[_-]?key|token|secret|password|prompt)["']\s*:\s*["'])[^"']*(["'])/gi, '$1<redacted>$2')
+    .replace(/(authorization\s*:\s*)[^\r\n]+/gi, '$1<redacted>')
+    .replace(/(authorization\s*=\s*)[^,\r\n}]+/gi, '$1<redacted>')
     .replace(/(bearer\s+)[^\s"']+/gi, '$1<redacted>')
-    .replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[=:]\s*)[^\s"',}]+/gi, '$1<redacted>')
+    .replace(/((?:api[_-]?key|token|secret|password|authorization|prompt)\s*[=:]\s*)[^\s"',}]+/gi, '$1<redacted>')
     .replace(/([?&](?:api[_-]?key|token|secret|password|authorization)=)[^&\s"']+/gi, '$1<redacted>');
 }
 
@@ -376,14 +421,21 @@ function cleanupTempDir(tempDir, failed = false) {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-function summarizeTextField(value) {
+function summarizeTextField(value, options = {}) {
   const text = value ?? '';
   const summary = {
     bytes: Buffer.byteLength(text),
     chars: text.length,
   };
-  if (verboseRuntimeSmokeDiagnostics && text) {
-    summary.preview = truncateForDiagnostic(redactDiagnosticText(text), 1_200);
+  if ((verboseRuntimeSmokeDiagnostics || options.includePreview) && text) {
+    try {
+      summary.preview = truncateForDiagnostic(
+        redactDiagnosticText(text, { literalSecrets: options.literalSecrets }),
+        options.maxPreviewChars ?? 1_200,
+      );
+    } catch {
+      summary.preview = '<preview unavailable>';
+    }
   }
   return summary;
 }
@@ -454,25 +506,29 @@ function listFilesRecursive(dir, predicate, limit = 30) {
   return files;
 }
 
-function summarizeJobFile(filePath) {
+function summarizeJobFile(filePath, options = {}) {
   try {
     const job = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     if (!job || typeof job !== 'object' || !('status' in job)) {
       return null;
     }
     return {
-      file: filePath,
-      id: job.id,
+      file: redactDiagnosticText(filePath),
+      ...(!options.omitCorrelation ? { id: job.id } : {}),
       status: job.status,
-      requestId: job.requestId,
+      ...(!options.omitCorrelation ? { requestId: job.requestId } : {}),
       source: job.source,
       sourceName: job.sourceName,
-      originRoutingKey: job.originRoutingKey,
-      cwd: job.cwd,
+      ...(!options.omitCorrelation ? { originRoutingKey: job.originRoutingKey } : {}),
+      cwd: redactDiagnosticText(job.cwd),
       notifyUrl: job.notifyUrl ? '<redacted>' : undefined,
       metadata: metadataSummary(job.metadata),
       stdout: summarizeTextField(job.stdout),
-      stderr: summarizeTextField(job.stderr),
+      stderr: summarizeTextField(job.stderr, {
+        includePreview: options.includeStderrPreview,
+        maxPreviewChars: 1_200,
+        literalSecrets: [job.prompt].filter(Boolean),
+      }),
       execution: executionSummary(job.execution),
       notifyOutcome: notifyOutcomeSummary(job.notifyOutcome),
     };
@@ -484,7 +540,7 @@ function summarizeJobFile(filePath) {
   }
 }
 
-function summarizeJsonlFile(filePath) {
+function summarizeJsonlFile(filePath, options = {}) {
   try {
     const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean).slice(-5);
     return {
@@ -493,7 +549,7 @@ function summarizeJsonlFile(filePath) {
         try {
           const event = JSON.parse(line);
           return {
-            id: event?.job?.id ?? event?.id,
+            ...(!options.omitCorrelation ? { id: event?.job?.id ?? event?.id } : {}),
             status: event?.job?.status ?? event?.status,
             source: event?.job?.source ?? event?.source,
             sourceName: event?.job?.sourceName ?? event?.sourceName,
@@ -511,7 +567,7 @@ function summarizeJsonlFile(filePath) {
   }
 }
 
-function printSmokeDiagnostics(name, tempDir, bridges = []) {
+function printSmokeDiagnostics(name, tempDir, bridges = [], options = {}) {
   process.stderr.write(`\n[runtime-smoke] diagnostics for ${name}\n`);
   process.stderr.write(`[runtime-smoke] tempDir: ${tempDir}\n`);
   if (keepRuntimeSmokeDir) {
@@ -536,7 +592,7 @@ function printSmokeDiagnostics(name, tempDir, bridges = []) {
     tempDir,
     (filePath) => filePath.endsWith('.json') && !filePath.endsWith('package.json'),
   )
-    .map(summarizeJobFile)
+    .map((filePath) => summarizeJobFile(filePath, options))
     .filter(Boolean);
   if (jobSummaries.length > 0) {
     process.stderr.write(`[runtime-smoke] job json summaries:\n${JSON.stringify(jobSummaries, null, 2)}\n`);
@@ -545,7 +601,7 @@ function printSmokeDiagnostics(name, tempDir, bridges = []) {
   }
 
   const jsonlSummaries = listFilesRecursive(tempDir, (filePath) => filePath.endsWith('.jsonl'))
-    .map(summarizeJsonlFile);
+    .map((filePath) => summarizeJsonlFile(filePath, options));
   if (jsonlSummaries.length > 0) {
     process.stderr.write(`[runtime-smoke] jsonl summaries:\n${JSON.stringify(jsonlSummaries, null, 2)}\n`);
   }
@@ -594,6 +650,104 @@ async function smokeDiagnosticsFixture() {
   const preservedMatch = result.stdout.match(/preserved failed runtime smoke temp dir: (.+)$/m);
   assert(preservedMatch, 'diagnostics fixture did not preserve the temp dir with KEEP_RUNTIME_SMOKE_DIR=1');
   fs.rmSync(preservedMatch[1], { recursive: true, force: true });
+
+  const providerSecret = 'k7';
+  const bearerSecret = 'fixture-bearer-credential';
+  const basicAuthSecret = 'fixture-basic-credential';
+  const assignedAuthSecret = 'fixture-assigned-auth-credential';
+  const jsonAuthSecret = 'fixture-json-auth-credential';
+  const jsonTokenSecret = 'fixture-json-token-credential';
+  const jsonPasswordSecret = 'fixture-json-password-credential';
+  const querySecret = 'fixture-query-credential';
+  const promptSecret = 'fixture multiline prompt\nsecond confidential line';
+  const fixtureHome = path.join(os.tmpdir(), 'runtime-smoke-private-home');
+  const liveFailure = await runCommand(
+    process.execPath,
+    [__filename, '--live-failure-diagnostics-fixture-child'],
+    {
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: fixtureHome,
+        CODEX_HOME: path.join(fixtureHome, '.codex'),
+        TMPDIR: os.tmpdir(),
+        GOOGLE_API_KEY: providerSecret,
+        KEEP_RUNTIME_SMOKE_DIR: '0',
+        RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE: '0',
+      },
+      timeoutMs: 10_000,
+    },
+  );
+  const summariesPrefix = '[runtime-smoke] job json summaries:\n';
+  const summariesStart = liveFailure.stderr.indexOf(summariesPrefix);
+  assert(summariesStart >= 0, 'live failure fixture did not print job summaries');
+  const summariesJsonStart = summariesStart + summariesPrefix.length;
+  const summariesEnd = liveFailure.stderr.indexOf('\n[runtime-smoke]', summariesJsonStart);
+  const summariesJson = liveFailure.stderr.slice(
+    summariesJsonStart,
+    summariesEnd >= 0 ? summariesEnd : undefined,
+  );
+  const summaries = JSON.parse(summariesJson);
+  const stderrPreview = summaries[0]?.stderr?.preview;
+  assert(typeof stderrPreview === 'string', 'live failure fixture omitted stderr preview');
+  assert(stderrPreview.length <= 1_200, 'live failure stderr preview exceeded 1,200 chars');
+  assertIncludes(stderrPreview, 'LIVE_FAILURE_HEAD', 'live failure preview omitted stderr head');
+  assertIncludes(stderrPreview, 'LIVE_FAILURE_TAIL', 'live failure preview omitted stderr tail');
+  assertIncludes(stderrPreview, '...<truncated ', 'live failure preview omitted truncation evidence');
+  assert(summaries[0]?.stdout?.preview === undefined, 'live failure fixture included stdout preview');
+  for (const secret of [
+    providerSecret,
+    bearerSecret,
+    basicAuthSecret,
+    assignedAuthSecret,
+    jsonAuthSecret,
+    jsonTokenSecret,
+    jsonPasswordSecret,
+    querySecret,
+  ]) {
+    assert(!liveFailure.stderr.includes(secret), `live failure fixture leaked ${secret}`);
+    assert(!stderrPreview.includes(secret), `live failure preview leaked ${secret}`);
+  }
+  assert(!stderrPreview.includes(promptSecret), 'live failure preview leaked multiline prompt');
+  for (const promptLine of promptSecret.split('\n')) {
+    assert(!liveFailure.stderr.includes(promptLine), 'live failure fixture leaked a prompt line');
+  }
+  assert(!liveFailure.stderr.includes(fixtureHome), 'live failure fixture leaked HOME path');
+  assert(summaries[0]?.id === undefined, 'live failure fixture included job id');
+  assert(summaries[0]?.requestId === undefined, 'live failure fixture included request id');
+  assert(summaries[0]?.originRoutingKey === undefined, 'live failure fixture included routing key');
+  const jsonlPrefix = '[runtime-smoke] jsonl summaries:\n';
+  const jsonlStart = liveFailure.stderr.indexOf(jsonlPrefix);
+  assert(jsonlStart >= 0, 'live failure fixture omitted jsonl summaries');
+  const jsonlJsonStart = jsonlStart + jsonlPrefix.length;
+  const jsonlEnd = liveFailure.stderr.indexOf('\n[runtime-smoke]', jsonlJsonStart);
+  const jsonlSummaries = JSON.parse(liveFailure.stderr.slice(
+    jsonlJsonStart,
+    jsonlEnd >= 0 ? jsonlEnd : undefined,
+  ));
+  assert(jsonlSummaries[0]?.tail?.[0]?.id === undefined, 'live failure jsonl summary included job id');
+  assert(!liveFailure.stderr.includes('live-failure-jsonl-correlation'), 'live failure output leaked jsonl correlation');
+  const compactLiveFailure = compactJobDiagnostic({
+    id: 'fixture-job-id',
+    originRoutingKey: 'fixture-routing-key',
+    session: { sessionName: 'fixture-session-name' },
+    status: 'failed',
+  }, { omitCorrelation: true, omitSession: true });
+  assert(compactLiveFailure.id === undefined, 'live assertion context included job id');
+  assert(compactLiveFailure.originRoutingKey === undefined, 'live assertion context included routing key');
+  assert(compactLiveFailure.session === undefined, 'live assertion context included session');
+  const compactNotifyFailure = captureFailureMessage(() => {
+    assertNotifyRequestReceived(
+      [{ method: 'POST', url: '/notify', json: { id: 'fixture-received-job-id' } }],
+      'fixture-expected-job-id',
+      'live notify fixture',
+      { omitCorrelation: true },
+    );
+  });
+  assert(!compactNotifyFailure.includes('fixture-expected-job-id'), 'live notify assertion included expected job id');
+  assert(!compactNotifyFailure.includes('fixture-received-job-id'), 'live notify assertion included received job id');
+  const liveTempMatch = liveFailure.stderr.match(/\[runtime-smoke\] tempDir: (.+)$/m);
+  assert(liveTempMatch, 'live failure fixture omitted temp directory evidence');
+  assert(!fs.existsSync(liveTempMatch[1]), 'live failure fixture did not clean its temp directory');
   log('runtime smoke diagnostics fixture passed');
 }
 
@@ -642,6 +796,62 @@ function emitDiagnosticsFixture() {
     },
   })}\n`);
   printSmokeDiagnostics('diagnostics fixture', tempDir, [{ output: 'bridge output token=super-secret\n' }]);
+  cleanupTempDir(tempDir, true);
+}
+
+function emitLiveFailureDiagnosticsFixture() {
+  const tempDir = makeTempDir('omx-bridge-live-failure-diagnostics-');
+  const jobsDir = path.join(tempDir, 'jobs');
+  const providerSecret = process.env.GOOGLE_API_KEY ?? 'k7';
+  const fixtureHome = process.env.HOME ?? path.join(tempDir, 'home');
+  const fixtureCodexHome = process.env.CODEX_HOME ?? path.join(fixtureHome, '.codex');
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.writeFileSync(path.join(jobsDir, 'job.json'), JSON.stringify({
+    id: 'live-failure-diagnostics-fixture',
+    requestId: 'live-failure-diagnostics-request',
+    status: 'failed',
+    source: 'dispatch',
+    sourceName: 'runtime-smoke-live',
+    originRoutingKey: 'runtime-smoke:live',
+    cwd: path.join(fixtureHome, 'workspace'),
+    prompt: 'fixture multiline prompt\nsecond confidential line',
+    stdout: 'STDOUT_SHOULD_NOT_PREVIEW',
+    stderr: [
+      'LIVE_FAILURE_HEAD',
+      `provider=${providerSecret}`,
+      'Authorization: Bearer fixture-bearer-credential',
+      'Authorization: Basic fixture-basic-credential',
+      'Authorization=Basic fixture-assigned-auth-credential',
+      '{"authorization":"Basic fixture-json-auth-credential"}',
+      '{"token":"fixture-json-token-credential"}',
+      '{"password":"fixture-json-password-credential"}',
+      'url=https://127.0.0.1/failure?token=fixture-query-credential',
+      `home=${fixtureHome}`,
+      `codex_home=${fixtureCodexHome}`,
+      'provider echoed input without a label:',
+      'fixture multiline prompt\nsecond confidential line',
+      apiToken,
+      callbackSecret,
+      'x'.repeat(3_000),
+      'LIVE_FAILURE_TAIL',
+    ].join('\n'),
+    execution: {
+      command: 'omx',
+      exitCode: 1,
+      errorType: 'non_zero_exit',
+      durationMs: 12,
+      timedOut: false,
+    },
+  }));
+  fs.writeFileSync(path.join(tempDir, 'notifications.jsonl'), `${JSON.stringify({
+    id: 'live-failure-jsonl-correlation',
+    status: 'failed',
+    source: 'dispatch',
+  })}\n`);
+  printSmokeDiagnostics('live failure diagnostics fixture', tempDir, [], {
+    includeStderrPreview: true,
+    omitCorrelation: true,
+  });
   cleanupTempDir(tempDir, true);
 }
 
@@ -1675,14 +1885,25 @@ async function smokeLiveOmxExec({ fake = false } = {}) {
       metadata: { smoke: 'live-omx' },
     });
     const job = await waitForNotifyOutcome(port, submit.jobId, timeoutMs + 15_000);
-    assertEqual(job.status, 'succeeded', 'live OMX job status mismatch', compactJobDiagnostic(job));
-    assertIncludes(job.stdout, marker, 'live OMX job output did not include expected marker', compactJobDiagnostic(job));
-    assertEqual(job.execution?.command, omxCommand, 'live OMX job did not record the selected OMX command', compactJobDiagnostic(job));
-    assertEqual(job.notifyOutcome?.claudeWebhook?.status, 'ok', 'live OMX notifyUrl did not report ok', compactJobDiagnostic(job));
-    assertNotifyRequestReceived(notify.requests, submit.jobId, 'live OMX notifyUrl');
+    const compactOptions = fake ? {} : { omitCorrelation: true, omitSession: true };
+    assertEqual(job.status, 'succeeded', 'live OMX job status mismatch', compactJobDiagnostic(job, compactOptions));
+    assertIncludes(job.stdout, marker, 'live OMX job output did not include expected marker', compactJobDiagnostic(job, compactOptions));
+    assertEqual(job.execution?.command, omxCommand, 'live OMX job did not record the selected OMX command', compactJobDiagnostic(job, compactOptions));
+    assertEqual(job.notifyOutcome?.claudeWebhook?.status, 'ok', 'live OMX notifyUrl did not report ok', compactJobDiagnostic(job, compactOptions));
+    assertNotifyRequestReceived(
+      notify.requests,
+      submit.jobId,
+      'live OMX notifyUrl',
+      fake ? {} : { omitCorrelation: true },
+    );
   } catch (error) {
     failed = true;
-    printSmokeDiagnostics(`${fake ? 'fake ' : ''}live OMX exec smoke`, tempDir, [bridge].filter(Boolean));
+    printSmokeDiagnostics(
+      `${fake ? 'fake ' : ''}live OMX exec smoke`,
+      tempDir,
+      [bridge].filter(Boolean),
+      { includeStderrPreview: !fake, omitCorrelation: !fake },
+    );
     throw error;
   } finally {
     await stopChild(bridge, 7_000);
@@ -1710,6 +1931,10 @@ async function main() {
   const mode = process.argv[2] || '--loopback';
   if (mode === '--diagnostics-fixture-child') {
     emitDiagnosticsFixture();
+    return;
+  }
+  if (mode === '--live-failure-diagnostics-fixture-child') {
+    emitLiveFailureDiagnosticsFixture();
     return;
   }
   assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
