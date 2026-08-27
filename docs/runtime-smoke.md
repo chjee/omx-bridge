@@ -102,7 +102,14 @@ KEEP_RUNTIME_SMOKE_DIR=1 npm run verify:runtime
 RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1 npm run verify:runtime
 ```
 
-`KEEP_RUNTIME_SMOKE_DIR=1` works for both loopback and live runtime smoke. On failure, the smoke script prints bridge output/job JSON summaries/notification JSONL summaries with sensitive fields redacted, plus the temporary directory path. Set `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` only for local triage when redacted stdout/stderr previews are needed.
+`KEEP_RUNTIME_SMOKE_DIR=1` works for both loopback and live runtime smoke. On
+failure, the smoke script prints bridge output/job JSON summaries/notification
+JSONL summaries with sensitive fields redacted, plus the temporary directory
+path. A failed real live-OMX job also includes a bounded 1,200-character
+head/tail preview of its redacted stderr before the default temp cleanup. Exact
+provider credentials, bridge secrets, prompt-shaped secrets, and HOME/CODEX_HOME
+paths are removed from that preview. Stdout and broader failure previews remain
+opt-in through `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` for local triage.
 
 Expected:
 
