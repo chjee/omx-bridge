@@ -151,6 +151,7 @@ function createService(
     notifyMode: 'openclaw',
     insecureLoopback: false,
     allowedCwdPrefixes: ['/workspace'],
+    omxEnvAllowlist: ['PATH'],
     ...overrides,
   };
 
@@ -184,7 +185,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
     expect(readStdin()).toBe('hello world');
@@ -263,7 +264,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({
         env: {
           PATH: '/usr/bin',
@@ -296,7 +297,8 @@ describe('OmxExecService', () => {
       [
         'exec',
         '--skip-git-repo-check',
-        '--full-auto',
+        '-c',
+        'approval_policy="never"',
         '-s',
         'danger-full-access',
         '--model',
@@ -327,7 +329,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ cwd: await fs.realpath(project) }),
     );
   });

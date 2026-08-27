@@ -4,7 +4,14 @@ import type { BridgeConfig } from '../config/bridge-config';
 export const OMX_STDIN_PROMPT_ARG = '-';
 
 export function buildOmxExecArgs(config: Pick<BridgeConfig, 'omxModel' | 'omxModelReasoningEffort'>): string[] {
-  const args = ['exec', '--skip-git-repo-check', '--full-auto', '-s', 'danger-full-access'];
+  const args = [
+    'exec',
+    '--skip-git-repo-check',
+    '-c',
+    'approval_policy="never"',
+    '-s',
+    'danger-full-access',
+  ];
 
   if (config.omxModel) {
     args.push('--model', config.omxModel);

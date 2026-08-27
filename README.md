@@ -180,8 +180,12 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 After resolving the requested cwd against `BRIDGE_ALLOWED_CWD_PREFIXES`, the
 bridge runs work through
-`omx exec --skip-git-repo-check --full-auto -s danger-full-access -` and writes
+`omx exec --skip-git-repo-check -c 'approval_policy="never"' -s danger-full-access -` and writes
 the prompt to the child process stdin instead of passing it as an argv value.
+The explicit approval override keeps unattended execution independent of the
+operator's Codex config, while `-s danger-full-access` remains the separate
+sandbox policy. This command shape was help-only parsed with Codex CLI 0.150.1
+and OMX 0.20.5; those observed versions are not a claimed minimum support floor.
 The fixed skip flag disables Codex's git-only preflight; it does not bypass the
 bridge's canonical allowed-cwd check. Optional `BRIDGE_OMX_MODEL` and
 `BRIDGE_OMX_MODEL_REASONING_EFFORT` values add `--model <value>` and
