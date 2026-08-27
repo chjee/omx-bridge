@@ -82,6 +82,7 @@ async function createConfig(overrides: Partial<BridgeConfig> = {}): Promise<Brid
     notifyMode: 'openclaw',
     insecureLoopback: false,
     allowedCwdPrefixes: [root],
+    omxEnvAllowlist: ['PATH'],
     ...overrides,
   };
 }
@@ -111,7 +112,7 @@ describe('TmuxSessionRunnerService', () => {
     await expect(fs.readFile(path.join(sessionDirectory, 'prompt.txt'), 'utf8')).resolves.toBe('hello from tmux');
     const runnerScript = await fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8');
     expect(runnerScript).toContain(
-      "'omx' 'exec' '--skip-git-repo-check' '--full-auto' '-s' 'danger-full-access' '-'",
+      "'omx' 'exec' '--skip-git-repo-check' '-c' 'approval_policy=\"never\"' '-s' 'danger-full-access' '-'",
     );
     expect(runnerScript.split('\n').slice(0, 3)).toEqual([
       '#!/usr/bin/env bash',
@@ -155,7 +156,7 @@ describe('TmuxSessionRunnerService', () => {
     const sessionDirectory = path.join(config.tmuxSessionsDirectory, '00000000-0000-4000-a000-000000000001');
 
     await expect(fs.readFile(path.join(sessionDirectory, 'run.sh'), 'utf8')).resolves.toContain(
-      "'omx' 'exec' '--skip-git-repo-check' '--full-auto' '-s' 'danger-full-access' '--model' 'gpt-5.5' '-c' 'model_reasoning_effort=\"high\"' '-'",
+      "'omx' 'exec' '--skip-git-repo-check' '-c' 'approval_policy=\"never\"' '-s' 'danger-full-access' '--model' 'gpt-5.5' '-c' 'model_reasoning_effort=\"high\"' '-'",
     );
   });
 
@@ -195,7 +196,8 @@ describe('TmuxSessionRunnerService', () => {
     expect(argv.split('\n')).toEqual([
       'exec',
       '--skip-git-repo-check',
-      '--full-auto',
+      '-c',
+      'approval_policy="never"',
       '-s',
       'danger-full-access',
       '--model',
