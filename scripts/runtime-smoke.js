@@ -204,6 +204,14 @@ function redactDiagnosticText(value, options = {}) {
   for (const [label, root] of privateRoots) {
     redacted = replaceDiagnosticLiteral(redacted, root, `<${label.toLowerCase()}>`);
   }
+  if (options.omitCorrelation) {
+    redacted = redacted
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<correlation>')
+      .replace(/\bomx-bridge-[0-9a-f]{24}\b/gi, '<correlation>')
+      .replace(/\bruntime-smoke-live-omx-\d+\b/gi, '<correlation>')
+      .replace(/(["'](?:id|jobId|requestId|originRoutingKey|sessionName)["']\s*:\s*["'])[^"']*(["'])/gi, '$1<correlation>$2')
+      .replace(/((?:jobId|requestId|originRoutingKey|sessionName)\s*[=:]\s*)[^\s,}]+/gi, '$1<correlation>');
+  }
   return redacted
     .replace(/(["']authorization["']\s*:\s*["'])[^"']*(["'])/gi, '$1<redacted>$2')
     .replace(/(["'](?:api[_-]?key|token|secret|password|prompt)["']\s*:\s*["'])[^"']*(["'])/gi, '$1<redacted>$2')
@@ -212,6 +220,21 @@ function redactDiagnosticText(value, options = {}) {
     .replace(/(bearer\s+)[^\s"']+/gi, '$1<redacted>')
     .replace(/((?:api[_-]?key|token|secret|password|authorization|prompt)\s*[=:]\s*)[^\s"',}]+/gi, '$1<redacted>')
     .replace(/([?&](?:api[_-]?key|token|secret|password|authorization)=)[^&\s"']+/gi, '$1<redacted>');
+}
+
+function safeFailureDiagnosticText(value, maxChars = 8_000, redactor = redactDiagnosticText) {
+  try {
+    return truncateForDiagnostic(redactor(value), maxChars);
+  } catch {
+    return '<failure diagnostics unavailable>';
+  }
+}
+
+function compactWaitJobDiagnostic(job) {
+  return diagnosticValue(
+    compactJobDiagnostic(job, { omitCorrelation: true, omitSession: true }),
+    1_200,
+  );
 }
 
 function makeTempDir(prefix) {
@@ -513,7 +536,7 @@ function summarizeJobFile(filePath, options = {}) {
       return null;
     }
     return {
-      file: redactDiagnosticText(filePath),
+      file: options.omitCorrelation ? '<job-state>' : redactDiagnosticText(filePath),
       ...(!options.omitCorrelation ? { id: job.id } : {}),
       status: job.status,
       ...(!options.omitCorrelation ? { requestId: job.requestId } : {}),
@@ -534,8 +557,10 @@ function summarizeJobFile(filePath, options = {}) {
     };
   } catch (error) {
     return {
-      file: filePath,
-      unreadable: String(error),
+      file: options.omitCorrelation ? '<job-state>' : redactDiagnosticText(filePath),
+      unreadable: options.omitCorrelation
+        ? '<job-state unreadable>'
+        : safeFailureDiagnosticText(error, 1_200),
     };
   }
 }
@@ -544,7 +569,7 @@ function summarizeJsonlFile(filePath, options = {}) {
   try {
     const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean).slice(-5);
     return {
-      file: filePath,
+      file: redactDiagnosticText(filePath),
       tail: lines.map((line) => {
         try {
           const event = JSON.parse(line);
@@ -555,14 +580,16 @@ function summarizeJsonlFile(filePath, options = {}) {
             sourceName: event?.job?.sourceName ?? event?.sourceName,
           };
         } catch {
-          return truncateForDiagnostic(line, 300);
+          return options.omitCorrelation
+            ? '<malformed-jsonl-entry>'
+            : truncateForDiagnostic(redactDiagnosticText(line), 300);
         }
       }),
     };
   } catch (error) {
     return {
-      file: filePath,
-      unreadable: String(error),
+      file: redactDiagnosticText(filePath),
+      unreadable: safeFailureDiagnosticText(error, 1_200),
     };
   }
 }
@@ -660,7 +687,11 @@ async function smokeDiagnosticsFixture() {
   const jsonPasswordSecret = 'fixture-json-password-credential';
   const querySecret = 'fixture-query-credential';
   const promptSecret = 'fixture multiline prompt\nsecond confidential line';
-  const fixtureHome = path.join(os.tmpdir(), 'runtime-smoke-private-home');
+  const malformedJsonlSecret = 'fixture-malformed-jsonl-secret';
+  const malformedJsonlPrompt = 'fixture malformed jsonl prompt';
+  const fixtureJobId = '00000000-0000-4000-a000-000000000077';
+  const fixtureHome = process.env.HOME ?? path.join(os.tmpdir(), 'runtime-smoke-private-home');
+  const fixtureCodexHome = path.join(fixtureHome, '.codex');
   const liveFailure = await runCommand(
     process.execPath,
     [__filename, '--live-failure-diagnostics-fixture-child'],
@@ -668,15 +699,18 @@ async function smokeDiagnosticsFixture() {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: fixtureHome,
-        CODEX_HOME: path.join(fixtureHome, '.codex'),
+        CODEX_HOME: fixtureCodexHome,
         TMPDIR: os.tmpdir(),
         GOOGLE_API_KEY: providerSecret,
         KEEP_RUNTIME_SMOKE_DIR: '0',
         RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE: '0',
       },
       timeoutMs: 10_000,
+      allowNonZero: true,
     },
   );
+  assert(liveFailure.code === 1, 'live failure fixture did not exercise main catch');
+  assertIncludes(liveFailure.stderr, 'LIVE_FAILURE_STACK_MARKER', 'live failure fixture omitted safe stack marker');
   const summariesPrefix = '[runtime-smoke] job json summaries:\n';
   const summariesStart = liveFailure.stderr.indexOf(summariesPrefix);
   assert(summariesStart >= 0, 'live failure fixture did not print job summaries');
@@ -711,7 +745,74 @@ async function smokeDiagnosticsFixture() {
   for (const promptLine of promptSecret.split('\n')) {
     assert(!liveFailure.stderr.includes(promptLine), 'live failure fixture leaked a prompt line');
   }
-  assert(!liveFailure.stderr.includes(fixtureHome), 'live failure fixture leaked HOME path');
+  const unreadableJobSummary = summarizeJobFile(
+    path.join(fixtureHome, 'jobs', `${fixtureJobId}.json`),
+    { omitCorrelation: true },
+  );
+  const unreadableJobDiagnostic = JSON.stringify(unreadableJobSummary);
+  const waitFailureServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      id: fixtureJobId,
+      requestId: `${fixtureJobId}:wait-request`,
+      status: 'running',
+      source: 'dispatch',
+      sourceName: 'runtime-smoke-live',
+      originRoutingKey: 'runtime-smoke:wait-routing',
+      prompt: malformedJsonlPrompt,
+      session: {
+        sessionName: `omx-bridge-${fixtureJobId.replace(/-/g, '').slice(0, 24)}`,
+        status: 'running',
+      },
+      stdout: '',
+      stderr: '',
+    }));
+  });
+  await new Promise((resolve, reject) => {
+    waitFailureServer.once('error', reject);
+    waitFailureServer.listen(0, '127.0.0.1', resolve);
+  });
+  const waitAddress = waitFailureServer.address();
+  assert(waitAddress && typeof waitAddress === 'object', 'live wait fixture did not bind a local port');
+  let waitFailureDiagnostic = '';
+  try {
+    await waitForNotifyOutcome(waitAddress.port, fixtureJobId, 25);
+    fail('live wait fixture unexpectedly persisted a notify outcome');
+  } catch (error) {
+    waitFailureDiagnostic = safeFailureDiagnosticText(
+      error.stack ?? error,
+      8_000,
+      (value) => redactDiagnosticText(value, { omitCorrelation: true }),
+    );
+  } finally {
+    await new Promise((resolve) => waitFailureServer.close(resolve));
+  }
+  assertEqual(unreadableJobSummary?.file, '<job-state>', 'unreadable live job omitted safe file placeholder');
+  assertEqual(
+    unreadableJobSummary?.unreadable,
+    '<job-state unreadable>',
+    'unreadable live job omitted safe failure placeholder',
+  );
+  const leakedPathSignals = [
+    ...(liveFailure.stderr.includes(fixtureJobId) ? ['job_file_uuid'] : []),
+    ...(liveFailure.stderr.includes(fixtureHome) ? ['home_path'] : []),
+    ...(liveFailure.stderr.includes(fixtureCodexHome) ? ['codex_home_path'] : []),
+    ...(unreadableJobDiagnostic.includes(fixtureJobId) ? ['unreadable_job_uuid'] : []),
+    ...(unreadableJobDiagnostic.includes(fixtureHome) ? ['unreadable_job_home_path'] : []),
+    ...(liveFailure.stderr.includes(malformedJsonlSecret) ? ['malformed_jsonl_secret'] : []),
+    ...(liveFailure.stderr.includes(malformedJsonlPrompt) ? ['malformed_jsonl_prompt'] : []),
+    ...(waitFailureDiagnostic.includes(fixtureJobId) ? ['wait_error_uuid'] : []),
+    ...(waitFailureDiagnostic.includes(`${fixtureJobId}:wait-request`) ? ['wait_error_request'] : []),
+    ...(waitFailureDiagnostic.includes('runtime-smoke:wait-routing') ? ['wait_error_routing'] : []),
+    ...(waitFailureDiagnostic.includes('omx-bridge-0000000000004000a0000000') ? ['wait_error_session'] : []),
+    ...(waitFailureDiagnostic.includes(malformedJsonlPrompt) ? ['wait_error_prompt'] : []),
+  ];
+  assert(
+    leakedPathSignals.length === 0,
+    `live failure fixture leaked path/correlation signals: ${leakedPathSignals.join(',')}`,
+  );
+  assertIncludes(liveFailure.stderr, '<job-state>', 'live failure fixture omitted safe job-state placeholder');
+  assertIncludes(liveFailure.stderr, 'scripts/runtime-smoke.js', 'live failure fixture omitted safe source-relative stack evidence');
   assert(summaries[0]?.id === undefined, 'live failure fixture included job id');
   assert(summaries[0]?.requestId === undefined, 'live failure fixture included request id');
   assert(summaries[0]?.originRoutingKey === undefined, 'live failure fixture included routing key');
@@ -725,6 +826,11 @@ async function smokeDiagnosticsFixture() {
     jsonlEnd >= 0 ? jsonlEnd : undefined,
   ));
   assert(jsonlSummaries[0]?.tail?.[0]?.id === undefined, 'live failure jsonl summary included job id');
+  assertEqual(
+    jsonlSummaries[0]?.tail?.[1],
+    '<malformed-jsonl-entry>',
+    'live failure jsonl summary included a raw malformed entry',
+  );
   assert(!liveFailure.stderr.includes('live-failure-jsonl-correlation'), 'live failure output leaked jsonl correlation');
   const compactLiveFailure = compactJobDiagnostic({
     id: 'fixture-job-id',
@@ -748,6 +854,17 @@ async function smokeDiagnosticsFixture() {
   const liveTempMatch = liveFailure.stderr.match(/\[runtime-smoke\] tempDir: (.+)$/m);
   assert(liveTempMatch, 'live failure fixture omitted temp directory evidence');
   assert(!fs.existsSync(liveTempMatch[1]), 'live failure fixture did not clean its temp directory');
+  const safeFallback = safeFailureDiagnosticText(
+    'RAW_FAILURE_FALLBACK_MARKER',
+    1_200,
+    () => { throw new Error('redactor failed'); },
+  );
+  assertEqual(
+    safeFallback,
+    '<failure diagnostics unavailable>',
+    'failure diagnostic redaction did not use the safe fallback',
+  );
+  assert(!safeFallback.includes('RAW_FAILURE_FALLBACK_MARKER'), 'failure diagnostic fallback exposed raw text');
   log('runtime smoke diagnostics fixture passed');
 }
 
@@ -805,10 +922,11 @@ function emitLiveFailureDiagnosticsFixture() {
   const providerSecret = process.env.GOOGLE_API_KEY ?? 'k7';
   const fixtureHome = process.env.HOME ?? path.join(tempDir, 'home');
   const fixtureCodexHome = process.env.CODEX_HOME ?? path.join(fixtureHome, '.codex');
+  const fixtureJobId = '00000000-0000-4000-a000-000000000077';
   fs.mkdirSync(jobsDir, { recursive: true });
-  fs.writeFileSync(path.join(jobsDir, 'job.json'), JSON.stringify({
-    id: 'live-failure-diagnostics-fixture',
-    requestId: 'live-failure-diagnostics-request',
+  fs.writeFileSync(path.join(jobsDir, `${fixtureJobId}.json`), JSON.stringify({
+    id: fixtureJobId,
+    requestId: `${fixtureJobId}:request`,
     status: 'failed',
     source: 'dispatch',
     sourceName: 'runtime-smoke-live',
@@ -847,12 +965,17 @@ function emitLiveFailureDiagnosticsFixture() {
     id: 'live-failure-jsonl-correlation',
     status: 'failed',
     source: 'dispatch',
-  })}\n`);
+  })}\nnot-json id=${fixtureJobId} home=${fixtureHome} codex=${fixtureCodexHome} `
+    + `token=fixture-malformed-jsonl-secret prompt=fixture malformed jsonl prompt\n`);
   printSmokeDiagnostics('live failure diagnostics fixture', tempDir, [], {
     includeStderrPreview: true,
     omitCorrelation: true,
   });
   cleanupTempDir(tempDir, true);
+  throw new Error(
+    `LIVE_FAILURE_STACK_MARKER home=${path.join(fixtureHome, 'workspace', 'runtime-smoke.js')} `
+      + `codex=${path.join(fixtureCodexHome, 'runtime', 'session.json')}`,
+  );
 }
 
 function createWaitShim(dir) {
@@ -1039,7 +1162,10 @@ async function requestJson(port, method, route, body) {
   const text = await response.text();
   const parsed = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    throw new Error(`${method} ${route} failed (${response.status}): ${text}`);
+    const safeRoute = redactDiagnosticText(route, { omitCorrelation: true });
+    throw new Error(
+      `${method} ${safeRoute} failed (${response.status}); responseBytes=${Buffer.byteLength(text)}`,
+    );
   }
   return parsed;
 }
@@ -1054,7 +1180,7 @@ async function waitForTerminalJob(port, jobId, timeoutMs = 8_000) {
     }
     await delay(100);
   }
-  throw new Error(`job ${jobId} did not reach a terminal state; latest=${JSON.stringify(latest)}`);
+  throw new Error(`job did not reach a terminal state; latest=${compactWaitJobDiagnostic(latest)}`);
 }
 
 async function waitForPathState(filePath, exists, timeoutMs = 8_000) {
@@ -1075,11 +1201,11 @@ async function waitForRunningJob(port, jobId) {
       return latest;
     }
     if (['succeeded', 'failed', 'cancelled'].includes(latest.status)) {
-      throw new Error(`job ${jobId} became terminal before cancel: ${latest.status}`);
+      throw new Error(`job became terminal before cancel: ${latest.status}`);
     }
     await delay(100);
   }
-  throw new Error(`job ${jobId} did not enter running state; latest=${JSON.stringify(latest)}`);
+  throw new Error(`job did not enter running state; latest=${compactWaitJobDiagnostic(latest)}`);
 }
 
 async function waitForRunningTmuxJob(port, jobId) {
@@ -1091,11 +1217,13 @@ async function waitForRunningTmuxJob(port, jobId) {
       return latest;
     }
     if (['succeeded', 'failed', 'cancelled'].includes(latest.status)) {
-      throw new Error(`tmux job ${jobId} became terminal before session was running: ${latest.status}`);
+      throw new Error(`tmux job became terminal before session was running: ${latest.status}`);
     }
     await delay(100);
   }
-  throw new Error(`tmux job ${jobId} did not enter running session state; latest=${JSON.stringify(latest)}`);
+  throw new Error(
+    `tmux job did not enter running session state; latest=${compactWaitJobDiagnostic(latest)}`,
+  );
 }
 
 function readFakeTmuxPid(fakeTmuxStateDir, sessionName) {
@@ -1199,7 +1327,7 @@ async function waitForNotifyOutcome(port, jobId, timeoutMs = 8_000) {
     }
     await delay(100);
   }
-  throw new Error(`job ${jobId} did not persist notifyOutcome; latest=${JSON.stringify(latest)}`);
+  throw new Error(`job did not persist notifyOutcome; latest=${compactWaitJobDiagnostic(latest)}`);
 }
 
 async function stopChild(child, killTimeoutMs = 2_000) {
@@ -1290,11 +1418,11 @@ async function runCommand(command, args, options = {}) {
         return;
       }
       settle(() => {
-        if (code !== 0) {
+        if (code !== 0 && !options.allowNonZero) {
           reject(new Error(`${command} ${args.join(' ')} failed (${code}): ${stderr || stdout}`));
           return;
         }
-        resolve({ stdout, stderr });
+        resolve({ stdout, stderr, code });
       });
     });
   });
@@ -1954,7 +2082,11 @@ async function main() {
 }
 
 main().catch(async (error) => {
-  process.stderr.write(`[runtime-smoke] failed: ${error.stack ?? error}\n`);
+  process.stderr.write(`[runtime-smoke] failed: ${safeFailureDiagnosticText(
+    error.stack ?? error,
+    8_000,
+    (value) => redactDiagnosticText(value, { omitCorrelation: true }),
+  )}\n`);
   process.exitCode = 1;
 }).finally(async () => {
   await Promise.all(children.map((child) => stopChild(child)));
