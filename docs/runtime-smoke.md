@@ -108,8 +108,11 @@ JSONL summaries with sensitive fields redacted, plus the temporary directory
 path. A failed real live-OMX job also includes a bounded 1,200-character
 head/tail preview of its redacted stderr before the default temp cleanup. Exact
 provider credentials, bridge secrets, prompt-shaped secrets, and HOME/CODEX_HOME
-paths are removed from that preview. Stdout and broader failure previews remain
-opt-in through `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` for local triage.
+paths are removed from that preview. In the same live-safe diagnostics, the job
+state path is reported as `<job-state>` instead of a correlation-bearing
+filename, and the final bounded failure stack is redacted before printing. Raw
+job JSON and raw stack text are not printed. Stdout and broader failure previews
+remain opt-in through `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` for local triage.
 
 Expected:
 
