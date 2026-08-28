@@ -90,6 +90,14 @@ services do not always inherit your interactive shell `PATH`; if `node` or
 or add a service `Environment=PATH=...` line, and set `OMX_COMMAND` in `.env`
 to an absolute `omx` path when needed.
 
+The provided unit is the supported production containment boundary for direct
+`omx exec` children. `KillMode=control-group`, `TimeoutStopSec=30s`, and
+`SendSIGKILL=yes` make systemd stop the complete service cgroup within a bounded
+window. The 30-second window leaves headroom over the default 5-second child
+TERM-to-KILL grace and the bridge's bounded shutdown waits. Deployments outside
+systemd or another cgroup-aware supervisor cannot guarantee descendant cleanup
+after bridge `SIGKILL`, a host crash, or supervisor failure.
+
 ## Bridge Service Configuration
 
 Important root `.env` values:
@@ -142,11 +150,17 @@ Claude webhook delivery retries before fallback using `BRIDGE_NOTIFY_RETRY_DELAY
 fetch attempt is bounded by `BRIDGE_NOTIFY_TIMEOUT_MS` (default: `5000`); this is
 separate from `BRIDGE_JOB_TIMEOUT_MS`.
 
-On startup, the runner also reconciles retained terminal jobs whose completion
-notification was never recorded, or whose latest notification attempt has no
-successful channel and at least one failed channel. Terminal jobs whose channels
-were only skipped, such as an intentionally unconfigured delivery target, are not
-retried repeatedly.
+On startup, the runner reconciles retained terminal jobs only when no completion
+notification attempt was recorded (`notifyOutcome` is absent). Once a
+`notifyOutcome` exists, including a failed or skipped outcome, restarting the
+service does not automatically retry delivery. This missing-only policy prevents
+restarts from repeatedly hitting downstream webhooks when the bounded
+`notifyHistory` cannot serve as a durable retry budget.
+
+To retry a recorded notification failure, send an authenticated
+`POST /jobs/:id/notify/retry` request with the bridge Bearer token. The job must
+already be terminal. Each manual retry appends its outcome to `notifyHistory`,
+which retains the latest 10 attempts.
 
 For Claude mode:
 
@@ -164,9 +178,16 @@ TELEGRAM_NOTIFY_CHAT_ID=optional-fallback-chat-id
 
 ### Execution boundaries
 
-The bridge runs requested work through `omx exec --full-auto -s danger-full-access -`
-and writes the prompt to the child process stdin instead of passing it as an
-argv value. Optional `BRIDGE_OMX_MODEL` and
+After resolving the requested cwd against `BRIDGE_ALLOWED_CWD_PREFIXES`, the
+bridge runs work through
+`omx exec --skip-git-repo-check -c 'approval_policy="never"' -s danger-full-access -` and writes
+the prompt to the child process stdin instead of passing it as an argv value.
+The explicit approval override keeps unattended execution independent of the
+operator's Codex config, while `-s danger-full-access` remains the separate
+sandbox policy. This command shape was help-only parsed with Codex CLI 0.150.1
+and OMX 0.20.5; those observed versions are not a claimed minimum support floor.
+The fixed skip flag disables Codex's git-only preflight; it does not bypass the
+bridge's canonical allowed-cwd check. Optional `BRIDGE_OMX_MODEL` and
 `BRIDGE_OMX_MODEL_REASONING_EFFORT` values add `--model <value>` and
 `-c model_reasoning_effort="<low|medium|high|xhigh>"` before the stdin marker.
 Bind and working-directory settings are part of the safety boundary.
@@ -231,6 +252,13 @@ Job files are stored as JSON under `BRIDGE_JOBS_DIR` and include the submitted
 history in plain text. Treat the directory as sensitive local state. If prompts
 or command output may contain tokens, customer data, or private paths, restrict
 filesystem access and shorten retention for the deployment:
+
+On POSIX, newly created bridge-owned directories use `0700`; existing dedicated
+job and tmux-session directories are validated before being tightened to `0700`.
+An existing parent of a custom dispatch notification-store file is never chmodded.
+New state files use `0600`, and executable tmux runner files use `0700`. Existing
+state payloads are not rewritten solely to normalize permissions. Run these
+components as one service user; cross-user state sharing is not supported.
 
 ```env
 BRIDGE_JOB_RETENTION_DAYS=1
@@ -501,7 +529,7 @@ This is an operator smoke, not a deterministic CI gate: it uses local provider c
 - `notifyUrl` values submitted through `POST /jobs` must be valid HTTP(S) URLs targeting a loopback host.
 - The MCP webhook keeps at most `MAX_NOTIFICATION_QUEUE_SIZE` pending notifications in the shared JSONL store, uses a file lock for cross-process drain, and deduplicates by job id before returning notifications.
 - Job ids are validated against UUID format; non-UUID values are rejected to prevent path traversal.
-- On timeout or cancellation, a SIGKILL is sent 5 seconds after SIGTERM to ensure child processes are always reaped.
+- On POSIX timeout, cancellation, or graceful bridge shutdown, the bridge signals only the process group it created for the direct `omx exec` child and escalates from SIGTERM to SIGKILL after the configured grace (5 seconds by default). The provided systemd unit additionally contains abnormal service termination at the cgroup boundary; non-systemd forced-crash cleanup is not guaranteed.
 - `POST /jobs/:id/callback` requires an `X-Callback-Signature: sha256=<hex>` header unless the bridge explicitly runs `BRIDGE_INSECURE_LOOPBACK=1`. The MCP server and plugin sign callback requests automatically when the secret is configured.
 - `originRoutingKey` is a first-class job field (e.g. `telegram:direct:123456`) that identifies the conversation that initiated the job. Channel brokers such as `claude-chopper` read this field to route callback results back to the correct chat. Legacy callers may instead pass `metadata.synapseRoutingKey`; `originRoutingKey` takes precedence.
 - `source` accepts `dispatch`, `channel`, and `openclaw`. New broker-owned chat integrations should use `source: "channel"` plus `sourceName` (for example `claude-chopper`) instead of adding app-specific source enum values. Legacy `source: "synapse"` submissions are normalized to `source: "channel"` with `sourceName: "claude-synapse"`.

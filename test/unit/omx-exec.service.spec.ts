@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -31,9 +32,16 @@ function captureStdin(child: MockChildProcess): () => string {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
+
+const ownedTestProcessGroups = new Set<number>();
+const ownedTestReadyFiles = new Set<string>();
 
 async function isAlive(pid: number): Promise<boolean> {
   try {
@@ -53,23 +61,71 @@ async function isAlive(pid: number): Promise<boolean> {
 }
 
 function processTreeSpawn(ignoreTerm: boolean, ready: ReturnType<typeof deferred<{ parent: number; descendant: number }>>): SpawnFunction {
-  const descendant = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+  const readyFile = path.join(os.tmpdir(), `omx-exec-tree-${randomUUID()}.pids`);
+  ownedTestReadyFiles.add(readyFile);
+  const descendant = [
+    "const fs = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, process.ppid + ':' + process.pid, { mode: 0o600 });`,
+    'setInterval(() => {}, 1000);',
+  ].join('');
   const parentTermHandler = ignoreTerm ? `process.on('SIGTERM', () => {});` : '';
   const parent = [
     "const { spawn } = require('node:child_process');",
     parentTermHandler,
-    `const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'ignore' });`,
-    "process.stdout.write(`${process.pid}:${child.pid}\\n`);",
+    `spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'ignore' });`,
     'setInterval(() => {}, 1000);',
   ].join('');
   return (_command, _args, options) => {
     const child = spawn(process.execPath, ['-e', parent], options) as ChildProcessWithoutNullStreams;
-    child.stdout.once('data', (chunk: Buffer) => {
-      const [parentPid, descendantPid] = chunk.toString().trim().split(':').map(Number);
-      ready.resolve({ parent: parentPid, descendant: descendantPid });
-    });
+    if (child.pid) ownedTestProcessGroups.add(child.pid);
+    void (async () => {
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        try {
+          const [parentPid, descendantPid] = (await fs.readFile(readyFile, 'utf8'))
+            .trim()
+            .split(':')
+            .map(Number);
+          await fs.rm(readyFile, { force: true });
+          ownedTestReadyFiles.delete(readyFile);
+          if (!Number.isInteger(parentPid) || !Number.isInteger(descendantPid)) {
+            ready.reject(new Error(`invalid process-tree readiness evidence: ${parentPid}:${descendantPid}`));
+            return;
+          }
+          if (parentPid !== child.pid) {
+            ready.reject(new Error(`process-tree parent mismatch: expected ${child.pid}, got ${parentPid}`));
+            return;
+          }
+          ready.resolve({ parent: parentPid, descendant: descendantPid });
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            ready.reject(error);
+            return;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      ready.reject(new Error(`process-tree readiness file was not created: ${readyFile}`));
+    })();
     return child;
   };
+}
+
+async function cleanupOwnedTestGroups(): Promise<void> {
+  const groups = [...ownedTestProcessGroups];
+  ownedTestProcessGroups.clear();
+  for (const group of groups) {
+    try {
+      process.kill(-group, 'SIGKILL');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+  }
+  await Promise.all([...ownedTestReadyFiles].map((file) => fs.rm(file, { force: true })));
+  ownedTestReadyFiles.clear();
+  if (groups.length > 0) await new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 function createService(
@@ -95,6 +151,7 @@ function createService(
     notifyMode: 'openclaw',
     insecureLoopback: false,
     allowedCwdPrefixes: ['/workspace'],
+    omxEnvAllowlist: ['PATH'],
     ...overrides,
   };
 
@@ -104,9 +161,10 @@ function createService(
 describe('OmxExecService', () => {
   const originalEnv = process.env;
 
-  afterEach(() => {
+  afterEach(async () => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+    await cleanupOwnedTestGroups();
     process.env = originalEnv;
   });
 
@@ -127,7 +185,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
     expect(readStdin()).toBe('hello world');
@@ -206,7 +264,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({
         env: {
           PATH: '/usr/bin',
@@ -238,7 +296,9 @@ describe('OmxExecService', () => {
       'omx',
       [
         'exec',
-        '--full-auto',
+        '--skip-git-repo-check',
+        '-c',
+        'approval_policy="never"',
         '-s',
         'danger-full-access',
         '--model',
@@ -269,7 +329,7 @@ describe('OmxExecService', () => {
 
     expect(spawnFn).toHaveBeenCalledWith(
       'omx',
-      ['exec', '--full-auto', '-s', 'danger-full-access', '-'],
+      ['exec', '--skip-git-repo-check', '-c', 'approval_policy="never"', '-s', 'danger-full-access', '-'],
       expect.objectContaining({ cwd: await fs.realpath(project) }),
     );
   });
@@ -316,7 +376,13 @@ describe('OmxExecService', () => {
 
   it('maps timeout into a failed result', async () => {
     jest.useFakeTimers();
-    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const processKill = jest.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      return true;
+    }) as typeof process.kill);
 
     const child = new MockChildProcess();
     const service = createService(
@@ -405,7 +471,13 @@ describe('OmxExecService', () => {
   });
 
   it('maps abort signals into cancelled results', async () => {
-    const processKill = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const processKill = jest.spyOn(process, 'kill').mockImplementation(((
+      _pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      return true;
+    }) as typeof process.kill);
     const child = new MockChildProcess();
     const service = createService(
       jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
@@ -501,7 +573,7 @@ describe('OmxExecService', () => {
       await waitFor(async () => isAlive(tree.descendant), (alive) => !alive, 1_000, 10);
     });
 
-    it('aborts an actual detached process group and cancels delayed KILL when the child exits first', async () => {
+    it('escalates when the group leader exits but a descendant survives SIGTERM', async () => {
       if (skipOnWindows) return;
       const ready = deferred<{ parent: number; descendant: number }>();
       const signals: Array<[number, NodeJS.Signals]> = [];
@@ -519,7 +591,7 @@ describe('OmxExecService', () => {
       await expect(result).resolves.toMatchObject({ status: 'cancelled' });
       await waitFor(async () => isAlive(tree.descendant), (alive) => !alive, 1_000, 10);
       await new Promise((resolve) => setTimeout(resolve, 75));
-      expect(signals).toEqual([[-tree.parent, 'SIGTERM']]);
+      expect(signals).toEqual([[-tree.parent, 'SIGTERM'], [-tree.parent, 'SIGKILL']]);
       kill.mockRestore();
     });
 

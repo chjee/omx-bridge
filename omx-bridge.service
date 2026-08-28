@@ -10,6 +10,9 @@ Restart=always
 RestartSec=5
 EnvironmentFile=%h/workspace/omx-bridge/.env
 Environment=NODE_ENV=production
+KillMode=control-group
+TimeoutStopSec=30s
+SendSIGKILL=yes
 
 [Install]
 WantedBy=default.target

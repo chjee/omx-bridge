@@ -1,0 +1,64 @@
+name: Bridge verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Deterministic verification (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install dispatch dependencies
+        run: npm --prefix omx-dispatch ci
+      - name: Install plugin dependencies
+        run: npm --prefix omx-bridge-plugin ci
+      - name: Check public hygiene
+        run: npm run verify:public-hygiene
+      - name: Run deterministic verification
+        run: npm run verify
+
+  runtime:
+    name: Fake runtime verification (Node ${{ matrix.node }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install dispatch dependencies
+        run: npm --prefix omx-dispatch ci
+      - name: Install plugin dependencies
+        run: npm --prefix omx-bridge-plugin ci
+      - name: Run fake runtime verification
+        run: npm run verify:runtime

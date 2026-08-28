@@ -4,6 +4,15 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BRIDGE_CONFIG, type BridgeConfig } from '../config/bridge-config';
 import {
+  assertPrivateOwnedFile,
+  ensurePrivateOwnedDirectory,
+  JOB_ID_PATTERN,
+  JOB_STATE_FILE_PATTERN,
+  PRIVATE_FILE_MODE,
+  QUARANTINE_FILE_PATTERN,
+  tightenPrivateOwnedFile,
+} from './private-state-directory';
+import {
   EXECUTION_ERROR_TYPES,
   JOB_SOURCE_VALUES,
   JOB_EXECUTION_MODES,
@@ -28,6 +37,13 @@ export interface CleanupTerminalJobsOptions {
 export interface CleanupTerminalJobsResult {
   deleted: number;
   retained: number;
+  deletedEntries: CleanupTerminalJobEntry[];
+}
+
+export interface CleanupTerminalJobEntry {
+  jobId: string;
+  executionMode: NonNullable<BridgeJob['executionMode']>;
+  sessionName?: string;
 }
 
 export interface ConditionalJobTransitionResult {
@@ -39,13 +55,23 @@ export interface ConditionalJobTransitionResult {
 export class JobQueueRepository {
   private readonly logger = new Logger(JobQueueRepository.name);
   private readonly jobLocks = new Map<string, Promise<void>>();
+  private readyPromise?: Promise<void>;
 
   constructor(
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
   ) {}
 
   async ensureReady(): Promise<void> {
-    await fs.mkdir(this.config.jobsDirectory, { recursive: true });
+    if (!this.readyPromise) {
+      this.readyPromise = this.prepareDirectory();
+    }
+    const ready = this.readyPromise;
+    try {
+      await ready;
+    } catch (error) {
+      if (this.readyPromise === ready) this.readyPromise = undefined;
+      throw error;
+    }
   }
 
   async save(job: BridgeJob): Promise<BridgeJob> {
@@ -132,6 +158,15 @@ export class JobQueueRepository {
     return jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
   }
 
+  async listDurableJobIds(): Promise<string[]> {
+    await this.ensureReady();
+    const entries = await fs.readdir(this.config.jobsDirectory, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => entry.name.slice(0, -'.json'.length))
+      .filter((id) => JOB_ID_PATTERN.test(id));
+  }
+
   async cleanupTerminalJobs(
     options: CleanupTerminalJobsOptions,
   ): Promise<CleanupTerminalJobsResult> {
@@ -159,9 +194,20 @@ export class JobQueueRepository {
       await fs.rm(this.jobPath(id), { force: true });
     }
 
+    const deletedEntries = terminalJobs
+      .filter((job) => deleteIds.has(job.id))
+      .map((job) => ({
+        jobId: job.id,
+        executionMode: job.executionMode ?? 'exec',
+        ...(job.executionMode === 'tmux' && job.session?.sessionName
+          ? { sessionName: job.session.sessionName }
+          : {}),
+      }));
+
     return {
       deleted: deleteIds.size,
       retained: terminalJobs.length - deleteIds.size,
+      deletedEntries,
     };
   }
 
@@ -177,7 +223,10 @@ export class JobQueueRepository {
     const targetPath = this.jobPath(job.id);
     const tempPath = `${targetPath}.${randomUUID()}.tmp`;
     try {
-      await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+      await fs.writeFile(tempPath, `${JSON.stringify(job, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: PRIVATE_FILE_MODE,
+      });
       await fs.rename(tempPath, targetPath);
     } catch (error) {
       try {
@@ -187,6 +236,27 @@ export class JobQueueRepository {
       }
       throw error;
     }
+  }
+
+  private async prepareDirectory(): Promise<void> {
+    const nestedTmuxDirectory = path.dirname(path.resolve(this.config.tmuxSessionsDirectory)) ===
+      path.resolve(this.config.jobsDirectory)
+      ? path.basename(this.config.tmuxSessionsDirectory)
+      : undefined;
+    await ensurePrivateOwnedDirectory(
+      this.config.jobsDirectory,
+      'Bridge jobs directory',
+      (entry) => (
+        (entry.isFile() && (
+          entry.name === '.omx-bridge-instance.lock' ||
+          JOB_STATE_FILE_PATTERN.test(entry.name)
+        )) ||
+        (entry.isDirectory() && (
+          entry.name === INVALID_JOBS_DIRECTORY ||
+          entry.name === nestedTmuxDirectory
+        ))
+      ),
+    );
   }
 
   private async withJobLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
@@ -243,7 +313,14 @@ export class JobQueueRepository {
     const quarantinePath = path.join(quarantineDir, `${jobId}.${reason}.${stamp}.json`);
 
     try {
-      await fs.mkdir(quarantineDir, { recursive: true });
+      await assertPrivateOwnedFile(filePath, 'Invalid bridge job file');
+      await ensurePrivateOwnedDirectory(
+        quarantineDir,
+        'Bridge invalid jobs directory',
+        (entry) => entry.isFile() && QUARANTINE_FILE_PATTERN.test(entry.name),
+        { requireDedicated: true },
+      );
+      await tightenPrivateOwnedFile(filePath, 'Invalid bridge job file');
       await fs.rename(filePath, quarantinePath);
       this.logger.warn(`Quarantined ${reason} job file for ${jobId} at ${quarantinePath}`);
     } catch (error) {

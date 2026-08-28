@@ -8,6 +8,15 @@ On POSIX, direct `omx exec` children are deliberately owned process-group leader
 shutdown target the owned group with one bounded TERM-to-KILL escalation. On Windows the bridge uses
 `child.kill` for the direct child only; descendant cleanup is not guaranteed by this fallback.
 
+The supported production abnormal-exit boundary is the provided systemd unit:
+`KillMode=control-group`, `TimeoutStopSec=30s`, and `SendSIGKILL=yes`. Its
+30-second stop window leaves headroom over the default 5-second child escalation
+and the runner's bounded in-flight, notification, and cleanup waits. The
+deterministic runtime smoke inspects and signals only the uniquely owned fake
+process trees it creates. A forced bridge kill outside systemd is diagnostic
+evidence only: descendant cleanup after `SIGKILL`, a host crash, or supervisor
+failure is not guaranteed without cgroup-aware containment.
+
 For merge/release gate selection, start with [release-verification.md](release-verification.md). This document contains the detailed runtime smoke procedures.
 
 The checks assume the default local bridge URL:
@@ -61,11 +70,18 @@ This starts temporary loopback bridge instances from build artifacts with isolat
 - per-job `notifyUrl` delivery to a local webhook
 - OpenClaw `source`, `sourceName`, `originRoutingKey`, and `metadata` preservation
 - cancellation terminal state and notification persistence
+- owned direct-exec descendant cleanup for cancel, timeout, and graceful shutdown,
+  plus a separately reported non-systemd forced-termination diagnostic
 - `omx-dispatch` MCP `omx_health` and `omx_submit_job_and_wait`
 - live OMX smoke wiring with a fake OMX command
 - optional OpenClaw plugin discovery when the `openclaw` CLI is installed
 
 The automated smoke does not run the real OMX CLI and does not contact live Telegram or OpenClaw hooks. Keep the manual checks below for deployed service wiring, real OMX execution, and external notification delivery.
+
+Tmux collection reads only bounded head/tail regions and retained terminal/session
+artifacts follow the configured job retention policy. This does not cap the live
+growth of stdout/stderr files while a tmux job is still running. Treat live-output
+limiting as a separate follow-up; it is not part of the current retention cleanup.
 
 Run the opt-in live OMX execution smoke only when local model credentials and `omx` are configured:
 
@@ -86,7 +102,17 @@ KEEP_RUNTIME_SMOKE_DIR=1 npm run verify:runtime
 RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1 npm run verify:runtime
 ```
 
-`KEEP_RUNTIME_SMOKE_DIR=1` works for both loopback and live runtime smoke. On failure, the smoke script prints bridge output/job JSON summaries/notification JSONL summaries with sensitive fields redacted, plus the temporary directory path. Set `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` only for local triage when redacted stdout/stderr previews are needed.
+`KEEP_RUNTIME_SMOKE_DIR=1` works for both loopback and live runtime smoke. On
+failure, the smoke script prints bridge output/job JSON summaries/notification
+JSONL summaries with sensitive fields redacted, plus the temporary directory
+path. A failed real live-OMX job also includes a bounded 1,200-character
+head/tail preview of its redacted stderr before the default temp cleanup. Exact
+provider credentials, bridge secrets, prompt-shaped secrets, and HOME/CODEX_HOME
+paths are removed from that preview. In the same live-safe diagnostics, the job
+state path is reported as `<job-state>` instead of a correlation-bearing
+filename, and the final bounded failure stack is redacted before printing. Raw
+job JSON and raw stack text are not printed. Stdout and broader failure previews
+remain opt-in through `RUNTIME_SMOKE_DIAGNOSTICS_VERBOSE=1` for local triage.
 
 Expected:
 
@@ -311,9 +337,26 @@ curl -sS "$BRIDGE_URL/jobs/<job id>" \
 ```
 
 2. Check `notifyOutcome` and `notifyHistory`.
-3. In dispatch, run `omx_notification_stats`.
-4. If a notification is pending and should be consumed, run `omx_wait_for_job` for the specific job or `omx_get_notifications` for all pending notifications.
-5. Check bridge logs with `journalctl --user -u omx-bridge -n 120 --no-pager`.
+   - If `notifyOutcome` is absent, startup reconciliation treats the notification
+     as never attempted and runs one reconciliation delivery operation. That
+     operation still uses the configured per-delivery retry delays.
+   - If `notifyOutcome` records a failed or skipped delivery, a service restart
+     does not retry it automatically. This prevents restart-driven webhook storms;
+     use the authenticated manual retry endpoint when another attempt is intended.
+3. Retry a recorded failure only when delivery should be attempted again:
+
+```bash
+curl -sS -X POST "$BRIDGE_URL/jobs/<job id>/notify/retry" \
+  ${BRIDGE_API_TOKEN:+-H "Authorization: Bearer $BRIDGE_API_TOKEN"}
+```
+
+The job must be terminal. The retry result is appended to the bounded
+`notifyHistory`, which retains the latest 10 attempts.
+
+4. In dispatch, run `omx_notification_stats`.
+5. If a notification is pending and should be consumed, run `omx_wait_for_job`
+   for the specific job or `omx_get_notifications` for all pending notifications.
+6. Check bridge logs with `journalctl --user -u omx-bridge -n 120 --no-pager`.
 
 ## 9. Completion Criteria
 

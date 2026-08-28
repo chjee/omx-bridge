@@ -10,6 +10,25 @@ import {
 import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { BridgeJob, OmxExecutionResult, TmuxSessionState } from './job.types';
 import { buildOmxExecArgs } from './omx-exec-args';
+import {
+  assertPrivateOwnedDirectory,
+  ensurePrivateOwnedDirectory,
+  JOB_ID_PATTERN,
+  PRIVATE_FILE_MODE,
+} from './private-state-directory';
+
+export type ArtifactCleanupStatus =
+  | 'removed'
+  | 'not_found'
+  | 'retained_live'
+  | 'liveness_unknown'
+  | 'failed';
+
+export interface ArtifactCleanupResult {
+  jobId: string;
+  status: ArtifactCleanupStatus;
+  detail?: string;
+}
 
 export type TmuxSpawnFunction = (
   command: string,
@@ -43,9 +62,19 @@ const RUNNER_FILE = 'run.sh';
 const SESSION_FILE = 'session.json';
 const EXIT_CODE_GRACE_MS = 100;
 const EXIT_CODE_GRACE_INTERVAL_MS = 10;
+const SESSION_FILES = new Set([
+  PROMPT_FILE,
+  STDOUT_FILE,
+  STDERR_FILE,
+  EXIT_CODE_FILE,
+  RUNNER_FILE,
+  SESSION_FILE,
+]);
 
 @Injectable()
 export class TmuxSessionRunnerService {
+  private readyPromise?: Promise<void>;
+
   constructor(
     @Inject(BRIDGE_CONFIG) private readonly config: BridgeConfig,
     @Inject(TMUX_SPAWN) private readonly spawnFn: TmuxSpawnFunction,
@@ -54,7 +83,8 @@ export class TmuxSessionRunnerService {
   async start(job: BridgeJob): Promise<TmuxSessionState> {
     const now = new Date().toISOString();
     const sessionDirectory = this.sessionDirectory(job.id);
-    await fs.mkdir(sessionDirectory, { recursive: true });
+    await this.ensureReady();
+    await this.ensureSessionDirectory(sessionDirectory);
 
     const executionCwd = await this.resolveExecutionCwd(job.cwd);
     const sessionName = this.buildSessionName(job.id);
@@ -68,8 +98,14 @@ export class TmuxSessionRunnerService {
       ...(executionCwd ? { cwd: executionCwd } : {}),
     };
 
-    await fs.writeFile(this.sessionFile(job.id), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
-    await fs.writeFile(this.promptFile(job.id), job.prompt, { encoding: 'utf8', mode: 0o600 });
+    await fs.writeFile(this.sessionFile(job.id), `${JSON.stringify(session, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
+    await fs.writeFile(this.promptFile(job.id), job.prompt, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
     await fs.writeFile(this.runnerFile(job.id), this.buildRunnerScript(job.id), {
       encoding: 'utf8',
       mode: 0o700,
@@ -222,6 +258,92 @@ export class TmuxSessionRunnerService {
     return session;
   }
 
+  async removeArtifacts(jobId: string, expectedSessionName: string): Promise<ArtifactCleanupResult> {
+    if (!JOB_ID_PATTERN.test(jobId)) return { jobId, status: 'failed', detail: 'invalid_job_id' };
+    const canonicalSessionName = this.buildSessionName(jobId);
+    if (expectedSessionName !== canonicalSessionName) {
+      return { jobId, status: 'liveness_unknown', detail: 'non_canonical_session' };
+    }
+    const directory = this.sessionDirectory(jobId);
+    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      stat = await fs.lstat(directory);
+    } catch (error) {
+      if (this.isMissingFile(error)) return { jobId, status: 'not_found' };
+      return { jobId, status: 'failed', detail: this.describeError(error) };
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      return { jobId, status: 'failed', detail: 'unsafe_artifact_path' };
+    }
+    try {
+      await assertPrivateOwnedDirectory(
+        directory,
+        'Bridge tmux cleanup directory',
+        (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+      );
+    } catch (error) {
+      return { jobId, status: 'failed', detail: this.describeError(error) };
+    }
+
+    const sessionName = await this.readPersistedSessionName(jobId);
+    if (!sessionName || sessionName !== canonicalSessionName) {
+      return { jobId, status: 'liveness_unknown', detail: 'unreadable_session' };
+    }
+    const liveness = await this.runTmux(['has-session', '-t', expectedSessionName]);
+    if (liveness.code === 0) return { jobId, status: 'retained_live' };
+    if (!this.isConfirmedMissingSession(liveness)) {
+      return { jobId, status: 'liveness_unknown', detail: liveness.stderr || 'tmux_unavailable' };
+    }
+    try {
+      await assertPrivateOwnedDirectory(
+        directory,
+        'Bridge tmux cleanup directory',
+        (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+      );
+      const finalStat = await fs.lstat(directory);
+      if (finalStat.dev !== stat.dev || finalStat.ino !== stat.ino) {
+        return { jobId, status: 'failed', detail: 'artifact_identity_changed' };
+      }
+      await fs.rm(directory, { recursive: true });
+      return { jobId, status: 'removed' };
+    } catch (error) {
+      return { jobId, status: 'failed', detail: this.describeError(error) };
+    }
+  }
+
+  async cleanupStaleOrphans(
+    jobs: readonly BridgeJob[],
+    retentionDays: number,
+    durableJobIds: readonly string[] = [],
+  ): Promise<ArtifactCleanupResult[]> {
+    await this.ensureReady();
+    const knownIds = new Set([...jobs.map((job) => job.id), ...durableJobIds]);
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    const entries = await fs.readdir(this.config.tmuxSessionsDirectory, { withFileTypes: true });
+    const results: ArtifactCleanupResult[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !JOB_ID_PATTERN.test(entry.name)) continue;
+      if (knownIds.has(entry.name)) continue;
+      const directory = this.sessionDirectory(entry.name);
+      let newest: number;
+      try {
+        newest = await this.newestArtifactTimestamp(directory);
+      } catch (error) {
+        results.push({ jobId: entry.name, status: 'failed', detail: this.describeError(error) });
+        continue;
+      }
+      if (newest >= cutoff) continue;
+      const sessionName = await this.readPersistedSessionName(entry.name);
+      const canonicalSessionName = this.buildSessionName(entry.name);
+      if (!sessionName || sessionName !== canonicalSessionName) {
+        results.push({ jobId: entry.name, status: 'liveness_unknown', detail: 'unreadable_session' });
+        continue;
+      }
+      results.push(await this.removeArtifacts(entry.name, canonicalSessionName));
+    }
+    return results;
+  }
+
   private buildRunnerScript(jobId: string): string {
     const omxCommand = [
       this.shellQuote(this.config.omxCommand),
@@ -230,6 +352,12 @@ export class TmuxSessionRunnerService {
 
     return [
       '#!/usr/bin/env bash',
+      'original_umask="$(umask)"',
+      'umask 077',
+      `: > ${this.shellQuote(this.stdoutFile(jobId))}`,
+      `: > ${this.shellQuote(this.stderrFile(jobId))}`,
+      `: > ${this.shellQuote(this.exitCodeFile(jobId))}`,
+      'umask "$original_umask"',
       'set +e',
       `${omxCommand} < ${this.shellQuote(this.promptFile(jobId))} > ${this.shellQuote(this.stdoutFile(jobId))} 2> ${this.shellQuote(this.stderrFile(jobId))}`,
       'code=$?',
@@ -324,31 +452,136 @@ export class TmuxSessionRunnerService {
   }
 
   private async readCapturedFile(filePath: string): Promise<CapturedFile> {
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
     try {
-      const text = await fs.readFile(filePath, 'utf8');
+      handle = await fs.open(filePath, 'r');
+      const stat = await handle.stat();
       const limit = this.config.maxOutputChars;
-      if (text.length <= limit) {
-        return { text, truncated: false, length: text.length };
-      }
       if (limit <= 0) {
-        return { text: '', truncated: true, length: text.length };
+        return { text: '', truncated: stat.size > 0, length: stat.size };
       }
+      if (stat.size <= limit) {
+        const buffer = Buffer.alloc(stat.size);
+        await handle.read(buffer, 0, stat.size, 0);
+        return { text: buffer.toString('utf8'), truncated: false, length: stat.size };
+      }
+      const marker = '\n...[output truncated]...\n';
+      const budget = Math.max(0, limit - marker.length);
+      const headLength = Math.ceil(budget / 2);
+      const tailLength = Math.floor(budget / 2);
+      const headText = await this.readUtf8Slice(handle, 0, headLength + 4, headLength, false);
+      const tailText = await this.readUtf8Slice(
+        handle,
+        Math.max(0, stat.size - tailLength - 4),
+        tailLength + 4,
+        tailLength,
+        true,
+      );
       return {
-        text: text.slice(0, limit),
+        text: `${headText}${marker}${tailText}`.slice(0, limit),
         truncated: true,
-        length: text.length,
+        length: stat.size,
       };
     } catch (error) {
       if (this.isMissingFile(error)) {
         return { text: '', truncated: false, length: 0 };
       }
       throw error;
+    } finally {
+      await handle?.close().catch(() => undefined);
     }
   }
 
+  private async readUtf8Slice(
+    handle: Awaited<ReturnType<typeof fs.open>>,
+    position: number,
+    bytesToRead: number,
+    maxChars: number,
+    takeTail: boolean,
+  ): Promise<string> {
+    if (bytesToRead <= 0 || maxChars <= 0) return '';
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    const decoded = buffer.subarray(0, bytesRead).toString('utf8')
+      .replace(/^\uFFFD+/, '')
+      .replace(/\uFFFD+$/, '');
+    let sliced = takeTail ? decoded.slice(-maxChars) : decoded.slice(0, maxChars);
+    if (takeTail && /[\uDC00-\uDFFF]/.test(sliced[0] ?? '')) sliced = sliced.slice(1);
+    if (!takeTail && /[\uD800-\uDBFF]/.test(sliced.at(-1) ?? '')) sliced = sliced.slice(0, -1);
+    return sliced;
+  }
+
+  private async readPersistedSessionName(jobId: string): Promise<string | null> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.sessionFile(jobId), 'utf8')) as unknown;
+      return typeof parsed === 'object' && parsed !== null &&
+        typeof (parsed as { sessionName?: unknown }).sessionName === 'string'
+        ? (parsed as { sessionName: string }).sessionName
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async newestArtifactTimestamp(directory: string): Promise<number> {
+    let newest = (await fs.stat(directory)).mtimeMs;
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      newest = Math.max(newest, (await fs.stat(path.join(directory, entry.name))).mtimeMs);
+    }
+    return newest;
+  }
+
+  private describeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private isConfirmedMissingSession(result: TmuxCommandResult): boolean {
+    return result.code === 1 && /can't find session|no such (?:fake )?session|no server running/i.test(result.stderr);
+  }
+
   private async writeSessionState(jobId: string, session: TmuxSessionState): Promise<void> {
-    await fs.mkdir(this.sessionDirectory(jobId), { recursive: true });
-    await fs.writeFile(this.sessionFile(jobId), `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+    await this.ensureReady();
+    await this.ensureSessionDirectory(this.sessionDirectory(jobId));
+    await fs.writeFile(this.sessionFile(jobId), `${JSON.stringify(session, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  async ensureReady(): Promise<void> {
+    if (!this.readyPromise) {
+      this.readyPromise = this.prepareDirectories();
+    }
+    const ready = this.readyPromise;
+    try {
+      await ready;
+    } catch (error) {
+      if (this.readyPromise === ready) this.readyPromise = undefined;
+      throw error;
+    }
+  }
+
+  private async prepareDirectories(): Promise<void> {
+    await ensurePrivateOwnedDirectory(
+      this.config.tmuxSessionsDirectory,
+      'Bridge tmux sessions directory',
+      (entry) => entry.isDirectory() && JOB_ID_PATTERN.test(entry.name),
+    );
+    const entries = await fs.readdir(this.config.tmuxSessionsDirectory, { withFileTypes: true });
+    for (const entry of entries.filter((candidate) => (
+      candidate.isDirectory() && JOB_ID_PATTERN.test(candidate.name)
+    ))) {
+      await this.ensureSessionDirectory(path.join(this.config.tmuxSessionsDirectory, entry.name));
+    }
+  }
+
+  private ensureSessionDirectory(directory: string): Promise<void> {
+    return ensurePrivateOwnedDirectory(
+      directory,
+      'Bridge tmux job directory',
+      (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+    );
   }
 
   private durationMs(job: BridgeJob): number {
