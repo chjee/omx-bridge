@@ -462,6 +462,23 @@ Claude Code -> summarize result / continue workflow
 
 If `ENABLE_CLAUDE_CHANNEL=false`, the MCP server still keeps the persisted notification queue and logging path for `omx_get_notifications`.
 
+## License and distribution
+
+Starting with the corrective `0.1.1` source tree, omx-bridge is licensed under
+the MIT License. The repository [LICENSE](LICENSE) file is authoritative and
+permits commercial use, modification, and distribution under its terms.
+
+The root bridge, dispatch server, and OpenClaw plugin remain private npm
+packages and are not published to the npm registry. The intended GitHub
+publication scope is release metadata plus GitHub's automatic source archives;
+no binary, `node_modules`, or other bundled dependency asset is included.
+Adding bundled dependency artifacts requires a fresh third-party license and
+MPL notice audit.
+
+The immutable `v0.1.0` tag predates this license decision and remains a
+tag-only provenance milestone. It must not be described retroactively as an
+open-source release.
+
 ## Testing
 
 Run all tests:

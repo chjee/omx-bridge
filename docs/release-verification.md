@@ -33,10 +33,30 @@ the plugin's pinned OpenClaw graph failed its Node 18 clean install and the lock
 | 22 | Dependency-derived floor, locally verified with Node v22.19.0 / npm 10.9.3 | PASS | PASS | PASS | PASS | PASS | Include |
 | 24 | Observed operator line, locally verified with Node v24.14.1 / npm 11.19.0 | PASS | PASS | PASS | PASS | PASS | Include |
 
-This table records disposable local branch evidence. The new workflow remains
-`Not-tested` on GitHub-hosted runners until the branch is pushed and both jobs
-produce links to successful runs. Do not call a revision release-ready from the
-workflow definition alone; require green deterministic and fake-runtime jobs.
+This table records disposable local branch evidence, not permanent hosted-CI
+evidence for every future release. A workflow definition alone is never proof
+that a candidate passed: record the exact candidate SHA and a successful hosted
+run URL separately for each release, and require green deterministic and
+fake-runtime jobs for that same revision.
+
+## License And Publication Gate
+
+Before publishing a GitHub Release, verify all of the following:
+
+- the tagged tree contains the intended license text
+- the root, dispatch, and plugin manifests and lockfile root metadata agree on
+  version and license
+- the dependency-license audit has no unresolved incompatible or unknown
+  runtime dependency
+- GitHub automatic source archives are distinguished from separately uploaded
+  binary or bundled dependency assets
+- all three npm packages remain private and unpublished unless a separate npm
+  publication policy is explicitly approved
+
+The immutable `v0.1.0` tag was created as a provenance marker before the
+license/publication contract existed and did not receive a GitHub Release. The
+corrective `v0.1.1` candidate establishes the MIT source-distribution contract;
+its hosted CI, main promotion, tag, and release remain separate evidence gates.
 
 ## Pre-Merge Checklist
 
