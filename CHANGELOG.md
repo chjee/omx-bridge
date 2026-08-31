@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.1] - 2026-08-29
+## [0.1.1] - 2026-08-31
 
 - Establish the MIT license and public source-distribution contract.
 - Align the private root, dispatch, and plugin package metadata on version
