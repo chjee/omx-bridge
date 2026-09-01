@@ -36,6 +36,37 @@ async function runShellScript(filePath: string, env: NodeJS.ProcessEnv = {}): Pr
   });
 }
 
+async function runShellScriptInNewSession(filePath: string, env: NodeJS.ProcessEnv = {}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('setsid', ['bash', filePath], {
+      env: { ...process.env, ...env },
+      stdio: 'ignore',
+    });
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`session script exited with ${code === null ? signal ?? 'null' : `code ${code}`}`));
+    });
+  });
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`process ${pid} remained alive after capture failure cleanup`);
+}
+
 function createJob(overrides: Partial<BridgeJob> = {}): BridgeJob {
   return {
     id: overrides.id ?? '00000000-0000-4000-a000-000000000001',
@@ -119,7 +150,9 @@ describe('TmuxSessionRunnerService', () => {
       'original_umask="$(umask)"',
       'umask 077',
     ]);
-    expect(runnerScript).toContain('umask "$original_umask"\nset +e');
+    expect(runnerScript).toContain('umask "$original_umask"\nexec ');
+    expect(runnerScript).toContain('capture-wrapper.js');
+    expect(runnerScript).toContain('--cap 1048576');
     await expect(fs.readFile(path.join(sessionDirectory, 'session.json'), 'utf8')).resolves.toContain(session.sessionName);
     if (process.platform !== 'win32') {
       const sessionRootStat = await fs.stat(config.tmuxSessionsDirectory);
@@ -238,7 +271,7 @@ describe('TmuxSessionRunnerService', () => {
       { ...config, omxCommand: fakeOmxCommand },
       spawnFn as TmuxSpawnFunction,
     );
-    const job = createJob();
+    const job = createJob({ startedAt: new Date().toISOString() });
 
     await service.start(job);
     const sessionDirectory = path.join(config.tmuxSessionsDirectory, job.id);
@@ -250,16 +283,545 @@ describe('TmuxSessionRunnerService', () => {
     await expect(fs.readFile(path.join(sessionDirectory, 'stdout.log'), 'utf8')).resolves.toBe('stdout-data');
     await expect(fs.readFile(path.join(sessionDirectory, 'stderr.log'), 'utf8')).resolves.toBe('stderr-data');
     await expect(fs.readFile(path.join(sessionDirectory, 'exit-code'), 'utf8')).resolves.toBe('0\n');
-    for (const fileName of ['stdout.log', 'stderr.log', 'exit-code']) {
+    for (const fileName of ['stdout.log', 'stderr.log', 'capture.json', 'exit-code']) {
       const stat = await fs.stat(path.join(sessionDirectory, fileName));
       expect(stat.mode & 0o777).toBe(0o600);
     }
+    await expect(fs.stat(path.join(sessionDirectory, 'stdout.tail'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(path.join(sessionDirectory, 'stderr.tail'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await fs.stat(path.join(sessionDirectory, 'capture-wrapper.js'))).mode & 0o777).toBe(0o700);
     const inheritedMask = process.umask();
     const workspaceStat = await fs.stat(workspaceFile);
     expect((await fs.readFile(inheritedUmaskFile, 'utf8')).trim()).toBe(
       inheritedMask.toString(8).padStart(4, '0'),
     );
     expect(workspaceStat.mode & 0o777).toBe(0o666 & ~inheritedMask);
+  });
+
+  it('caps live tmux stdout and stderr artifacts while preserving head and tail diagnostics', async () => {
+    const config = await createConfig({
+      tmuxMaxCaptureBytesPerStream: 4096,
+      maxOutputChars: 4096,
+    });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'high-output-omx.sh');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        "printf 'STDOUT_HEAD'",
+        "printf 'x%.0s' $(seq 1 6000)",
+        "printf 'STDOUT_TAIL'",
+        "printf 'STDERR_HEAD' >&2",
+        "printf 'y%.0s' $(seq 1 6000) >&2",
+        "printf 'STDERR_TAIL' >&2",
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({ startedAt: new Date().toISOString() });
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await runShellScript(path.join(directory, 'run.sh'));
+
+    expect((await fs.stat(path.join(directory, 'stdout.log'))).size).toBeLessThanOrEqual(4096);
+    expect((await fs.stat(path.join(directory, 'stderr.log'))).size).toBeLessThanOrEqual(4096);
+    const metadata = JSON.parse(await fs.readFile(path.join(directory, 'capture.json'), 'utf8'));
+    expect(metadata.stdout).toMatchObject({ truncated: true, bytesSeen: expect.any(Number) });
+    expect(metadata.stderr).toMatchObject({ truncated: true, bytesSeen: expect.any(Number) });
+
+    const collected = await service.collect({ ...job, session });
+    expect(collected?.result).toMatchObject({ status: 'succeeded', exitCode: 0 });
+    expect(collected?.result.execution.outputTruncated).toBe(true);
+    expect(collected?.result.stdout).toContain('STDOUT_HEAD');
+    expect(collected?.result.stdout).toContain('STDOUT_TAIL');
+    expect(collected?.result.stderr).toContain('STDERR_HEAD');
+    expect(collected?.result.stderr).toContain('STDERR_TAIL');
+    expect(collected?.result.stdout).toContain('...[live output truncated]...');
+  });
+
+  it('does not mark an artifact at the exact physical cap as truncated', async () => {
+    const config = await createConfig({
+      tmuxMaxCaptureBytesPerStream: 4096,
+      maxOutputChars: 4096,
+    });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'exact-cap-omx.sh');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        "head -c 4096 /dev/zero | tr '\\0' z",
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await runShellScript(path.join(directory, 'run.sh'));
+
+    expect((await fs.stat(path.join(directory, 'stdout.log'))).size).toBe(4096);
+    const metadata = JSON.parse(await fs.readFile(path.join(directory, 'capture.json'), 'utf8'));
+    expect(metadata.stdout.truncated).toBe(false);
+  });
+
+  it('marks an artifact one byte over the physical cap as truncated', async () => {
+    const config = await createConfig({
+      tmuxMaxCaptureBytesPerStream: 4096,
+      maxOutputChars: 4096,
+    });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'over-cap-omx.sh');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        "head -c 4097 /dev/zero | tr '\\0' z",
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await runShellScript(path.join(directory, 'run.sh'));
+
+    expect((await fs.stat(path.join(directory, 'stdout.log'))).size).toBeLessThanOrEqual(4096);
+    const metadata = JSON.parse(await fs.readFile(path.join(directory, 'capture.json'), 'utf8'));
+    expect(metadata.stdout).toMatchObject({ bytesSeen: 4097, truncated: true });
+  });
+
+  it('never exceeds the aggregate per-stream cap during truncation or finalization', async () => {
+    const config = await createConfig({
+      tmuxMaxCaptureBytesPerStream: 4096,
+      maxOutputChars: 4096,
+    });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'aggregate-cap-omx.sh');
+    const patchFile = path.join(root, 'aggregate-cap-check.js');
+    await fs.writeFile(fakeOmxCommand, [
+      '#!/usr/bin/env bash',
+      'cat > /dev/null',
+      "printf 'HEAD'",
+      "printf 'x%.0s' $(seq 1 10000)",
+      "printf 'TAIL'",
+      "printf 'ERRHEAD' >&2",
+      "printf 'y%.0s' $(seq 1 10000) >&2",
+      "printf 'ERRTAIL' >&2",
+      '',
+    ].join('\n'), { mode: 0o700 });
+    await fs.writeFile(patchFile, [
+      "const fs = require('node:fs');",
+      "const cap = Number(process.argv[process.argv.indexOf('--cap') + 1]);",
+      "const paths = [['--stdout', '--stdout-tail'], ['--stderr', '--stderr-tail']].map(([log, tail]) => [process.argv[process.argv.indexOf(log) + 1], process.argv[process.argv.indexOf(tail) + 1]]);",
+      'const size = (file) => { try { return fs.statSync(file).size; } catch (error) { if (error && error.code === \'ENOENT\') return 0; throw error; } };',
+      "const check = () => { for (const [log, tail] of paths) { const total = size(log) + size(tail); if (total > cap) throw new Error(`aggregate capture cap exceeded: ${total} > ${cap}`); } };",
+      "for (const method of ['writeSync', 'ftruncateSync', 'unlinkSync']) { const original = fs[method]; fs[method] = function(...args) { const result = original.apply(this, args); check(); return result; }; }",
+      '',
+    ].join('\n'));
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await expect(runShellScript(path.join(directory, 'run.sh'), {
+      NODE_OPTIONS: `--require=${patchFile}`,
+    })).resolves.toBeUndefined();
+    expect((await fs.stat(path.join(directory, 'stdout.log'))).size).toBeLessThanOrEqual(4096);
+    expect((await fs.stat(path.join(directory, 'stderr.log'))).size).toBeLessThanOrEqual(4096);
+  });
+
+  it('preserves shell-compatible exit codes when OMX is terminated by a signal', async () => {
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'signal-exit-omx.sh');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        'printf before-term',
+        'kill -TERM $$',
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await expect(runShellScript(path.join(directory, 'run.sh'))).rejects.toThrow('script exited with code 143');
+    await expect(fs.readFile(path.join(directory, 'exit-code'), 'utf8')).resolves.toBe('143\n');
+    await expect(service.collect({ ...job, session })).resolves.toMatchObject({
+      result: { status: 'failed', exitCode: 143, execution: { errorType: 'non_zero_exit' } },
+    });
+  });
+
+  it('keeps live-capped UTF-8 output free of replacement characters', async () => {
+    const config = await createConfig({
+      tmuxMaxCaptureBytesPerStream: 4096,
+      maxOutputChars: 4096,
+    });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'unicode-cap-omx.sh');
+    await fs.writeFile(
+      fakeOmxCommand,
+      [
+        '#!/usr/bin/env bash',
+        'cat > /dev/null',
+        "printf 'UTF8_HEAD'",
+        "printf '😀%.0s' $(seq 1 2000)",
+        "printf 'UTF8_TAIL'",
+        '',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o700 },
+    );
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await runShellScript(path.join(directory, 'run.sh'));
+
+    const collected = await service.collect({ ...job, session });
+    expect(collected?.result.stdout).toContain('UTF8_HEAD');
+    expect(collected?.result.stdout).toContain('UTF8_TAIL');
+    expect(collected?.result.stdout).not.toContain('\uFFFD');
+  });
+
+  it('treats a capture infrastructure failure as an execution error', async () => {
+    const config = await createConfig();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'capture-failure', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t capture-failure',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), 'partial');
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'capture.json'), JSON.stringify({
+      version: 1,
+      stdout: { bytesSeen: 7, truncated: false, tailStart: 0, tailLength: 0, finalized: true },
+      stderr: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: true },
+      captureFailure: 'write_failed',
+      exitCode: 1,
+    }));
+    await fs.writeFile(path.join(directory, 'exit-code'), '1\n');
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      result: {
+        status: 'failed',
+        execution: { errorType: 'execution_error', outputTruncated: false },
+      },
+    });
+  });
+
+  it('fails closed to outputTruncated when capture metadata is missing', async () => {
+    const config = await createConfig();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'missing-capture-meta', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t missing-capture-meta',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), 'legacy output');
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'exit-code'), '0\n');
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      result: {
+        status: 'succeeded',
+        execution: { outputTruncated: true },
+      },
+    });
+  });
+
+  it('fails closed to outputTruncated when capture metadata has invalid numeric fields', async () => {
+    const config = await createConfig();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'bad-capture-meta', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t bad-capture-meta',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), 'output');
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'capture.json'), JSON.stringify({
+      version: 1,
+      stdout: { bytesSeen: -1, truncated: false },
+      stderr: { bytesSeen: 0.5, truncated: false },
+      captureFailure: null,
+      exitCode: -1,
+    }));
+    await fs.writeFile(path.join(directory, 'exit-code'), '0\n');
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      result: { status: 'succeeded', execution: { outputTruncated: true } },
+    });
+  });
+
+  it('treats capture metadata with a mismatched exit code as an execution error', async () => {
+    const config = await createConfig();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'mismatched-capture-meta', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t mismatched-capture-meta',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'stdout.log'), 'output');
+    await fs.writeFile(path.join(directory, 'stderr.log'), '');
+    await fs.writeFile(path.join(directory, 'capture.json'), JSON.stringify({
+      version: 1,
+      stdout: { bytesSeen: 6, truncated: false, tailStart: 0, tailLength: 0, finalized: true },
+      stderr: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: true },
+      captureFailure: null,
+      exitCode: 2,
+    }));
+    await fs.writeFile(path.join(directory, 'exit-code'), '0\n');
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      result: { status: 'failed', execution: { errorType: 'execution_error' } },
+    });
+  });
+
+  it('maps a real capture metadata write failure to an execution error', async () => {
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'capture-failure-omx.sh');
+    const patchFile = path.join(root, 'capture-failure-patch.js');
+    await fs.writeFile(fakeOmxCommand, '#!/usr/bin/env bash\ncat > /dev/null\nprintf ok\n', { mode: 0o700 });
+    await fs.writeFile(patchFile, [
+      "const fs = require('node:fs');",
+      'const original = fs.writeFileSync;',
+      "fs.writeFileSync = function(file, ...rest) { if (String(file).endsWith('capture.json')) throw new Error('forced metadata failure'); return original.call(this, file, ...rest); };",
+      '',
+    ].join('\n'));
+    let call = 0;
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        const child = new MockChildProcess();
+        call += 1;
+        setImmediate(() => {
+          if (call === 1) {
+            child.emit('close', 0);
+          } else {
+            child.stderr.write("can't find session: capture-failure");
+            child.emit('close', 1);
+          }
+        });
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({ startedAt: new Date().toISOString() });
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await expect(runShellScript(path.join(directory, 'run.sh'), {
+      NODE_OPTIONS: `--require=${patchFile}`,
+    })).rejects.toThrow('script exited with code 1');
+
+    await expect(service.collect({ ...job, session })).resolves.toMatchObject({
+      result: { status: 'failed', execution: { errorType: 'execution_error' } },
+    });
+  });
+
+  it('maps a capture artifact open failure to an execution error', async () => {
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'capture-open-failure-omx.sh');
+    const patchFile = path.join(root, 'capture-open-failure-patch.js');
+    await fs.writeFile(fakeOmxCommand, '#!/usr/bin/env bash\ncat > /dev/null\nprintf ok\n', { mode: 0o700 });
+    await fs.writeFile(patchFile, [
+      "const fs = require('node:fs');",
+      'const original = fs.openSync;',
+      "fs.openSync = function(file, ...rest) { if (String(file).endsWith('stdout.log')) throw new Error('forced open failure'); return original.call(this, file, ...rest); };",
+      '',
+    ].join('\n'));
+    let call = 0;
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        const child = new MockChildProcess();
+        call += 1;
+        setImmediate(() => {
+          if (call === 1) child.emit('close', 0);
+          else {
+            child.stderr.write("can't find session: capture-open-failure");
+            child.emit('close', 1);
+          }
+        });
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({ startedAt: new Date().toISOString() });
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await expect(runShellScript(path.join(directory, 'run.sh'), {
+      NODE_OPTIONS: `--require=${patchFile}`,
+    })).rejects.toThrow('script exited with code 1');
+    await expect(service.collect({ ...job, session })).resolves.toMatchObject({
+      result: { status: 'failed', execution: { errorType: 'execution_error', outputTruncated: true } },
+    });
+  });
+
+  it('maps a capture finalization failure to an execution error', async () => {
+    const config = await createConfig();
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'capture-finalize-failure-omx.sh');
+    const patchFile = path.join(root, 'capture-finalize-failure-patch.js');
+    await fs.writeFile(fakeOmxCommand, '#!/usr/bin/env bash\ncat > /dev/null\nprintf ok\n', { mode: 0o700 });
+    await fs.writeFile(patchFile, [
+      "const fs = require('node:fs');",
+      'const original = fs.unlinkSync;',
+      "fs.unlinkSync = function(file, ...rest) { if (String(file).endsWith('stdout.tail')) throw new Error('forced finalize failure'); return original.call(this, file, ...rest); };",
+      '',
+    ].join('\n'));
+    let call = 0;
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        const child = new MockChildProcess();
+        call += 1;
+        setImmediate(() => {
+          if (call === 1) child.emit('close', 0);
+          else {
+            child.stderr.write("can't find session: capture-finalize-failure");
+            child.emit('close', 1);
+          }
+        });
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({ startedAt: new Date().toISOString() });
+    const session = await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    await expect(runShellScript(path.join(directory, 'run.sh'), {
+      NODE_OPTIONS: `--require=${patchFile}`,
+    })).rejects.toThrow('script exited with code 1');
+    await expect(service.collect({ ...job, session })).resolves.toMatchObject({
+      result: { status: 'failed', execution: { errorType: 'execution_error', outputTruncated: false } },
+    });
+  });
+
+  it('bounds capture-failure cleanup and removes an ignore-TERM descendant', async () => {
+    if (process.platform === 'win32') return;
+    const config = await createConfig({ sigkillGraceMs: 100 });
+    const root = path.dirname(config.tmuxSessionsDirectory);
+    const fakeOmxCommand = path.join(root, 'capture-failure-ignore-term-omx.sh');
+    const patchFile = path.join(root, 'capture-failure-ignore-term-patch.js');
+    const descendantPidFile = path.join(root, 'capture-failure-descendant.pid');
+    await fs.writeFile(fakeOmxCommand, [
+      '#!/usr/bin/env bash',
+      'cat > /dev/null',
+      "trap '' TERM",
+      'sleep 30 &',
+      `printf '%s\\n' "$!" > ${JSON.stringify(descendantPidFile)}`,
+      'printf capture-failure-trigger',
+      'while :; do sleep 1; done',
+      '',
+    ].join('\n'), { mode: 0o700 });
+    await fs.writeFile(patchFile, [
+      "const fs = require('node:fs');",
+      'const original = fs.writeFileSync;',
+      "fs.writeFileSync = function(file, ...rest) { if (String(file).endsWith('capture.json')) throw new Error('forced metadata failure'); return original.call(this, file, ...rest); };",
+      '',
+    ].join('\n'));
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      { ...config, omxCommand: fakeOmxCommand },
+      jest.fn(() => {
+        setImmediate(() => child.emit('close', 0));
+        return child as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob();
+    await service.start(job);
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+
+    const startedAt = Date.now();
+    await expect(runShellScriptInNewSession(path.join(directory, 'run.sh'), {
+      NODE_OPTIONS: `--require=${patchFile}`,
+    })).rejects.toThrow();
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    const descendantPid = Number((await fs.readFile(descendantPidFile, 'utf8')).trim());
+    expect(Number.isSafeInteger(descendantPid)).toBe(true);
+    await waitForProcessExit(descendantPid);
   });
 
   it('does not chmod a tmux root with unrelated entries', async () => {
@@ -461,6 +1023,67 @@ describe('TmuxSessionRunnerService', () => {
     );
   });
 
+  it('keeps timeout precedence when capture metadata already records a helper failure', async () => {
+    const config = await createConfig({ jobTimeoutMs: 10 });
+    const killSession = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => {
+        setImmediate(() => killSession.emit('close', 0));
+        return killSession as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({
+      startedAt: new Date(Date.now() - 1000).toISOString(),
+      session: {
+        backend: 'tmux', sessionName: 'omx-bridge-timeout-capture-failure', status: 'running',
+        createdAt: new Date(Date.now() - 1000).toISOString(), updatedAt: new Date(Date.now() - 1000).toISOString(),
+        attachCommand: 'tmux attach -t omx-bridge-timeout-capture-failure',
+      },
+    });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'capture.json'), JSON.stringify({
+      version: 1,
+      stdout: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: false },
+      stderr: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: false },
+      captureFailure: 'write failed',
+      exitCode: null,
+    }));
+
+    await expect(service.collect(job)).resolves.toMatchObject({
+      result: { execution: { timedOut: true, errorType: 'timeout' } },
+    });
+  });
+
+  it('keeps explicit cancellation precedence when capture metadata records a helper failure', async () => {
+    const config = await createConfig();
+    const killSession = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => {
+        setImmediate(() => killSession.emit('close', 0));
+        return killSession as unknown as ChildProcessWithoutNullStreams;
+      }) as TmuxSpawnFunction,
+    );
+    const job = createJob({ session: {
+      backend: 'tmux', sessionName: 'omx-bridge-cancel-capture-failure', status: 'running',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      attachCommand: 'tmux attach -t omx-bridge-cancel-capture-failure',
+    } });
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'capture.json'), JSON.stringify({
+      version: 1,
+      stdout: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: false },
+      stderr: { bytesSeen: 0, truncated: false, tailStart: 0, tailLength: 0, finalized: false },
+      captureFailure: 'write failed',
+      exitCode: null,
+    }));
+
+    await expect(service.cancel(job)).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
   it('does not mark a session cancelled when tmux kill fails', async () => {
     const config = await createConfig();
     const killSession = new MockChildProcess();
@@ -493,6 +1116,13 @@ describe('TmuxSessionRunnerService', () => {
     await fs.mkdir(sessionDirectory, { recursive: true });
     const sessionName = canonicalSessionName(job.id);
     await fs.writeFile(path.join(sessionDirectory, 'session.json'), JSON.stringify({ sessionName }));
+    await fs.writeFile(path.join(sessionDirectory, 'capture-wrapper.js'), 'process.exit(0)', { mode: 0o700 });
+    await fs.writeFile(path.join(sessionDirectory, 'capture.json'), '{}', { mode: 0o600 });
+    await fs.writeFile(path.join(sessionDirectory, 'stdout.tail'), '', { mode: 0o600 });
+    await fs.writeFile(path.join(sessionDirectory, 'stderr.tail'), '', { mode: 0o600 });
+    await fs.writeFile(path.join(sessionDirectory, 'stdout.log'), 'captured', { mode: 0o600 });
+    await fs.writeFile(path.join(sessionDirectory, 'stderr.log'), '', { mode: 0o600 });
+    await fs.writeFile(path.join(sessionDirectory, 'exit-code'), '0\n', { mode: 0o600 });
     const inactive = new MockChildProcess();
     const service = new TmuxSessionRunnerService(config, jest.fn(() => {
       setImmediate(() => {

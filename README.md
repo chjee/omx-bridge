@@ -108,6 +108,7 @@ BRIDGE_HOST=127.0.0.1
 BRIDGE_REQUEST_BODY_LIMIT=1mb
 BRIDGE_JOBS_DIR=.omx/state/bridge-jobs
 OMX_COMMAND=omx
+BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM=1048576
 # BRIDGE_OMX_MODEL=gpt-5.5
 # BRIDGE_OMX_MODEL_REASONING_EFFORT=high
 NOTIFY_MODE=openclaw
@@ -206,6 +207,16 @@ BRIDGE_OMX_ENV_ALLOWLIST=PATH,HOME,CODEX_HOME,OPENAI_API_KEY,CUSTOM_TOOL_ENV
 Captured stdout/stderr are bounded by `BRIDGE_MAX_OUTPUT_CHARS` per stream. When
 output exceeds the limit, the bridge keeps both the beginning and the end with a
 truncation marker in the middle so late build/test failures remain visible.
+
+Tmux jobs also cap each running `stdout.log` and `stderr.log` artifact with
+`BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM` (default: `1048576` bytes). The cap
+is a physical per-stream byte limit, separate from the terminal/API character
+limit above. Values outside `4096..67108864` fall back to the default. When a
+tmux stream reaches its cap, the job continues while `stdout.log`/`stderr.log`
+retain the head and private session-local ring-tail artifacts retain the latest
+tail. Those two private artifacts together remain within the per-stream cap;
+the sidecar is removed after finalization. Terminal collection reassembles head,
+marker, and tail; the discarded middle is not stored.
 
 `BRIDGE_HOST` defaults to `127.0.0.1`. If it is set to a non-loopback host
 such as `0.0.0.0`, startup requires both:
