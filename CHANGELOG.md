@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.2] - 2026-09-01
+
+- Bound running tmux stdout and stderr artifacts per stream while preserving
+  head/tail diagnostics, terminal semantics, private artifact handling, and
+  existing `outputTruncated` behavior.
+- Moved GitHub-hosted verification actions to supported Node 24 runtimes
+  while preserving the project Node 22/24 matrix and dependent fake-runtime
+  ordering.
+
 ## [0.1.1] - 2026-08-31
 
 - Establish the MIT license and public source-distribution contract.
