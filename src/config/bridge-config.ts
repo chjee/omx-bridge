@@ -4,6 +4,10 @@ import path from 'node:path';
 
 export type NotifyMode = 'openclaw' | 'claude';
 
+export const DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM = 1_048_576;
+export const MIN_TMUX_MAX_CAPTURE_BYTES_PER_STREAM = 4_096;
+export const MAX_TMUX_MAX_CAPTURE_BYTES_PER_STREAM = 67_108_864;
+
 export interface BridgeConfig {
   host: string;
   /** Express JSON body parser limit. */
@@ -23,6 +27,8 @@ export interface BridgeConfig {
   jobPollIntervalMs: number;
   jobTimeoutMs: number;
   maxOutputChars: number;
+  /** Running tmux artifact cap in bytes, applied independently to stdout and stderr. */
+  tmuxMaxCaptureBytesPerStream?: number;
   /** SIGTERM 후 SIGKILL을 보내기까지 대기 시간 (ms) */
   sigkillGraceMs: number;
   /** 동시에 실행할 수 있는 최대 잡 수 (기본 2). CLI/Telegram 동시 제출 시 한쪽이 다른 쪽을 막지 않게 함. */
@@ -107,6 +113,23 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoundedPositiveInt(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const normalized = value?.trim();
+  if (!normalized || !/^\d+$/.test(normalized)) {
+    return fallback;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    return fallback;
+  }
+  return parsed;
 }
 
 function parseBodyLimit(value: string | undefined, fallback: string): string {
@@ -251,6 +274,12 @@ export function buildBridgeConfig(
     maxOutputChars: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_OUTPUT_CHARS'),
       32_000,
+    ),
+    tmuxMaxCaptureBytesPerStream: parseBoundedPositiveInt(
+      configService.get<string>('BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM'),
+      DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
+      MIN_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
+      MAX_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
     ),
     sigkillGraceMs: parsePositiveInt(
       configService.get<string>('BRIDGE_SIGKILL_GRACE_MS'),

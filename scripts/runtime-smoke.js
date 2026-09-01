@@ -328,6 +328,36 @@ function createTmuxWaitOmxShim(dir) {
   return filePath;
 }
 
+function createTmuxHighOutputOmxShim(dir) {
+  const filePath = path.join(dir, 'fake-omx-tmux-high-output.sh');
+  writeExecutable(filePath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    'if [ "${1-}" != "exec" ]; then',
+    '  echo "unexpected omx command: ${1-}" >&2',
+    '  exit 64',
+    'fi',
+    'cat > /dev/null',
+    'printf "TMUX_CAP_STDOUT_HEAD"',
+    'printf "x%.0s" $(seq 1 12000)',
+    'printf "TMUX_CAP_STDOUT_TAIL"',
+    'printf "TMUX_CAP_STDERR_HEAD" >&2',
+    'printf "y%.0s" $(seq 1 12000) >&2',
+    'printf "TMUX_CAP_STDERR_TAIL" >&2',
+    ': > "${TMUX_CAPTURE_READY_FILE:?}"',
+    'trap "exit 143" TERM INT',
+    'while :; do',
+    '  printf "z%.0s" $(seq 1 1024)',
+    '  printf "TMUX_CAP_LIVE_STDOUT_TAIL"',
+    '  printf "w%.0s" $(seq 1 1024) >&2',
+    '  printf "TMUX_CAP_LIVE_STDERR_TAIL" >&2',
+    '  sleep 0.02',
+    'done',
+    '',
+  ].join('\n'));
+  return filePath;
+}
+
 function createFakeTmuxShim(dir) {
   const filePath = path.join(dir, 'fake-tmux.sh');
   writeExecutable(filePath, [
@@ -1192,6 +1222,59 @@ async function waitForPathState(filePath, exists, timeoutMs = 8_000) {
   throw new Error(`path ${filePath} did not become ${exists ? 'present' : 'absent'}`);
 }
 
+async function waitForCappedArtifacts(paths, capBytes, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  let stable = 0;
+  let previous = null;
+  while (Date.now() < deadline) {
+    if (!paths.every((filePath) => fs.existsSync(filePath))) {
+      await delay(50);
+      continue;
+    }
+    const sizes = paths.map((filePath) => fs.statSync(filePath).size);
+    if (sizes.some((size) => size > capBytes) || sizes[0] + sizes[2] > capBytes || sizes[1] + sizes[3] > capBytes) {
+      throw new Error(`tmux live capture exceeded cap ${capBytes}: ${sizes.join(',')}`);
+    }
+    if (previous && sizes.every((size, index) => size === previous[index])) {
+      stable += 1;
+      if (stable >= 2) return sizes;
+    } else {
+      stable = 0;
+    }
+    previous = sizes;
+    await delay(50);
+  }
+  throw new Error(`tmux live capture did not become bounded within ${timeoutMs}ms`);
+}
+
+async function waitForLiveCaptureMetadata(filePath, timeoutMs = 8_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const metadata = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (metadata?.stdout?.truncated && metadata?.stderr?.truncated && metadata.stdout.finalized === false && metadata.stderr.finalized === false) {
+        return metadata;
+      }
+    } catch {
+      // The wrapper replaces this small metadata file while its streams drain.
+    }
+    await delay(50);
+  }
+  throw new Error(`tmux live capture metadata did not report active truncation within ${timeoutMs}ms`);
+}
+
+function readLiveCaptureTail(filePath, capture) {
+  const raw = fs.readFileSync(filePath);
+  const { tailStart, tailLength } = capture;
+  if (!Number.isSafeInteger(tailStart) || !Number.isSafeInteger(tailLength) || tailStart < 0 || tailLength < 0 || tailStart >= raw.length || tailLength > raw.length) {
+    throw new Error('tmux live capture tail metadata is invalid');
+  }
+  const end = tailStart + tailLength;
+  return Buffer.concat(end <= raw.length
+    ? [raw.subarray(tailStart, end)]
+    : [raw.subarray(tailStart), raw.subarray(0, end - raw.length)]).toString('utf8');
+}
+
 async function waitForRunningJob(port, jobId) {
   const deadline = Date.now() + 8_000;
   let latest;
@@ -1711,6 +1794,77 @@ async function smokeTmuxRuntime() {
   log('tmux session runtime smoke passed');
 }
 
+async function smokeTmuxLiveOutputCapRuntime() {
+  const tempDir = makeTempDir('omx-bridge-smoke-tmux-cap-');
+  let bridge;
+  let failed = false;
+  try {
+    const jobsDir = path.join(tempDir, 'jobs');
+    const tmuxSessionsDir = path.join(tempDir, 'sessions');
+    const fakeTmuxStateDir = path.join(tempDir, 'fake-tmux-state');
+    const readyFile = path.join(tempDir, 'capture-ready');
+    const capBytes = 4096;
+    fs.mkdirSync(fakeTmuxStateDir, { recursive: true });
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir,
+      omxCommand: createTmuxHighOutputOmxShim(tempDir),
+      tmuxCommand: createFakeTmuxShim(tempDir),
+      tmuxSessionsDir,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR,TMUX_CAPTURE_READY_FILE',
+      bridgeEnv: {
+        FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+        TMUX_CAPTURE_READY_FILE: readyFile,
+        BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: String(capBytes),
+        BRIDGE_JOB_POLL_INTERVAL_MS: '10000',
+      },
+    });
+    await waitForBridge(port);
+    const submit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke tmux live cap',
+      requestId: 'runtime-smoke-tmux-live-cap',
+      source: 'dispatch',
+      cwd: tempDir,
+      executionMode: 'tmux',
+    });
+    const runningJob = await waitForRunningTmuxJob(port, submit.jobId);
+    await waitForPathState(readyFile, true);
+    const sessionDir = path.join(tmuxSessionsDir, submit.jobId);
+    await waitForCappedArtifacts([
+      path.join(sessionDir, 'stdout.log'),
+      path.join(sessionDir, 'stderr.log'),
+      path.join(sessionDir, 'stdout.tail'),
+      path.join(sessionDir, 'stderr.tail'),
+    ], capBytes);
+    const capture = await waitForLiveCaptureMetadata(path.join(sessionDir, 'capture.json'));
+    const liveStdout = fs.readFileSync(path.join(sessionDir, 'stdout.log'), 'utf8');
+    const liveStderr = fs.readFileSync(path.join(sessionDir, 'stderr.log'), 'utf8');
+    const liveStdoutTail = readLiveCaptureTail(path.join(sessionDir, 'stdout.tail'), capture.stdout);
+    const liveStderrTail = readLiveCaptureTail(path.join(sessionDir, 'stderr.tail'), capture.stderr);
+    assertIncludes(liveStdout, 'TMUX_CAP_STDOUT_HEAD', 'tmux live cap stdout lost head');
+    assertIncludes(liveStdoutTail, 'TMUX_CAP_LIVE_STDOUT_TAIL', 'tmux live cap stdout lost latest tail');
+    assertIncludes(liveStderr, 'TMUX_CAP_STDERR_HEAD', 'tmux live cap stderr lost head');
+    assertIncludes(liveStderrTail, 'TMUX_CAP_LIVE_STDERR_TAIL', 'tmux live cap stderr lost latest tail');
+    const sessionName = runningJob.session.sessionName;
+    const tmuxPid = readFakeTmuxPid(fakeTmuxStateDir, sessionName);
+    const cancelResponse = await requestJson(port, 'POST', `/jobs/${encodeURIComponent(submit.jobId)}/cancel`);
+    assertEqual(cancelResponse.status, 'cancelled', 'tmux live cap cancel status mismatch', compactJobDiagnostic(cancelResponse));
+    await waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, tmuxPid);
+    const cancelled = await waitForNotifyOutcome(port, submit.jobId);
+    assertEqual(cancelled.status, 'cancelled', 'tmux live cap job status mismatch', compactJobDiagnostic(cancelled));
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('tmux live output cap runtime smoke', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
+  log('tmux live output cap runtime smoke passed');
+}
+
 async function smokeTmuxCancelRuntime() {
   const tempDir = makeTempDir('omx-bridge-smoke-tmux-cancel-');
   let bridge;
@@ -2048,6 +2202,7 @@ async function smokeLoopbackRuntime() {
   await smokeCancelPath();
   await smokeDirectExecContainment();
   await smokeTmuxRuntime();
+  await smokeTmuxLiveOutputCapRuntime();
   await smokeTmuxCancelRuntime();
   await smokeTmuxTimeoutRuntime();
   await smokeDispatchMcp();
@@ -2055,14 +2210,23 @@ async function smokeLoopbackRuntime() {
   log('runtime smoke passed');
 }
 
+async function flushOutputStreams() {
+  await Promise.all([
+    new Promise((resolve) => process.stdout.write('', resolve)),
+    new Promise((resolve) => process.stderr.write('', resolve)),
+  ]);
+}
+
 async function main() {
   const mode = process.argv[2] || '--loopback';
   if (mode === '--diagnostics-fixture-child') {
     emitDiagnosticsFixture();
+    await flushOutputStreams();
     return;
   }
   if (mode === '--live-failure-diagnostics-fixture-child') {
     emitLiveFailureDiagnosticsFixture();
+    await flushOutputStreams();
     return;
   }
   assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');

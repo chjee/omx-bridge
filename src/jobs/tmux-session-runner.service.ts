@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   BRIDGE_CONFIG,
+  DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
   DEFAULT_OMX_ENV_ALLOWLIST,
   type BridgeConfig,
 } from '../config/bridge-config';
@@ -16,6 +17,13 @@ import {
   JOB_ID_PATTERN,
   PRIVATE_FILE_MODE,
 } from './private-state-directory';
+import {
+  buildTmuxCaptureWrapperScript,
+  TMUX_CAPTURE_METADATA_FILE,
+  TMUX_CAPTURE_STDERR_TAIL_FILE,
+  TMUX_CAPTURE_STDOUT_TAIL_FILE,
+  TMUX_CAPTURE_WRAPPER_FILE,
+} from './tmux-capture-wrapper';
 
 export type ArtifactCleanupStatus =
   | 'removed'
@@ -54,6 +62,22 @@ interface CapturedFile {
   length: number;
 }
 
+interface TmuxCaptureMetadata {
+  version: 1;
+  stdout: TmuxCaptureStreamMetadata;
+  stderr: TmuxCaptureStreamMetadata;
+  captureFailure: string | null;
+  exitCode: number | null;
+}
+
+interface TmuxCaptureStreamMetadata {
+  bytesSeen: number;
+  truncated: boolean;
+  tailStart: number;
+  tailLength: number;
+  finalized: boolean;
+}
+
 const PROMPT_FILE = 'prompt.txt';
 const STDOUT_FILE = 'stdout.log';
 const STDERR_FILE = 'stderr.log';
@@ -69,6 +93,10 @@ const SESSION_FILES = new Set([
   EXIT_CODE_FILE,
   RUNNER_FILE,
   SESSION_FILE,
+  TMUX_CAPTURE_WRAPPER_FILE,
+  TMUX_CAPTURE_METADATA_FILE,
+  TMUX_CAPTURE_STDOUT_TAIL_FILE,
+  TMUX_CAPTURE_STDERR_TAIL_FILE,
 ]);
 
 @Injectable()
@@ -85,6 +113,15 @@ export class TmuxSessionRunnerService {
     const sessionDirectory = this.sessionDirectory(job.id);
     await this.ensureReady();
     await this.ensureSessionDirectory(sessionDirectory);
+    await Promise.all([
+      fs.rm(this.stdoutFile(job.id), { force: true }),
+      fs.rm(this.stderrFile(job.id), { force: true }),
+      fs.rm(this.exitCodeFile(job.id), { force: true }),
+      fs.rm(this.captureWrapperFile(job.id), { force: true }),
+      fs.rm(this.captureMetadataFile(job.id), { force: true }),
+      fs.rm(this.stdoutTailFile(job.id), { force: true }),
+      fs.rm(this.stderrTailFile(job.id), { force: true }),
+    ]);
 
     const executionCwd = await this.resolveExecutionCwd(job.cwd);
     const sessionName = this.buildSessionName(job.id);
@@ -107,6 +144,10 @@ export class TmuxSessionRunnerService {
       mode: PRIVATE_FILE_MODE,
     });
     await fs.writeFile(this.runnerFile(job.id), this.buildRunnerScript(job.id), {
+      encoding: 'utf8',
+      mode: 0o700,
+    });
+    await fs.writeFile(this.captureWrapperFile(job.id), buildTmuxCaptureWrapperScript(), {
       encoding: 'utf8',
       mode: 0o700,
     });
@@ -140,11 +181,15 @@ export class TmuxSessionRunnerService {
 
     const exitCode = await this.readExitCode(job.id);
     if (exitCode !== undefined) {
-      const stdout = await this.readCapturedFile(this.stdoutFile(job.id));
-      const stderr = await this.readCapturedFile(this.stderrFile(job.id));
+      const capture = await this.readCaptureMetadata(job.id);
+      const stdout = await this.readCaptureOutput(this.stdoutFile(job.id), this.stdoutTailFile(job.id), capture?.stdout);
+      const stderr = await this.readCaptureOutput(this.stderrFile(job.id), this.stderrTailFile(job.id), capture?.stderr);
+      const captureFailed = Boolean(capture?.captureFailure) ||
+        Boolean(capture && capture.exitCode !== null && capture.exitCode !== exitCode);
+      const outputTruncated = stdout.truncated || stderr.truncated || this.captureWasTruncated(capture);
       const session: TmuxSessionState = {
         ...job.session,
-        status: exitCode === 0 ? 'exited' : 'failed',
+        status: exitCode === 0 && !captureFailed ? 'exited' : 'failed',
         updatedAt: new Date().toISOString(),
         lastExitCode: exitCode,
       };
@@ -152,7 +197,7 @@ export class TmuxSessionRunnerService {
       return {
         session,
         result: {
-          status: exitCode === 0 ? 'succeeded' : 'failed',
+          status: exitCode === 0 && !captureFailed ? 'succeeded' : 'failed',
           stdout: stdout.text,
           stderr: stderr.text,
           exitCode,
@@ -161,8 +206,10 @@ export class TmuxSessionRunnerService {
             timeoutMs: this.config.jobTimeoutMs,
             maxOutputChars: this.config.maxOutputChars,
             durationMs: this.durationMs(job),
-            outputTruncated: stdout.truncated || stderr.truncated,
-            ...(exitCode === 0 ? {} : { errorType: 'non_zero_exit' as const }),
+            outputTruncated,
+            ...(captureFailed
+              ? { errorType: 'execution_error' as const }
+              : exitCode === 0 ? {} : { errorType: 'non_zero_exit' as const }),
           },
         },
       };
@@ -170,8 +217,9 @@ export class TmuxSessionRunnerService {
 
     if (this.isTimedOut(job)) {
       await this.runTmux(['kill-session', '-t', job.session.sessionName]);
-      const stdout = await this.readCapturedFile(this.stdoutFile(job.id));
-      const stderr = await this.readCapturedFile(this.stderrFile(job.id));
+      const capture = await this.readCaptureMetadata(job.id);
+      const stdout = await this.readCaptureOutput(this.stdoutFile(job.id), this.stdoutTailFile(job.id), capture?.stdout);
+      const stderr = await this.readCaptureOutput(this.stderrFile(job.id), this.stderrTailFile(job.id), capture?.stderr);
       const message = `Command timed out after ${this.config.jobTimeoutMs}ms`;
       const session: TmuxSessionState = {
         ...job.session,
@@ -194,7 +242,7 @@ export class TmuxSessionRunnerService {
             maxOutputChars: this.config.maxOutputChars,
             durationMs: this.durationMs(job),
             timedOut: true,
-            outputTruncated: stdout.truncated || stderr.truncated,
+            outputTruncated: stdout.truncated || stderr.truncated || this.captureWasTruncated(capture),
             errorType: 'timeout',
           },
         },
@@ -210,8 +258,9 @@ export class TmuxSessionRunnerService {
       return this.collect(job);
     }
 
-    const stdout = await this.readCapturedFile(this.stdoutFile(job.id));
-    const stderr = await this.readCapturedFile(this.stderrFile(job.id));
+    const capture = await this.readCaptureMetadata(job.id);
+    const stdout = await this.readCaptureOutput(this.stdoutFile(job.id), this.stdoutTailFile(job.id), capture?.stdout);
+    const stderr = await this.readCaptureOutput(this.stderrFile(job.id), this.stderrTailFile(job.id), capture?.stderr);
     const message = 'tmux session exited before writing an exit code';
     const session: TmuxSessionState = {
       ...job.session,
@@ -233,7 +282,7 @@ export class TmuxSessionRunnerService {
           timeoutMs: this.config.jobTimeoutMs,
           maxOutputChars: this.config.maxOutputChars,
           durationMs: this.durationMs(job),
-          outputTruncated: stdout.truncated || stderr.truncated,
+          outputTruncated: stdout.truncated || stderr.truncated || this.captureWasTruncated(capture),
           errorType: 'execution_error',
         },
       },
@@ -350,19 +399,35 @@ export class TmuxSessionRunnerService {
       ...buildOmxExecArgs(this.config).map((arg) => this.shellQuote(arg)),
     ].join(' ');
 
+    const captureCommand = [
+      this.shellQuote(process.execPath),
+      this.shellQuote(this.captureWrapperFile(jobId)),
+      '--cap',
+      String(this.config.tmuxMaxCaptureBytesPerStream ?? DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM),
+      '--sigkill-grace-ms',
+      String(this.config.sigkillGraceMs),
+      '--stdout',
+      this.shellQuote(this.stdoutFile(jobId)),
+      '--stderr',
+      this.shellQuote(this.stderrFile(jobId)),
+      '--stdout-tail',
+      this.shellQuote(this.stdoutTailFile(jobId)),
+      '--stderr-tail',
+      this.shellQuote(this.stderrTailFile(jobId)),
+      '--metadata',
+      this.shellQuote(this.captureMetadataFile(jobId)),
+      '--exit-code',
+      this.shellQuote(this.exitCodeFile(jobId)),
+      '--',
+      omxCommand,
+    ].join(' ');
+
     return [
       '#!/usr/bin/env bash',
       'original_umask="$(umask)"',
       'umask 077',
-      `: > ${this.shellQuote(this.stdoutFile(jobId))}`,
-      `: > ${this.shellQuote(this.stderrFile(jobId))}`,
-      `: > ${this.shellQuote(this.exitCodeFile(jobId))}`,
       'umask "$original_umask"',
-      'set +e',
-      `${omxCommand} < ${this.shellQuote(this.promptFile(jobId))} > ${this.shellQuote(this.stdoutFile(jobId))} 2> ${this.shellQuote(this.stderrFile(jobId))}`,
-      'code=$?',
-      `printf '%s\\n' "$code" > ${this.shellQuote(this.exitCodeFile(jobId))}`,
-      'exit "$code"',
+      `exec ${captureCommand} < ${this.shellQuote(this.promptFile(jobId))}`,
       '',
     ].join('\n');
   }
@@ -463,7 +528,7 @@ export class TmuxSessionRunnerService {
       if (stat.size <= limit) {
         const buffer = Buffer.alloc(stat.size);
         await handle.read(buffer, 0, stat.size, 0);
-        return { text: buffer.toString('utf8'), truncated: false, length: stat.size };
+        return { text: this.decodeCapturedBuffer(buffer), truncated: false, length: stat.size };
       }
       const marker = '\n...[output truncated]...\n';
       const budget = Math.max(0, limit - marker.length);
@@ -490,6 +555,99 @@ export class TmuxSessionRunnerService {
     } finally {
       await handle?.close().catch(() => undefined);
     }
+  }
+
+  private async readCaptureOutput(
+    filePath: string,
+    tailPath: string,
+    capture: TmuxCaptureStreamMetadata | undefined,
+  ): Promise<CapturedFile> {
+    const head = await this.readCapturedFile(filePath);
+    if (!capture?.truncated || capture.finalized) return head;
+    const tail = await this.readCaptureTail(tailPath, capture);
+    const marker = '\n...[live output truncated]...\n';
+    const combined = `${head.text}${marker}${tail}`;
+    return {
+      text: this.limitCapturedText(combined),
+      truncated: true,
+      length: head.length + capture.tailLength,
+    };
+  }
+
+  private async readCaptureTail(tailPath: string, capture: TmuxCaptureStreamMetadata): Promise<string> {
+    if (capture.tailLength === 0) return '';
+    try {
+      const raw = await fs.readFile(tailPath);
+      if (capture.tailStart < 0 || capture.tailLength < 0 || capture.tailStart >= raw.length || capture.tailLength > raw.length) {
+        return '';
+      }
+      const end = capture.tailStart + capture.tailLength;
+      const ordered = end <= raw.length
+        ? raw.subarray(capture.tailStart, end)
+        : Buffer.concat([raw.subarray(capture.tailStart), raw.subarray(0, end - raw.length)]);
+      return this.decodeCapturedBuffer(ordered);
+    } catch {
+      return '';
+    }
+  }
+
+  private limitCapturedText(value: string): string {
+    const limit = this.config.maxOutputChars;
+    if (value.length <= limit) return value;
+    const marker = '\n...[output truncated]...\n';
+    const budget = Math.max(0, limit - marker.length);
+    return `${value.slice(0, Math.ceil(budget / 2))}${marker}${value.slice(-Math.floor(budget / 2))}`.slice(0, limit);
+  }
+
+  private async readCaptureMetadata(jobId: string): Promise<TmuxCaptureMetadata | null> {
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.captureMetadataFile(jobId), 'utf8')) as unknown;
+      if (!this.isCaptureMetadata(parsed)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  private decodeCapturedBuffer(buffer: Buffer): string {
+    return buffer
+      .toString('utf8')
+      .replace(/^\uFFFD+/, '')
+      .replace(/\uFFFD+(?=\n\.\.\.\[live output truncated\]\.\.\.\n)/g, '')
+      .replace(/(\n\.\.\.\[live output truncated\]\.\.\.\n)\uFFFD+/g, '$1')
+      .replace(/\uFFFD+$/, '');
+  }
+
+  private captureWasTruncated(capture: TmuxCaptureMetadata | null): boolean {
+    return capture === null || capture.stdout.truncated || capture.stderr.truncated;
+  }
+
+  private isCaptureMetadata(value: unknown): value is TmuxCaptureMetadata {
+    if (typeof value !== 'object' || value === null) return false;
+    const record = value as Record<string, unknown>;
+    const validStream = (stream: unknown): stream is TmuxCaptureMetadata['stdout'] => (
+      typeof stream === 'object' && stream !== null &&
+      typeof (stream as { bytesSeen?: unknown }).bytesSeen === 'number' &&
+      Number.isSafeInteger((stream as { bytesSeen: number }).bytesSeen) &&
+      (stream as { bytesSeen: number }).bytesSeen >= 0 &&
+      typeof (stream as { truncated?: unknown }).truncated === 'boolean' &&
+      typeof (stream as { tailStart?: unknown }).tailStart === 'number' &&
+      Number.isSafeInteger((stream as { tailStart: number }).tailStart) &&
+      (stream as { tailStart: number }).tailStart >= 0 &&
+      typeof (stream as { tailLength?: unknown }).tailLength === 'number' &&
+      Number.isSafeInteger((stream as { tailLength: number }).tailLength) &&
+      (stream as { tailLength: number }).tailLength >= 0 &&
+      typeof (stream as { finalized?: unknown }).finalized === 'boolean'
+    );
+    return record.version === 1 &&
+      validStream(record.stdout) &&
+      validStream(record.stderr) &&
+      (record.captureFailure === null || typeof record.captureFailure === 'string') &&
+      (record.exitCode === null || (
+        typeof record.exitCode === 'number' &&
+        Number.isSafeInteger(record.exitCode) &&
+        record.exitCode >= 0
+      ));
   }
 
   private async readUtf8Slice(
@@ -611,6 +769,22 @@ export class TmuxSessionRunnerService {
 
   private stderrFile(jobId: string): string {
     return path.join(this.sessionDirectory(jobId), STDERR_FILE);
+  }
+
+  private captureWrapperFile(jobId: string): string {
+    return path.join(this.sessionDirectory(jobId), TMUX_CAPTURE_WRAPPER_FILE);
+  }
+
+  private captureMetadataFile(jobId: string): string {
+    return path.join(this.sessionDirectory(jobId), TMUX_CAPTURE_METADATA_FILE);
+  }
+
+  private stdoutTailFile(jobId: string): string {
+    return path.join(this.sessionDirectory(jobId), TMUX_CAPTURE_STDOUT_TAIL_FILE);
+  }
+
+  private stderrTailFile(jobId: string): string {
+    return path.join(this.sessionDirectory(jobId), TMUX_CAPTURE_STDERR_TAIL_FILE);
   }
 
   private exitCodeFile(jobId: string): string {

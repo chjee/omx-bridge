@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import {
+  DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
   DEFAULT_OMX_ENV_ALLOWLIST,
   DEFAULT_REQUEST_BODY_LIMIT,
   buildBridgeConfig,
@@ -41,6 +42,7 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 500,
       jobTimeoutMs: 900000,
       maxOutputChars: 32000,
+      tmuxMaxCaptureBytesPerStream: DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
       sigkillGraceMs: 5000,
       maxConcurrency: 2,
       maxActiveJobs: 50,
@@ -84,6 +86,7 @@ describe('buildBridgeConfig', () => {
       BRIDGE_JOB_POLL_INTERVAL_MS: '250',
       BRIDGE_JOB_TIMEOUT_MS: '1234',
       BRIDGE_MAX_OUTPUT_CHARS: '999',
+      BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: '8192',
       BRIDGE_SIGKILL_GRACE_MS: '7500',
       BRIDGE_MAX_CONCURRENCY: '4',
       BRIDGE_MAX_ACTIVE_JOBS: '25',
@@ -112,6 +115,7 @@ describe('buildBridgeConfig', () => {
       jobPollIntervalMs: 250,
       jobTimeoutMs: 1234,
       maxOutputChars: 999,
+      tmuxMaxCaptureBytesPerStream: 8192,
       sigkillGraceMs: 7500,
       maxConcurrency: 4,
       maxActiveJobs: 25,
@@ -140,6 +144,36 @@ describe('buildBridgeConfig', () => {
 
     expect(config.requestBodyLimit).toBe(DEFAULT_REQUEST_BODY_LIMIT);
   });
+
+  it.each(['0', '4095', '67108865', '4096junk', '4096.9', 'not-a-number'])(
+    'falls back to the tmux capture default for invalid value %s',
+    (value) => {
+      process.env = {
+        BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: value,
+        BRIDGE_API_TOKEN: 'token',
+        BRIDGE_CALLBACK_SECRET: 'secret',
+      };
+
+      const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
+
+      expect(config.tmuxMaxCaptureBytesPerStream).toBe(DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM);
+    },
+  );
+
+  it.each(['4096', '67108864'])(
+    'accepts in-range tmux capture cap %s',
+    (value) => {
+      process.env = {
+        BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: value,
+        BRIDGE_API_TOKEN: 'token',
+        BRIDGE_CALLBACK_SECRET: 'secret',
+      };
+
+      const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
+
+      expect(config.tmuxMaxCaptureBytesPerStream).toBe(Number(value));
+    },
+  );
 
   it('rejects invalid model reasoning effort values', () => {
     process.env = {

@@ -79,9 +79,14 @@ This starts temporary loopback bridge instances from build artifacts with isolat
 The automated smoke does not run the real OMX CLI and does not contact live Telegram or OpenClaw hooks. Keep the manual checks below for deployed service wiring, real OMX execution, and external notification delivery.
 
 Tmux collection reads only bounded head/tail regions and retained terminal/session
-artifacts follow the configured job retention policy. This does not cap the live
-growth of stdout/stderr files while a tmux job is still running. Treat live-output
-limiting as a separate follow-up; it is not part of the current retention cleanup.
+artifacts follow the configured job retention policy. Running tmux `stdout.log`
+and `stderr.log` artifacts are additionally capped independently by
+`BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM` (default: `1048576` bytes). The cap
+keeps the head in the log and the latest tail in private session-local ring
+artifacts. The two artifacts together remain within the per-stream cap, and the
+sidecar is removed after finalization; terminal collection reassembles head,
+marker, and tail while discarding the middle without failing a verbose job. It is separate from
+`BRIDGE_MAX_OUTPUT_CHARS`, which limits the terminal/API character response.
 
 Run the opt-in live OMX execution smoke only when local model credentials and `omx` are configured:
 
