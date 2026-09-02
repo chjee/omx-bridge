@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.2] - 2026-09-01
+## [0.1.2] - 2026-09-02
 
 - Bound running tmux stdout and stderr artifacts per stream while preserving
   head/tail diagnostics, terminal semantics, private artifact handling, and
