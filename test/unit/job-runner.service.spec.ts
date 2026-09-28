@@ -495,6 +495,104 @@ describe('JobRunnerService', () => {
     expect(execute).toHaveBeenCalledTimes(3);
   }, 10_000);
 
+  it('uses one full job snapshot for queued and running claim state', async () => {
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+    await repository.save(createJob());
+    const listAll = jest.spyOn(repository, 'listAll');
+
+    const claimed = await (runner as unknown as {
+      claimNext: () => Promise<BridgeJob | null>;
+    }).claimNext();
+
+    expect(claimed?.id).toBe('00000000-0000-4000-a000-000000000001');
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('coalesces overlapping tmux reconciliation into one collect and one completion', async () => {
+    const runningJob = createJob({
+      executionMode: 'tmux',
+      status: 'running',
+      startedAt: '2026-04-02T00:00:00.000Z',
+      session: {
+        backend: 'tmux',
+        sessionName: 'omx-bridge-test',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:01.000Z',
+        attachCommand: 'tmux attach -t omx-bridge-test',
+      },
+    });
+    await repository.save(runningJob);
+    jest.spyOn(repository, 'listByStatus').mockImplementation(async (status) => (
+      status === 'running' ? [runningJob] : []
+    ));
+    const collected = {
+      session: {
+        ...runningJob.session!,
+        status: 'exited' as const,
+        updatedAt: '2026-04-02T00:00:02.000Z',
+        lastExitCode: 0,
+      },
+      result: createExecutionResult({ stdout: 'tmux done' }),
+    };
+    let releaseCollect!: () => void;
+    const collectBarrier = new Promise<typeof collected>((resolve) => {
+      releaseCollect = () => resolve(collected);
+    });
+    const collect = jest.fn(() => collectBarrier);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { collect } as unknown as TmuxSessionRunnerService,
+    );
+
+    const runs = [runner.runOnce(), runner.runOnce(), runner.runOnce()];
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(collect).toHaveBeenCalledTimes(1);
+    releaseCollect();
+    await Promise.all(runs);
+    await expect(repository.getById(runningJob.id)).resolves.toMatchObject({
+      status: 'succeeded',
+      stdout: 'tmux done',
+      session: { status: 'exited', lastExitCode: 0 },
+    });
+    expect(mockJobNotify.notifyJobComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a rejected tmux reconcile guard so a later pass retries', async () => {
+    const listByStatus = jest.spyOn(repository, 'listByStatus')
+      .mockRejectedValueOnce(new Error('tmux scan failed'))
+      .mockResolvedValue([]);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { collect: jest.fn() } as unknown as TmuxSessionRunnerService,
+    );
+    const reconcile = () => (runner as unknown as {
+      reconcileRunningTmuxJobs: () => Promise<number>;
+    }).reconcileRunningTmuxJobs();
+
+    const firstOutcomes = await Promise.allSettled([reconcile(), reconcile()]);
+
+    expect(firstOutcomes).toEqual([
+      expect.objectContaining({ status: 'rejected' }),
+      expect.objectContaining({ status: 'rejected' }),
+    ]);
+    expect(listByStatus).toHaveBeenCalledTimes(1);
+    await expect(reconcile()).resolves.toBe(0);
+    expect(listByStatus).toHaveBeenCalledTimes(2);
+  });
+
   it('trigger starts queued work without waiting for the polling interval', async () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
     const runner = new JobRunnerService(

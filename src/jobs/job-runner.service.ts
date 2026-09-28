@@ -21,6 +21,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
   private cleanupPromise?: Promise<void>;
+  private tmuxReconcilePromise?: Promise<number>;
   private shuttingDown = false;
 
   constructor(
@@ -234,7 +235,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // 클레임 단계는 직렬화: size 체크와 listByStatus + inFlight.add가 한 임계영역에서 일어나야
+  // 클레임 단계는 직렬화: size 체크와 job snapshot + inFlight.add가 한 임계영역에서 일어나야
   // 동시 호출 시 같은 잡이 중복 클레임되지 않는다.
   private async claimNext(): Promise<BridgeJob | null> {
     let release!: () => void;
@@ -248,8 +249,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       if (this.inFlight.size >= this.config.maxConcurrency) {
         return null;
       }
-      const queuedJobs = await this.repository.listByStatus('queued');
-      const runningJobs = await this.repository.listByStatus('running');
+      const jobs = await this.repository.listAll();
+      const queuedJobs = jobs.filter((job) => job.status === 'queued');
+      const runningJobs = jobs.filter((job) => job.status === 'running');
       const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
       if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
         return null;
@@ -336,6 +338,17 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileRunningTmuxJobs(): Promise<number> {
+    if (this.tmuxReconcilePromise) return this.tmuxReconcilePromise;
+    const reconcile = this.performRunningTmuxReconciliation();
+    this.tmuxReconcilePromise = reconcile;
+    try {
+      return await reconcile;
+    } finally {
+      if (this.tmuxReconcilePromise === reconcile) this.tmuxReconcilePromise = undefined;
+    }
+  }
+
+  private async performRunningTmuxReconciliation(): Promise<number> {
     const runningJobs = await this.repository.listByStatus('running');
     let completed = 0;
     for (const job of runningJobs) {
