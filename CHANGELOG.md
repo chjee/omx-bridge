@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Reject explicit invalid non-empty bridge and dispatch operational settings at
+  startup while preserving documented defaults for missing or empty values.
+
 ## [0.1.2] - 2026-09-02
 
 - Bound running tmux stdout and stderr artifacts per stream while preserving
