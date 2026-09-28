@@ -127,6 +127,11 @@ Request bodies are bounded by `BRIDGE_REQUEST_BODY_LIMIT` (default: `1mb`).
 `metadata` is intended for small routing/context fields and must serialize to
 8192 bytes or less.
 
+Missing or empty optional operational settings use their documented defaults.
+Explicit non-empty invalid numeric, byte-limit, retry-list, or `NOTIFY_MODE`
+values make bridge startup fail with an error naming the offending environment
+variable; invalid values are not silently replaced with defaults.
+
 Notification modes:
 
 - `openclaw`: send OpenClaw hook notifications and direct Telegram notifications when configured.
@@ -211,10 +216,11 @@ truncation marker in the middle so late build/test failures remain visible.
 Tmux jobs also cap each running `stdout.log` and `stderr.log` artifact with
 `BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM` (default: `1048576` bytes). The cap
 is a physical per-stream byte limit, separate from the terminal/API character
-limit above. Values outside `4096..67108864` fall back to the default. When a
-tmux stream reaches its cap, the job continues while `stdout.log`/`stderr.log`
-retain the head and private session-local ring-tail artifacts retain the latest
-tail. Those two private artifacts together remain within the per-stream cap;
+limit above. Explicit non-empty values outside `4096..67108864` make startup
+fail. When a tmux stream reaches its cap, the job continues while
+`stdout.log`/`stderr.log` retain the head and private session-local ring-tail
+artifacts retain the latest tail. Those two private artifacts together remain
+within the per-stream cap;
 the sidecar is removed after finalization. Terminal collection reassembles head,
 marker, and tail; the discarded middle is not stored.
 
@@ -418,7 +424,8 @@ Important `omx-dispatch/.env` values:
 BRIDGE_URL=http://localhost:3992
 BRIDGE_CALLBACK_SECRET=shared-secret
 BRIDGE_REQUEST_TIMEOUT_MS=10000
-# WEBHOOK_PORT=12345  # omit to auto-assign from 12000-12999
+OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES=1000000
+# WEBHOOK_PORT=12345  # omit/empty to auto-assign; explicit range is 0..65535
 ENABLE_CLAUDE_CHANNEL=true  # required for callback-to-CLI continuation; false only queues for polling
 MAX_NOTIFICATION_QUEUE_SIZE=200
 OMX_DISPATCH_WAIT_TIMEOUT_MS=300000
@@ -428,7 +435,11 @@ OMX_DISPATCH_WAIT_POLL_INTERVAL_MS=1000
 # OMX_DISPATCH_NOTIFICATION_STORE_PATH=/path/to/omx-bridge/.omx/state/omx-dispatch-notifications.jsonl
 ```
 
-`WEBHOOK_PORT` is optional. When omitted, the MCP server picks a free port in the 12000–12999 range at startup, so concurrent Claude Code sessions do not conflict.
+`WEBHOOK_PORT` is optional. When omitted or empty, the MCP server picks a free
+port in the 12000–12999 range at startup, so concurrent Claude Code sessions do
+not conflict. An explicit value must be `0` or an integer in `1..65535`.
+Dispatch numeric settings likewise use defaults only when missing or empty and
+reject explicit invalid values with the environment-variable name.
 
 Completion notifications are appended to the JSONL store and mirrored in memory for local health/logging. On `omx-dispatch` startup, pending notifications are restored from that file. `omx_get_notifications` uses the persisted store as the source of truth so a different dispatch process can drain completions received by another webhook port.
 

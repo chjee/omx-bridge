@@ -20,6 +20,23 @@ const dispatchPackage = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 ) as { version: string };
 
+const STRICT_POSITIVE_INT_ENV_VARS = [
+  "BRIDGE_REQUEST_TIMEOUT_MS",
+  "OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES",
+  "MAX_NOTIFICATION_QUEUE_SIZE",
+  "OMX_DISPATCH_WAIT_TIMEOUT_MS",
+  "OMX_DISPATCH_WAIT_POLL_INTERVAL_MS",
+] as const;
+
+const INVALID_POSITIVE_INT_VALUES = [
+  "0",
+  "-1",
+  "1.5",
+  "500ms",
+  "NaN",
+  "9007199254740992",
+] as const;
+
 test("rejects runtime defaults without required bridge auth material", () => {
   assert.throws(
     () => loadRuntimeConfig({}, "/workspace/omx-bridge"),
@@ -135,13 +152,20 @@ test("loads runtime overrides from environment", () => {
   assert.equal(config.defaultWaitPollIntervalMs, 333);
 });
 
-test("positive integer parsing falls back for missing or invalid values", () => {
+test("positive integer parsing keeps defaults for missing or empty values", () => {
   assert.equal(parsePositiveInt(undefined, 10), 10);
   assert.equal(parsePositiveInt("", 10), 10);
-  assert.equal(parsePositiveInt("0", 10), 10);
-  assert.equal(parsePositiveInt("-1", 10), 10);
-  assert.equal(parsePositiveInt("abc", 10), 10);
+  assert.equal(parsePositiveInt("   ", 10), 10);
   assert.equal(parsePositiveInt("42", 10), 42);
+});
+
+test("positive integer parsing rejects explicit invalid values", () => {
+  for (const value of INVALID_POSITIVE_INT_VALUES) {
+    assert.throws(
+      () => parsePositiveInt(value, 10, "TEST_VALUE"),
+      /TEST_VALUE/,
+    );
+  }
 });
 
 test("boolean parsing accepts only explicit truthy values", () => {
@@ -156,22 +180,55 @@ test("boolean parsing accepts only explicit truthy values", () => {
   assert.equal(parseBoolean("YES"), true);
 });
 
-test("invalid positive integer env values fall back without rejecting other overrides", () => {
+test("empty numeric env values keep documented defaults", () => {
   const config = loadRuntimeConfig({
     BRIDGE_URL: "http://127.0.0.1:4999",
     BRIDGE_CALLBACK_SECRET: "callback-secret",
     BRIDGE_API_TOKEN: "api-token",
-    BRIDGE_REQUEST_TIMEOUT_MS: "invalid",
-    OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES: "0",
-    MAX_NOTIFICATION_QUEUE_SIZE: "-5",
-    OMX_DISPATCH_WAIT_TIMEOUT_MS: "NaN",
+    BRIDGE_REQUEST_TIMEOUT_MS: "",
+    WEBHOOK_PORT: " ",
+    OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES: " ",
+    MAX_NOTIFICATION_QUEUE_SIZE: "",
+    OMX_DISPATCH_WAIT_TIMEOUT_MS: " ",
     OMX_DISPATCH_WAIT_POLL_INTERVAL_MS: "",
   }, "/workspace/omx-bridge");
 
   assert.equal(config.bridgeUrl, "http://127.0.0.1:4999");
   assert.equal(config.bridgeRequestTimeoutMs, 10_000);
+  assert.equal(config.webhookPort, 0);
   assert.equal(config.webhookBodyLimitBytes, DEFAULT_WEBHOOK_BODY_LIMIT_BYTES);
   assert.equal(config.maxNotificationQueueSize, DEFAULT_MAX_NOTIFICATION_QUEUE_SIZE);
   assert.equal(config.defaultWaitTimeoutMs, 300_000);
   assert.equal(config.defaultWaitPollIntervalMs, 1_000);
+});
+
+test("explicit invalid positive integer env values fail fast", () => {
+  for (const envName of STRICT_POSITIVE_INT_ENV_VARS) {
+    for (const value of INVALID_POSITIVE_INT_VALUES) {
+      assert.throws(
+        () => loadRuntimeConfig({
+          BRIDGE_CALLBACK_SECRET: "callback-secret",
+          BRIDGE_API_TOKEN: "api-token",
+          [envName]: value,
+        }),
+        new RegExp(envName),
+      );
+    }
+  }
+});
+
+test("WEBHOOK_PORT accepts 0..65535 and rejects other explicit values", () => {
+  const auth = {
+    BRIDGE_CALLBACK_SECRET: "callback-secret",
+    BRIDGE_API_TOKEN: "api-token",
+  };
+  assert.equal(loadRuntimeConfig({ ...auth, WEBHOOK_PORT: "0" }).webhookPort, 0);
+  assert.equal(loadRuntimeConfig({ ...auth, WEBHOOK_PORT: "65535" }).webhookPort, 65535);
+
+  for (const value of ["-1", "65536", "1.5", "123abc", "NaN", "9007199254740992"]) {
+    assert.throws(
+      () => loadRuntimeConfig({ ...auth, WEBHOOK_PORT: value }),
+      /WEBHOOK_PORT/,
+    );
+  }
 });
