@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 export interface DispatchRuntimeConfig {
@@ -27,7 +28,6 @@ export interface DispatchRuntimeConfig {
 }
 
 export const DEFAULT_BRIDGE_URL = "http://localhost:3992";
-export const DEFAULT_SERVER_VERSION = "0.1.0";
 export const DEFAULT_WEBHOOK_PORT_MIN = 12000;
 export const DEFAULT_WEBHOOK_PORT_MAX = 12999;
 export const DEFAULT_WEBHOOK_BODY_LIMIT_BYTES = 1_000_000;
@@ -42,6 +42,33 @@ export const DEFAULT_MAX_WAIT_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_MIN_WAIT_POLL_INTERVAL_MS = 250;
 export const DEFAULT_MAX_WAIT_POLL_INTERVAL_MS = 10_000;
 export const DEFAULT_TERMINAL_NOTIFICATION_GRACE_MS = 2_000;
+
+export function loadDispatchPackageVersion(
+  moduleUrl: string | URL = import.meta.url,
+): string {
+  const packageJsonUrl = new URL("../package.json", moduleUrl);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(packageJsonUrl, "utf8")) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read omx-dispatch package metadata: ${detail}`);
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof (parsed as { version?: unknown }).version !== "string" ||
+    (parsed as { version: string }).version.trim().length === 0
+  ) {
+    throw new Error("omx-dispatch package metadata must contain a non-empty version");
+  }
+
+  return (parsed as { version: string }).version;
+}
+
+export const DISPATCH_PACKAGE_VERSION = loadDispatchPackageVersion();
 
 export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -65,7 +92,7 @@ export function loadRuntimeConfig(
   }
 
   return {
-    serverVersion: DEFAULT_SERVER_VERSION,
+    serverVersion: DISPATCH_PACKAGE_VERSION,
     bridgeUrl,
     bridgeCallbackSecret,
     bridgeApiToken,

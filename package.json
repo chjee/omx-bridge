@@ -22,7 +22,8 @@
     "verify:runtime": "npm run smoke:runtime",
     "verify:runtime:live": "npm run smoke:runtime:live",
     "verify:public-hygiene": "node scripts/public-hygiene-check.js",
-    "verify": "npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
+    "verify:versions": "node scripts/version-consistency-check.cjs",
+    "verify": "npm run verify:versions && npm run verify:root && npm run verify:dispatch && npm run verify:plugin",
     "verify:root": "npm test && npm run build",
     "verify:dispatch": "npm --prefix omx-dispatch run typecheck && npm --prefix omx-dispatch run build && npm --prefix omx-dispatch test",
     "verify:plugin": "npm --prefix omx-bridge-plugin run typecheck && npm --prefix omx-bridge-plugin run build && npm --prefix omx-bridge-plugin test"

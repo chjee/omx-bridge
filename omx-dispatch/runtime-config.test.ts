@@ -1,14 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   DEFAULT_BRIDGE_URL,
   DEFAULT_MAX_NOTIFICATION_QUEUE_SIZE,
   DEFAULT_WEBHOOK_BODY_LIMIT_BYTES,
+  loadDispatchPackageVersion,
   loadRuntimeConfig,
   parseBoolean,
   parsePositiveInt,
 } from "./runtime-config.js";
+
+const dispatchPackage = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
 
 test("rejects runtime defaults without required bridge auth material", () => {
   assert.throws(
@@ -29,7 +37,7 @@ test("loads runtime defaults with explicit insecure loopback opt-in", () => {
     OMX_DISPATCH_INSECURE_LOOPBACK: "1",
   }, "/workspace/omx-bridge");
 
-  assert.equal(config.serverVersion, "0.1.0");
+  assert.equal(config.serverVersion, dispatchPackage.version);
   assert.equal(config.bridgeUrl, DEFAULT_BRIDGE_URL);
   assert.equal(config.bridgeCallbackSecret, "");
   assert.equal(config.bridgeApiToken, "");
@@ -51,6 +59,37 @@ test("loads runtime defaults with explicit insecure loopback opt-in", () => {
   assert.equal(config.minWaitPollIntervalMs, 250);
   assert.equal(config.maxWaitPollIntervalMs, 10_000);
   assert.equal(config.terminalNotificationGraceMs, 2_000);
+});
+
+test("loads the dispatch package version from production and test build layouts", () => {
+  const productionModuleUrl = new URL("../dist/runtime-config.js", import.meta.url);
+  const testModuleUrl = new URL("../dist-test/runtime-config.js", import.meta.url);
+
+  assert.equal(loadDispatchPackageVersion(productionModuleUrl), dispatchPackage.version);
+  assert.equal(loadDispatchPackageVersion(testModuleUrl), dispatchPackage.version);
+});
+
+test("fails clearly when dispatch package metadata is malformed or has no version", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "dispatch-version-"));
+  const distDirectory = path.join(root, "dist");
+  const moduleUrl = pathToFileURL(path.join(distDirectory, "runtime-config.js"));
+  mkdirSync(distDirectory);
+
+  try {
+    writeFileSync(path.join(root, "package.json"), "{not-json", "utf8");
+    assert.throws(
+      () => loadDispatchPackageVersion(moduleUrl),
+      /Failed to read omx-dispatch package metadata/,
+    );
+
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "omx-dispatch" }), "utf8");
+    assert.throws(
+      () => loadDispatchPackageVersion(moduleUrl),
+      /must contain a non-empty version/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("rejects insecure loopback opt-in for non-loopback bridge URLs", () => {
