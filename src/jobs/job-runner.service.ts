@@ -338,7 +338,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileRunningTmuxJobs(): Promise<number> {
-    if (this.tmuxReconcilePromise) return this.tmuxReconcilePromise;
+    if (this.tmuxReconcilePromise) {
+      await this.tmuxReconcilePromise;
+      return 0;
+    }
     const reconcile = this.performRunningTmuxReconciliation();
     this.tmuxReconcilePromise = reconcile;
     try {

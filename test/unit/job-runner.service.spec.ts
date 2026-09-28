@@ -558,7 +558,9 @@ describe('JobRunnerService', () => {
 
     expect(collect).toHaveBeenCalledTimes(1);
     releaseCollect();
-    await Promise.all(runs);
+    const runResults = await Promise.all(runs);
+    expect(runResults.filter(Boolean)).toHaveLength(1);
+    expect(runResults.filter((result) => !result)).toHaveLength(2);
     await expect(repository.getById(runningJob.id)).resolves.toMatchObject({
       status: 'succeeded',
       stdout: 'tmux done',
