@@ -69,6 +69,7 @@ export function loadDispatchPackageVersion(
 }
 
 export const DISPATCH_PACKAGE_VERSION = loadDispatchPackageVersion();
+export const DEFAULT_SERVER_VERSION = DISPATCH_PACKAGE_VERSION;
 
 export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -92,7 +93,7 @@ export function loadRuntimeConfig(
   }
 
   return {
-    serverVersion: DISPATCH_PACKAGE_VERSION,
+    serverVersion: DEFAULT_SERVER_VERSION,
     bridgeUrl,
     bridgeCallbackSecret,
     bridgeApiToken,

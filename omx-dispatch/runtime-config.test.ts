@@ -7,7 +7,9 @@ import { pathToFileURL } from "node:url";
 import {
   DEFAULT_BRIDGE_URL,
   DEFAULT_MAX_NOTIFICATION_QUEUE_SIZE,
+  DEFAULT_SERVER_VERSION,
   DEFAULT_WEBHOOK_BODY_LIMIT_BYTES,
+  DISPATCH_PACKAGE_VERSION,
   loadDispatchPackageVersion,
   loadRuntimeConfig,
   parseBoolean,
@@ -67,6 +69,8 @@ test("loads the dispatch package version from production and test build layouts"
 
   assert.equal(loadDispatchPackageVersion(productionModuleUrl), dispatchPackage.version);
   assert.equal(loadDispatchPackageVersion(testModuleUrl), dispatchPackage.version);
+  assert.equal(DISPATCH_PACKAGE_VERSION, dispatchPackage.version);
+  assert.equal(DEFAULT_SERVER_VERSION, dispatchPackage.version);
 });
 
 test("fails clearly when dispatch package metadata is malformed or has no version", () => {
