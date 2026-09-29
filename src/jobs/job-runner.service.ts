@@ -68,23 +68,29 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
-    const [claimSettled] = await Promise.all([
+    const claimAndInFlightSettlement = Promise.all([
       this.waitForShutdownWork(claim, 'claim'),
       this.waitForInFlightRuns(),
     ]);
+    const reconciliationSettlement = reconciliation
+      ? this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
+      : Promise.resolve(true);
+    const cleanupSettlement = cleanup
+      ? this.waitForShutdownWork(cleanup, 'cleanup')
+      : Promise.resolve(true);
+
+    const [claimSettled] = await claimAndInFlightSettlement;
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
     this.abortControllers.clear();
-    const reconciliationSettled = reconciliation
-      ? await this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
-      : true;
+    const [reconciliationSettled, cleanupSettled] = await Promise.all([
+      reconciliationSettlement,
+      cleanupSettlement,
+    ]);
     if (reconciliationSettled) {
       await this.waitForCompletionNotifications();
     }
-    const cleanupSettled = cleanup
-      ? await this.waitForShutdownWork(cleanup, 'cleanup')
-      : true;
     if (claimSettled && reconciliationSettled && cleanupSettled) {
       await this.instanceLock?.release();
       return;

@@ -727,7 +727,6 @@ describe('JobRunnerService', () => {
       const cleanup = runner.cleanupTerminalJobs();
       const destroy = runner.onModuleDestroy();
       await jest.advanceTimersByTimeAsync(2_002);
-      await jest.advanceTimersByTimeAsync(2_002);
       await destroy;
 
       expect(releaseLock).not.toHaveBeenCalled();
@@ -747,6 +746,109 @@ describe('JobRunnerService', () => {
       await Promise.resolve();
 
       expect(releaseCallsWithReconcilePending).toBe(0);
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('bounds composite shutdown observers to two grace windows', async () => {
+    jest.useFakeTimers();
+    try {
+      config.sigkillGraceMs = 1;
+      const graceWindowMs = config.sigkillGraceMs + 2_000;
+      const runningTmuxJob = createJob({
+        executionMode: 'tmux',
+        status: 'running',
+        session: {
+          backend: 'tmux', sessionName: 'omx-bridge-budget', status: 'running',
+          createdAt: '2026-04-02T00:00:00.000Z', updatedAt: '2026-04-02T00:00:01.000Z',
+          attachCommand: 'tmux attach -t omx-bridge-budget',
+        },
+      });
+      await repository.save(runningTmuxJob);
+      const collected = {
+        session: {
+          ...runningTmuxJob.session!, status: 'exited' as const,
+          updatedAt: '2026-04-02T00:00:02.000Z', lastExitCode: 0,
+        },
+        result: createExecutionResult({ stdout: 'budget tmux done' }),
+      };
+      let releaseCollect!: () => void;
+      let markCollectStarted!: () => void;
+      const collectStarted = new Promise<void>((resolve) => { markCollectStarted = resolve; });
+      const collectBarrier = new Promise<typeof collected>((resolve) => {
+        releaseCollect = () => resolve(collected);
+      });
+      let releaseCleanup!: () => void;
+      const cleanupBarrier = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+      jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
+        await cleanupBarrier;
+        return { deleted: 0, retained: 0, deletedEntries: [] };
+      });
+      let releaseNotification!: () => void;
+      const notificationBarrier = new Promise<void>((resolve) => { releaseNotification = resolve; });
+      const notifyJobComplete = jest.fn(() => notificationBarrier);
+      const releaseLock = jest.fn().mockResolvedValue(undefined);
+      const runner = new JobRunnerService(
+        repository,
+        { execute: jest.fn() } as unknown as OmxExecService,
+        { notifyJobComplete } as unknown as JobNotifyService,
+        config,
+        {
+          collect: jest.fn(() => {
+            markCollectStarted();
+            return collectBarrier;
+          }),
+        } as unknown as TmuxSessionRunnerService,
+        { release: releaseLock } as unknown as BridgeInstanceLockService,
+      );
+      let releaseClaim!: () => void;
+      const claimBarrier = new Promise<void>((resolve) => { releaseClaim = resolve; });
+      let releaseInFlight!: () => void;
+      const inFlightBarrier = new Promise<void>((resolve) => { releaseInFlight = resolve; });
+
+      const run = runner.runOnce();
+      await collectStarted;
+      const cleanup = runner.cleanupTerminalJobs();
+      const shutdownState = runner as unknown as {
+        claimMutex: Promise<void>;
+        inFlightRuns: Map<string, Promise<void>>;
+      };
+      shutdownState.claimMutex = claimBarrier;
+      shutdownState.inFlightRuns.set('budget-in-flight', inFlightBarrier);
+      let destroySettled = false;
+      const destroy = runner.onModuleDestroy().then(() => { destroySettled = true; });
+      let elapsedMs = 0;
+
+      await jest.advanceTimersByTimeAsync(graceWindowMs - 1);
+      elapsedMs += graceWindowMs - 1;
+      releaseCollect();
+      await run;
+      expect(notifyJobComplete).toHaveBeenCalledTimes(1);
+      expect(destroySettled).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(1);
+      elapsedMs += 1;
+      expect(destroySettled).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(graceWindowMs);
+      elapsedMs += graceWindowMs;
+
+      expect(elapsedMs).toBe(2 * graceWindowMs);
+      expect(destroySettled).toBe(true);
+      await destroy;
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseClaim();
+      releaseInFlight();
+      releaseCleanup();
+      await cleanup;
+      await Promise.resolve();
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseNotification();
+      await jest.runAllTimersAsync();
       expect(releaseLock).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
