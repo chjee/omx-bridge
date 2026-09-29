@@ -61,26 +61,36 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.cleanupIntervalHandle);
       this.cleanupIntervalHandle = undefined;
     }
+    const claim = this.claimMutex;
     const reconciliation = this.tmuxReconcilePromise;
     const cleanup = this.cleanupPromise;
 
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
-    await this.waitForInFlightRuns();
+    const [claimSettled] = await Promise.all([
+      this.waitForShutdownWork(claim, 'claim'),
+      this.waitForInFlightRuns(),
+    ]);
+    for (const controller of this.abortControllers.values()) {
+      controller.abort();
+    }
     this.abortControllers.clear();
     const reconciliationSettled = reconciliation
       ? await this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
       : true;
-    await this.waitForCompletionNotifications();
+    if (reconciliationSettled) {
+      await this.waitForCompletionNotifications();
+    }
     const cleanupSettled = cleanup
       ? await this.waitForShutdownWork(cleanup, 'cleanup')
       : true;
-    if (reconciliationSettled && cleanupSettled) {
+    if (claimSettled && reconciliationSettled && cleanupSettled) {
       await this.instanceLock?.release();
       return;
     }
     const pendingLabels = [
+      ...(!claimSettled ? ['claim'] : []),
       ...(!reconciliationSettled ? ['tmux reconciliation'] : []),
       ...(!cleanupSettled ? ['cleanup'] : []),
     ];
@@ -89,7 +99,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         `${pendingLabels.join(' and ')} did not settle before shutdown timeout; retaining instance lock`,
       );
     }
-    const capturedWork: Promise<unknown>[] = [];
+    const capturedWork: Promise<unknown>[] = [claim];
     if (reconciliation) capturedWork.push(reconciliation);
     if (cleanup) capturedWork.push(cleanup);
     void this.releaseInstanceLockAfterShutdownWork(capturedWork).catch((error) => {
@@ -202,7 +212,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runOnce(): Promise<boolean> {
-    const reconciled = await this.reconcileRunningTmuxJobs();
+    let reconciled: number;
+    try {
+      reconciled = await this.reconcileRunningTmuxJobs();
+    } catch (error) {
+      if (this.shuttingDown) {
+        return false;
+      }
+      throw error;
+    }
     if (this.shuttingDown) {
       return reconciled > 0;
     }
@@ -267,10 +285,16 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.claimMutex = next;
     await prev;
     try {
+      if (this.shuttingDown) {
+        return null;
+      }
       if (this.inFlight.size >= this.config.maxConcurrency) {
         return null;
       }
       const jobs = await this.repository.listAll();
+      if (this.shuttingDown) {
+        return null;
+      }
       const queuedJobs = jobs.filter((job) => job.status === 'queued');
       const runningJobs = jobs.filter((job) => job.status === 'running');
       const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
@@ -290,6 +314,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         stderr: '',
       }));
       if (!claimed.transitioned || !claimed.job) return null;
+      if (this.shuttingDown) {
+        await this.requeueClaimedJob(claimed.job.id);
+        return null;
+      }
       this.inFlight.add(candidate.id);
       return claimed.job;
     } finally {
@@ -308,6 +336,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private async executeJob(job: BridgeJob): Promise<void> {
     const currentJob = await this.repository.getById(job.id);
     if (!currentJob || currentJob.status !== 'running') {
+      return;
+    }
+    if (this.shuttingDown) {
+      await this.requeueClaimedJob(currentJob.id);
       return;
     }
     if (currentJob.executionMode === 'tmux') {
@@ -339,6 +371,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.abortControllers.delete(job.id);
     }
+  }
+
+  private async requeueClaimedJob(jobId: string): Promise<void> {
+    await this.repository.transition(jobId, ['running'], (current) => ({
+      ...current,
+      status: 'queued',
+      startedAt: undefined,
+      finishedAt: undefined,
+    }));
   }
 
   private async startTmuxJob(job: BridgeJob): Promise<void> {

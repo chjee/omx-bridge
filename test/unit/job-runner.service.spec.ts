@@ -480,6 +480,92 @@ describe('JobRunnerService', () => {
     await expect(repository.getById(queuedJob.id)).resolves.toMatchObject({ status: 'queued' });
   });
 
+  it('retains the lock and leaves work queued when shutdown begins during the claim snapshot', async () => {
+    const queuedJob = createJob();
+    await repository.save(queuedJob);
+    const listAll = repository.listAll.bind(repository);
+    let markSnapshotStarted!: () => void;
+    const snapshotStarted = new Promise<void>((resolve) => { markSnapshotStarted = resolve; });
+    let releaseSnapshot!: (jobs: BridgeJob[]) => void;
+    const snapshotBarrier = new Promise<BridgeJob[]>((resolve) => { releaseSnapshot = resolve; });
+    jest.spyOn(repository, 'listAll')
+      .mockImplementationOnce(listAll)
+      .mockImplementationOnce(async () => {
+        markSnapshotStarted();
+        return snapshotBarrier;
+      });
+    const execute = jest.fn().mockResolvedValue(createExecutionResult());
+    const start = jest.fn();
+    const releaseLock = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { start } as unknown as TmuxSessionRunnerService,
+      { release: releaseLock } as unknown as BridgeInstanceLockService,
+    );
+
+    const run = runner.runOnce();
+    await snapshotStarted;
+    let destroySettled = false;
+    const destroy = runner.onModuleDestroy().then(() => { destroySettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(destroySettled).toBe(false);
+    expect(releaseLock).not.toHaveBeenCalled();
+
+    releaseSnapshot(await listAll());
+    await Promise.all([run, destroy]);
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    await expect(repository.getById(queuedJob.id)).resolves.toMatchObject({ status: 'queued' });
+  });
+
+  it('does not start a claimed tmux job when shutdown begins during execution lookup', async () => {
+    const queuedJob = createJob({ executionMode: 'tmux' });
+    await repository.save(queuedJob);
+    const getById = repository.getById.bind(repository);
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { markLookupStarted = resolve; });
+    let releaseLookup!: (job: BridgeJob | null) => void;
+    const lookupBarrier = new Promise<BridgeJob | null>((resolve) => { releaseLookup = resolve; });
+    jest.spyOn(repository, 'getById')
+      .mockImplementationOnce(getById)
+      .mockImplementationOnce(async () => {
+        markLookupStarted();
+        return lookupBarrier;
+      });
+    const execute = jest.fn();
+    const start = jest.fn().mockResolvedValue({
+      backend: 'tmux', sessionName: 'omx-bridge-late-start', status: 'running',
+      createdAt: '2026-04-02T00:00:00.000Z', updatedAt: '2026-04-02T00:00:00.000Z',
+      attachCommand: 'tmux attach -t omx-bridge-late-start',
+    });
+    const releaseLock = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { start } as unknown as TmuxSessionRunnerService,
+      { release: releaseLock } as unknown as BridgeInstanceLockService,
+    );
+
+    const run = runner.runOnce();
+    await lookupStarted;
+    const destroy = runner.onModuleDestroy();
+    releaseLookup(await getById(queuedJob.id));
+    await Promise.all([run, destroy]);
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+    await expect(repository.getById(queuedJob.id)).resolves.toMatchObject({ status: 'queued' });
+  });
+
   it('flushes a reconciliation completion notification before releasing the instance lock', async () => {
     const runningTmuxJob = createJob({
       executionMode: 'tmux',
@@ -568,7 +654,6 @@ describe('JobRunnerService', () => {
     }).logger, 'warn');
 
     const run = runner.runOnce();
-    const runOutcome = run.then(() => 'fulfilled', () => 'rejected');
     await waitFor(() => Promise.resolve(collect.mock.calls.length), (count) => count === 1);
     let destroySettled = false;
     const destroy = runner.onModuleDestroy().then(() => { destroySettled = true; });
@@ -580,7 +665,7 @@ describe('JobRunnerService', () => {
 
     rejectCollect(new Error('tmux reconcile failed'));
     await expect(destroy).resolves.toBeUndefined();
-    await expect(runOutcome).resolves.toBe('rejected');
+    await expect(run).resolves.toBe(false);
     await expect((runner as unknown as {
       reconcileRunningTmuxJobs: () => Promise<number>;
     }).reconcileRunningTmuxJobs()).resolves.toBe(0);
@@ -605,20 +690,33 @@ describe('JobRunnerService', () => {
           attachCommand: 'tmux attach -t omx-bridge-stuck',
         },
       });
+      await repository.save(runningTmuxJob);
       jest.spyOn(repository, 'listByStatus').mockResolvedValue([runningTmuxJob]);
       let releaseCollect!: () => void;
-      const collectBarrier = new Promise<null>((resolve) => { releaseCollect = () => resolve(null); });
+      const collected = {
+        session: {
+          ...runningTmuxJob.session!, status: 'exited' as const,
+          updatedAt: '2026-04-02T00:00:02.000Z', lastExitCode: 0,
+        },
+        result: createExecutionResult({ stdout: 'late tmux done' }),
+      };
+      const collectBarrier = new Promise<typeof collected>((resolve) => {
+        releaseCollect = () => resolve(collected);
+      });
       let releaseCleanup!: () => void;
       const cleanupBarrier = new Promise<void>((resolve) => { releaseCleanup = resolve; });
       jest.spyOn(repository, 'cleanupTerminalJobs').mockImplementation(async () => {
         await cleanupBarrier;
         return { deleted: 0, retained: 0, deletedEntries: [] };
       });
+      let releaseNotification!: () => void;
+      const notificationBarrier = new Promise<void>((resolve) => { releaseNotification = resolve; });
+      const notifyJobComplete = jest.fn(() => notificationBarrier);
       const releaseLock = jest.fn().mockResolvedValue(undefined);
       const runner = new JobRunnerService(
         repository,
         { execute: jest.fn() } as unknown as OmxExecService,
-        mockJobNotify,
+        { notifyJobComplete } as unknown as JobNotifyService,
         config,
         { collect: jest.fn(() => collectBarrier) } as unknown as TmuxSessionRunnerService,
         { release: releaseLock } as unknown as BridgeInstanceLockService,
@@ -639,6 +737,12 @@ describe('JobRunnerService', () => {
       const releaseCallsWithReconcilePending = releaseLock.mock.calls.length;
       releaseCollect();
       await run;
+      await Promise.resolve();
+
+      expect(notifyJobComplete).toHaveBeenCalledTimes(1);
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseNotification();
       await jest.runAllTimersAsync();
       await Promise.resolve();
 
@@ -663,6 +767,46 @@ describe('JobRunnerService', () => {
     await expect(runner.onModuleDestroy()).resolves.toBeUndefined();
 
     expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one shutdown grace window between pending claims and in-flight runs', async () => {
+    jest.useFakeTimers();
+    try {
+      config.sigkillGraceMs = 1;
+      let releaseClaim!: () => void;
+      const claimBarrier = new Promise<void>((resolve) => { releaseClaim = resolve; });
+      let releaseRun!: () => void;
+      const runBarrier = new Promise<void>((resolve) => { releaseRun = resolve; });
+      const releaseLock = jest.fn().mockResolvedValue(undefined);
+      const runner = new JobRunnerService(
+        repository,
+        { execute: jest.fn() } as unknown as OmxExecService,
+        mockJobNotify,
+        config,
+        undefined,
+        { release: releaseLock } as unknown as BridgeInstanceLockService,
+      );
+      const shutdownState = runner as unknown as {
+        claimMutex: Promise<void>;
+        inFlightRuns: Map<string, Promise<void>>;
+      };
+      shutdownState.claimMutex = claimBarrier;
+      shutdownState.inFlightRuns.set('pending-run', runBarrier);
+
+      const destroy = runner.onModuleDestroy();
+      await jest.advanceTimersByTimeAsync(2_002);
+      await expect(destroy).resolves.toBeUndefined();
+
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseClaim();
+      releaseRun();
+      await jest.runAllTimersAsync();
+
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('runs up to maxConcurrency jobs in parallel and respects the cap', async () => {
