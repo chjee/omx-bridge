@@ -320,6 +320,202 @@ describe('JobRunnerService', () => {
     });
   });
 
+  it('retains the lock until timed-out in-flight completion and notification settle', async () => {
+    jest.useFakeTimers();
+    try {
+      config.sigkillGraceMs = 1;
+      const graceWindowMs = config.sigkillGraceMs + 2_000;
+      const events: string[] = [];
+      let abortSignal: AbortSignal | undefined;
+      let markExecutionStarted!: () => void;
+      const executionStarted = new Promise<void>((resolve) => { markExecutionStarted = resolve; });
+      let resolveExecution!: () => void;
+      const executionBarrier = new Promise<OmxExecutionResult>((resolve) => {
+        resolveExecution = () => resolve(createExecutionResult({
+          status: 'cancelled',
+          stderr: 'Command cancelled',
+          exitCode: null,
+          execution: {
+            command: 'omx', timeoutMs: 1000, maxOutputChars: 1000,
+            errorType: 'cancelled',
+          },
+        }));
+      });
+      let releaseNotification!: () => void;
+      const notificationBarrier = new Promise<void>((resolve) => { releaseNotification = resolve; });
+      let markNotificationFinished!: () => void;
+      const notificationFinished = new Promise<void>((resolve) => { markNotificationFinished = resolve; });
+      const notifyJobComplete = jest.fn(async () => {
+        events.push('notification-start');
+        await notificationBarrier;
+        events.push('notification-finish');
+        markNotificationFinished();
+      });
+      let markLockReleased!: () => void;
+      const lockReleased = new Promise<void>((resolve) => { markLockReleased = resolve; });
+      const releaseLock = jest.fn(async () => {
+        events.push('lock-release');
+        markLockReleased();
+      });
+      const originalTransition = repository.transition.bind(repository);
+      jest.spyOn(repository, 'transition').mockImplementation(async (...args) => {
+        const result = await originalTransition(...args);
+        if (args[1].includes('running') && result.transitioned && result.job?.status === 'cancelled') {
+          events.push('terminal-transition');
+        }
+        return result;
+      });
+      const runner = new JobRunnerService(
+        repository,
+        {
+          execute: jest.fn((_prompt: string, options?: { signal?: AbortSignal }) => {
+            abortSignal = options?.signal;
+            markExecutionStarted();
+            return executionBarrier;
+          }),
+        } as unknown as OmxExecService,
+        { notifyJobComplete } as unknown as JobNotifyService,
+        config,
+        undefined,
+        { release: releaseLock } as unknown as BridgeInstanceLockService,
+      );
+      await repository.save(createJob());
+
+      let runSettled = false;
+      const run = runner.runOnce().finally(() => { runSettled = true; });
+      await executionStarted;
+      const destroy = runner.onModuleDestroy();
+      await jest.advanceTimersByTimeAsync(graceWindowMs + 1);
+      await destroy;
+
+      expect(abortSignal?.aborted).toBe(true);
+      expect(runSettled).toBe(false);
+      expect(releaseLock).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+
+      resolveExecution();
+      await run;
+      await Promise.resolve();
+
+      expect(events).toEqual([
+        'terminal-transition',
+        'notification-start',
+      ]);
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseNotification();
+      await notificationFinished;
+      await lockReleased;
+
+      expect(events).toEqual([
+        'terminal-transition',
+        'notification-start',
+        'notification-finish',
+        'lock-release',
+      ]);
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('retains the lock while a timed-out in-flight terminal transition is pending', async () => {
+    jest.useFakeTimers();
+    try {
+      config.sigkillGraceMs = 1;
+      const graceWindowMs = config.sigkillGraceMs + 2_000;
+      const events: string[] = [];
+      let markExecutionStarted!: () => void;
+      const executionStarted = new Promise<void>((resolve) => { markExecutionStarted = resolve; });
+      let markTransitionStarted!: () => void;
+      const transitionStarted = new Promise<void>((resolve) => { markTransitionStarted = resolve; });
+      let releaseTransition!: () => void;
+      const transitionBarrier = new Promise<void>((resolve) => { releaseTransition = resolve; });
+      let releaseNotification!: () => void;
+      const notificationBarrier = new Promise<void>((resolve) => { releaseNotification = resolve; });
+      let markNotificationStarted!: () => void;
+      const notificationStarted = new Promise<void>((resolve) => { markNotificationStarted = resolve; });
+      let markLockReleased!: () => void;
+      const lockReleased = new Promise<void>((resolve) => { markLockReleased = resolve; });
+      const originalTransition = repository.transition.bind(repository);
+      jest.spyOn(repository, 'transition').mockImplementation(async (...args) => {
+        if (args[1].includes('running')) {
+          markTransitionStarted();
+          await transitionBarrier;
+        }
+        const result = await originalTransition(...args);
+        if (args[1].includes('running') && result.transitioned) events.push('terminal-transition');
+        return result;
+      });
+      const notifyJobComplete = jest.fn(async () => {
+        events.push('notification-start');
+        markNotificationStarted();
+        await notificationBarrier;
+        events.push('notification-finish');
+      });
+      const releaseLock = jest.fn(async () => {
+        events.push('lock-release');
+        markLockReleased();
+      });
+      const runner = new JobRunnerService(
+        repository,
+        {
+          execute: jest.fn((_prompt: string, options?: { signal?: AbortSignal }) => {
+            markExecutionStarted();
+            return new Promise<OmxExecutionResult>((resolve) => {
+              options?.signal?.addEventListener('abort', () => {
+                resolve(createExecutionResult({
+                  status: 'cancelled',
+                  stderr: 'Command cancelled',
+                  exitCode: null,
+                  execution: {
+                    command: 'omx', timeoutMs: 1000, maxOutputChars: 1000,
+                    errorType: 'cancelled',
+                  },
+                }));
+              }, { once: true });
+            });
+          }),
+        } as unknown as OmxExecService,
+        { notifyJobComplete } as unknown as JobNotifyService,
+        config,
+        undefined,
+        { release: releaseLock } as unknown as BridgeInstanceLockService,
+      );
+      await repository.save(createJob());
+
+      const run = runner.runOnce();
+      await executionStarted;
+      const destroy = runner.onModuleDestroy();
+      await transitionStarted;
+      await jest.advanceTimersByTimeAsync(graceWindowMs + 1);
+      await destroy;
+
+      expect(releaseLock).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+
+      releaseTransition();
+      await run;
+      await notificationStarted;
+
+      expect(events).toEqual(['terminal-transition', 'notification-start']);
+      expect(releaseLock).not.toHaveBeenCalled();
+
+      releaseNotification();
+      await lockReleased;
+
+      expect(events).toEqual([
+        'terminal-transition',
+        'notification-start',
+        'notification-finish',
+        'lock-release',
+      ]);
+      expect(releaseLock).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('waits for completion notifications to flush during module destroy', async () => {
     let abortSignal: AbortSignal | undefined;
     let resolveNotification: (() => void) | undefined;
@@ -864,6 +1060,29 @@ describe('JobRunnerService', () => {
       config,
       undefined,
       { release: releaseLock } as unknown as BridgeInstanceLockService,
+    );
+
+    await expect(runner.onModuleDestroy()).resolves.toBeUndefined();
+
+    expect(releaseLock).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a rejected captured in-flight run as settled during shutdown', async () => {
+    const releaseLock = jest.fn().mockResolvedValue(undefined);
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      undefined,
+      { release: releaseLock } as unknown as BridgeInstanceLockService,
+    );
+    const shutdownState = runner as unknown as {
+      inFlightRuns: Map<string, Promise<void>>;
+    };
+    shutdownState.inFlightRuns.set(
+      'rejected-run',
+      Promise.reject(new Error('in-flight failed')),
     );
 
     await expect(runner.onModuleDestroy()).resolves.toBeUndefined();

@@ -14,7 +14,10 @@ The supported production abnormal-exit boundary is the provided systemd unit:
 claim, in-flight, reconciliation, and cleanup observers share one nominal 7-second
 window, and a post-reconciliation notification snapshot can add one more, for a
 maximum nominal timer budget of about 14 seconds. Event-loop delay, filesystem I/O,
-and Nest disposal are outside that timer formula. When increasing
+and Nest disposal are outside that timer formula. A timed-out captured claim,
+in-flight run, reconciliation, or cleanup retains the instance lock until the
+actual captured work settles and the bounded late-notification flush completes.
+When increasing
 `BRIDGE_SIGKILL_GRACE_MS`, keep `2 * (grace + 2000ms)` materially below the
 supervisor stop timeout. The deterministic runtime smoke inspects and signals only
 the uniquely owned fake process trees it creates. A forced bridge kill outside

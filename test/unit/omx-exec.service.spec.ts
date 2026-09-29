@@ -496,6 +496,31 @@ describe('OmxExecService', () => {
     expect(processKill).toHaveBeenCalledWith(-424242, 'SIGTERM');
   });
 
+  it('keeps an aborted execution pending until the child closes after escalation', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(process, 'kill').mockReturnValue(true);
+    const child = new MockChildProcess();
+    const controller = new AbortController();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { jobTimeoutMs: 10_000, sigkillGraceMs: 1 },
+    );
+    let settled = false;
+
+    const pending = service.execute('cancel me', { signal: controller.signal });
+    void pending.then(() => { settled = true; });
+    controller.abort();
+    await jest.advanceTimersByTimeAsync(2_001);
+
+    expect(settled).toBe(false);
+
+    child.emit('close', null);
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled',
+      execution: { errorType: 'cancelled' },
+    });
+  });
+
   it('sends one bounded TERM-to-KILL escalation to the owned POSIX group', async () => {
     if (process.platform === 'win32') return;
     jest.useFakeTimers();

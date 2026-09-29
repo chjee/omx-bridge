@@ -62,6 +62,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       this.cleanupIntervalHandle = undefined;
     }
     const claim = this.claimMutex;
+    const inFlightCompletion = Promise.allSettled([...this.inFlightRuns.values()]);
     const reconciliation = this.tmuxReconcilePromise;
     const cleanup = this.cleanupPromise;
 
@@ -70,7 +71,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     const claimAndInFlightSettlement = Promise.all([
       this.waitForShutdownWork(claim, 'claim'),
-      this.waitForInFlightRuns(),
+      this.waitForShutdownWork(inFlightCompletion, 'in-flight runs'),
     ]);
     const reconciliationSettlement = reconciliation
       ? this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
@@ -79,7 +80,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       ? this.waitForShutdownWork(cleanup, 'cleanup')
       : Promise.resolve(true);
 
-    const [claimSettled] = await claimAndInFlightSettlement;
+    const [claimSettled, inFlightSettled] = await claimAndInFlightSettlement;
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
@@ -91,12 +92,13 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (reconciliationSettled) {
       await this.waitForCompletionNotifications();
     }
-    if (claimSettled && reconciliationSettled && cleanupSettled) {
+    if (claimSettled && inFlightSettled && reconciliationSettled && cleanupSettled) {
       await this.instanceLock?.release();
       return;
     }
     const pendingLabels = [
       ...(!claimSettled ? ['claim'] : []),
+      ...(!inFlightSettled ? ['in-flight runs'] : []),
       ...(!reconciliationSettled ? ['tmux reconciliation'] : []),
       ...(!cleanupSettled ? ['cleanup'] : []),
     ];
@@ -105,7 +107,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         `${pendingLabels.join(' and ')} did not settle before shutdown timeout; retaining instance lock`,
       );
     }
-    const capturedWork: Promise<unknown>[] = [claim];
+    const capturedWork: Promise<unknown>[] = [claim, inFlightCompletion];
     if (reconciliation) capturedWork.push(reconciliation);
     if (cleanup) capturedWork.push(cleanup);
     void this.releaseInstanceLockAfterShutdownWork(capturedWork).catch((error) => {
@@ -487,23 +489,6 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         this.completionNotifications.delete(job.id);
       }
     });
-  }
-
-  private async waitForInFlightRuns(): Promise<void> {
-    const runs = [...this.inFlightRuns.values()];
-    if (runs.length === 0) {
-      return;
-    }
-
-    const timeoutMs = this.config.sigkillGraceMs + 2_000;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    await Promise.race([
-      Promise.allSettled(runs),
-      new Promise<void>((resolve) => {
-        timeoutHandle = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-    clearTimeout(timeoutHandle);
   }
 
   private async waitForCompletionNotifications(): Promise<void> {
