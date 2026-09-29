@@ -21,6 +21,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
   private cleanupPromise?: Promise<void>;
+  private tmuxReconcilePromise?: Promise<number>;
   private shuttingDown = false;
 
   constructor(
@@ -60,22 +61,58 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.cleanupIntervalHandle);
       this.cleanupIntervalHandle = undefined;
     }
+    const claim = this.claimMutex;
+    const inFlightCompletion = Promise.allSettled([...this.inFlightRuns.values()]);
+    const reconciliation = this.tmuxReconcilePromise;
+    const cleanup = this.cleanupPromise;
 
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
-    await this.waitForInFlightRuns();
-    this.abortControllers.clear();
-    await this.waitForCompletionNotifications();
-    const cleanupSettled = await this.waitForCleanup();
-    if (cleanupSettled) {
-      await this.instanceLock?.release();
-    } else if (this.cleanupPromise && this.instanceLock) {
-      this.logger.warn('Cleanup did not settle before shutdown timeout; retaining instance lock');
-      void this.cleanupPromise
-        .finally(() => this.instanceLock?.release())
-        .catch(() => undefined);
+    const claimAndInFlightSettlement = Promise.all([
+      this.waitForShutdownWork(claim, 'claim'),
+      this.waitForShutdownWork(inFlightCompletion, 'in-flight runs'),
+    ]);
+    const reconciliationSettlement = reconciliation
+      ? this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
+      : Promise.resolve(true);
+    const cleanupSettlement = cleanup
+      ? this.waitForShutdownWork(cleanup, 'cleanup')
+      : Promise.resolve(true);
+
+    const [claimSettled, inFlightSettled] = await claimAndInFlightSettlement;
+    for (const controller of this.abortControllers.values()) {
+      controller.abort();
     }
+    this.abortControllers.clear();
+    const [reconciliationSettled, cleanupSettled] = await Promise.all([
+      reconciliationSettlement,
+      cleanupSettlement,
+    ]);
+    if (reconciliationSettled) {
+      await this.waitForCompletionNotifications();
+    }
+    if (claimSettled && inFlightSettled && reconciliationSettled && cleanupSettled) {
+      await this.instanceLock?.release();
+      return;
+    }
+    const pendingLabels = [
+      ...(!claimSettled ? ['claim'] : []),
+      ...(!inFlightSettled ? ['in-flight runs'] : []),
+      ...(!reconciliationSettled ? ['tmux reconciliation'] : []),
+      ...(!cleanupSettled ? ['cleanup'] : []),
+    ];
+    if (this.instanceLock) {
+      this.logger.warn(
+        `${pendingLabels.join(' and ')} did not settle before shutdown timeout; retaining instance lock`,
+      );
+    }
+    const capturedWork: Promise<unknown>[] = [claim, inFlightCompletion];
+    if (reconciliation) capturedWork.push(reconciliation);
+    if (cleanup) capturedWork.push(cleanup);
+    void this.releaseInstanceLockAfterShutdownWork(capturedWork).catch((error) => {
+      this.logger.warn(`Failed to release instance lock after shutdown work: ${String(error)}`);
+    });
   }
 
   async recoverInterruptedJobs(): Promise<void> {
@@ -183,7 +220,18 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   async runOnce(): Promise<boolean> {
-    const reconciled = await this.reconcileRunningTmuxJobs();
+    let reconciled: number;
+    try {
+      reconciled = await this.reconcileRunningTmuxJobs();
+    } catch (error) {
+      if (this.shuttingDown) {
+        return false;
+      }
+      throw error;
+    }
+    if (this.shuttingDown) {
+      return reconciled > 0;
+    }
     const claimed = await this.claimNext();
     if (!claimed) {
       return reconciled > 0;
@@ -234,7 +282,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // 클레임 단계는 직렬화: size 체크와 listByStatus + inFlight.add가 한 임계영역에서 일어나야
+  // 클레임 단계는 직렬화: size 체크와 job snapshot + inFlight.add가 한 임계영역에서 일어나야
   // 동시 호출 시 같은 잡이 중복 클레임되지 않는다.
   private async claimNext(): Promise<BridgeJob | null> {
     let release!: () => void;
@@ -245,11 +293,18 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     this.claimMutex = next;
     await prev;
     try {
+      if (this.shuttingDown) {
+        return null;
+      }
       if (this.inFlight.size >= this.config.maxConcurrency) {
         return null;
       }
-      const queuedJobs = await this.repository.listByStatus('queued');
-      const runningJobs = await this.repository.listByStatus('running');
+      const jobs = await this.repository.listAll();
+      if (this.shuttingDown) {
+        return null;
+      }
+      const queuedJobs = jobs.filter((job) => job.status === 'queued');
+      const runningJobs = jobs.filter((job) => job.status === 'running');
       const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
       if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
         return null;
@@ -267,6 +322,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
         stderr: '',
       }));
       if (!claimed.transitioned || !claimed.job) return null;
+      if (this.shuttingDown) {
+        await this.requeueClaimedJob(claimed.job.id);
+        return null;
+      }
       this.inFlight.add(candidate.id);
       return claimed.job;
     } finally {
@@ -285,6 +344,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private async executeJob(job: BridgeJob): Promise<void> {
     const currentJob = await this.repository.getById(job.id);
     if (!currentJob || currentJob.status !== 'running') {
+      return;
+    }
+    if (this.shuttingDown) {
+      await this.requeueClaimedJob(currentJob.id);
       return;
     }
     if (currentJob.executionMode === 'tmux') {
@@ -318,6 +381,15 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async requeueClaimedJob(jobId: string): Promise<void> {
+    await this.repository.transition(jobId, ['running'], (current) => ({
+      ...current,
+      status: 'queued',
+      startedAt: undefined,
+      finishedAt: undefined,
+    }));
+  }
+
   private async startTmuxJob(job: BridgeJob): Promise<void> {
     this.logger.log(`Starting tmux job ${job.id}`);
     const runningJob = job;
@@ -336,6 +408,20 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileRunningTmuxJobs(): Promise<number> {
+    if (this.tmuxReconcilePromise) {
+      await this.tmuxReconcilePromise;
+      return 0;
+    }
+    const reconcile = this.performRunningTmuxReconciliation();
+    this.tmuxReconcilePromise = reconcile;
+    try {
+      return await reconcile;
+    } finally {
+      if (this.tmuxReconcilePromise === reconcile) this.tmuxReconcilePromise = undefined;
+    }
+  }
+
+  private async performRunningTmuxReconciliation(): Promise<number> {
     const runningJobs = await this.repository.listByStatus('running');
     let completed = 0;
     for (const job of runningJobs) {
@@ -405,23 +491,6 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async waitForInFlightRuns(): Promise<void> {
-    const runs = [...this.inFlightRuns.values()];
-    if (runs.length === 0) {
-      return;
-    }
-
-    const timeoutMs = this.config.sigkillGraceMs + 2_000;
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    await Promise.race([
-      Promise.allSettled(runs),
-      new Promise<void>((resolve) => {
-        timeoutHandle = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-    clearTimeout(timeoutHandle);
-  }
-
   private async waitForCompletionNotifications(): Promise<void> {
     const notifications = [...this.completionNotifications.values()];
     if (notifications.length === 0) {
@@ -439,16 +508,31 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     clearTimeout(timeoutHandle);
   }
 
-  private async waitForCleanup(): Promise<boolean> {
-    const cleanup = this.cleanupPromise;
-    if (!cleanup) return true;
+  private async waitForShutdownWork(
+    work: Promise<unknown>,
+    label: string,
+  ): Promise<boolean> {
     const timeoutMs = this.config.sigkillGraceMs + 2_000;
     let timeoutHandle: NodeJS.Timeout | undefined;
     const settled = await Promise.race([
-      cleanup.then(() => true, () => true),
+      work.then(
+        () => true,
+        (error) => {
+          this.logger.warn(`${label} failed during shutdown: ${String(error)}`);
+          return true;
+        },
+      ),
       new Promise<boolean>((resolve) => { timeoutHandle = setTimeout(() => resolve(false), timeoutMs); }),
     ]);
     clearTimeout(timeoutHandle);
     return settled;
+  }
+
+  private async releaseInstanceLockAfterShutdownWork(
+    capturedWork: readonly Promise<unknown>[],
+  ): Promise<void> {
+    await Promise.allSettled(capturedWork);
+    await this.waitForCompletionNotifications();
+    await this.instanceLock?.release();
   }
 }

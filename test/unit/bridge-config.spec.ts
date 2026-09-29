@@ -6,6 +6,28 @@ import {
   buildBridgeConfig,
 } from '../../src/config/bridge-config';
 
+const STRICT_POSITIVE_INT_ENV_VARS = [
+  'BRIDGE_JOB_POLL_INTERVAL_MS',
+  'BRIDGE_JOB_TIMEOUT_MS',
+  'BRIDGE_MAX_OUTPUT_CHARS',
+  'BRIDGE_SIGKILL_GRACE_MS',
+  'BRIDGE_MAX_CONCURRENCY',
+  'BRIDGE_MAX_ACTIVE_JOBS',
+  'BRIDGE_JOB_RETENTION_DAYS',
+  'BRIDGE_MAX_TERMINAL_JOBS',
+  'BRIDGE_JOB_CLEANUP_INTERVAL_MS',
+  'BRIDGE_NOTIFY_TIMEOUT_MS',
+] as const;
+
+const INVALID_POSITIVE_INT_VALUES = [
+  '0',
+  '-1',
+  '1.5',
+  '500ms',
+  'NaN',
+  '9007199254740992',
+] as const;
+
 describe('buildBridgeConfig', () => {
   const originalEnv = process.env;
 
@@ -133,20 +155,78 @@ describe('buildBridgeConfig', () => {
     });
   });
 
-  it('falls back to the default request body limit for invalid values', () => {
+  it('uses documented defaults for empty scoped values', () => {
     process.env = {
-      BRIDGE_REQUEST_BODY_LIMIT: 'not a size',
+      BRIDGE_REQUEST_BODY_LIMIT: ' ',
+      BRIDGE_JOB_POLL_INTERVAL_MS: '',
+      BRIDGE_JOB_TIMEOUT_MS: ' ',
+      BRIDGE_MAX_OUTPUT_CHARS: '',
+      BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: ' ',
+      BRIDGE_SIGKILL_GRACE_MS: '',
+      BRIDGE_MAX_CONCURRENCY: ' ',
+      BRIDGE_MAX_ACTIVE_JOBS: '',
+      BRIDGE_JOB_RETENTION_DAYS: ' ',
+      BRIDGE_MAX_TERMINAL_JOBS: '',
+      BRIDGE_JOB_CLEANUP_INTERVAL_MS: ' ',
+      BRIDGE_NOTIFY_RETRY_DELAYS_MS: '',
+      BRIDGE_NOTIFY_TIMEOUT_MS: ' ',
+      NOTIFY_MODE: '',
       BRIDGE_API_TOKEN: 'token',
       BRIDGE_CALLBACK_SECRET: 'secret',
     };
 
     const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
 
-    expect(config.requestBodyLimit).toBe(DEFAULT_REQUEST_BODY_LIMIT);
+    expect(config).toMatchObject({
+      requestBodyLimit: DEFAULT_REQUEST_BODY_LIMIT,
+      jobPollIntervalMs: 500,
+      jobTimeoutMs: 900000,
+      maxOutputChars: 32000,
+      tmuxMaxCaptureBytesPerStream: DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
+      sigkillGraceMs: 5000,
+      maxConcurrency: 2,
+      maxActiveJobs: 50,
+      jobRetentionDays: 7,
+      maxTerminalJobs: 1000,
+      jobCleanupIntervalMs: 3600000,
+      notifyRetryDelaysMs: [500, 1000, 2000],
+      notifyTimeoutMs: 5000,
+      notifyMode: 'openclaw',
+    });
+  });
+
+  it.each(['0', '0kb', '1gb', '1.5mb', 'not a size'])(
+    'rejects invalid BRIDGE_REQUEST_BODY_LIMIT value %s',
+    (value) => {
+      process.env = {
+        BRIDGE_REQUEST_BODY_LIMIT: value,
+        BRIDGE_API_TOKEN: 'token',
+        BRIDGE_CALLBACK_SECRET: 'secret',
+      };
+
+      expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+        'BRIDGE_REQUEST_BODY_LIMIT',
+      );
+    },
+  );
+
+  it.each(
+    STRICT_POSITIVE_INT_ENV_VARS.flatMap((envName) =>
+      INVALID_POSITIVE_INT_VALUES.map((value) => [envName, value] as const)),
+  )('rejects invalid %s value %s', (envName, value) => {
+    process.env = {
+      [envName]: value,
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
+    };
+
+    expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+      envName,
+    );
   });
 
   it.each(['0', '4095', '67108865', '4096junk', '4096.9', 'not-a-number'])(
-    'falls back to the tmux capture default for invalid value %s',
+    'rejects invalid BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM value %s',
     (value) => {
       process.env = {
         BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM: value,
@@ -154,9 +234,9 @@ describe('buildBridgeConfig', () => {
         BRIDGE_CALLBACK_SECRET: 'secret',
       };
 
-      const config = buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester');
-
-      expect(config.tmuxMaxCaptureBytesPerStream).toBe(DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM);
+      expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+        'BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM',
+      );
     },
   );
 
@@ -174,6 +254,48 @@ describe('buildBridgeConfig', () => {
       expect(config.tmuxMaxCaptureBytesPerStream).toBe(Number(value));
     },
   );
+
+  it.each(['0,100', '100,-1', '100,abc', '100,,200', '100.5,200', '9007199254740992'])(
+    'rejects invalid BRIDGE_NOTIFY_RETRY_DELAYS_MS value %s',
+    (value) => {
+      process.env = {
+        BRIDGE_NOTIFY_RETRY_DELAYS_MS: value,
+        BRIDGE_API_TOKEN: 'token',
+        BRIDGE_CALLBACK_SECRET: 'secret',
+      };
+
+      expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+        'BRIDGE_NOTIFY_RETRY_DELAYS_MS',
+      );
+    },
+  );
+
+  it.each(['OPENCLAW', 'smtp', 'claude,openclaw'])(
+    'rejects invalid NOTIFY_MODE value %s',
+    (value) => {
+      process.env = {
+        NOTIFY_MODE: value,
+        BRIDGE_API_TOKEN: 'token',
+        BRIDGE_CALLBACK_SECRET: 'secret',
+      };
+
+      expect(() => buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester')).toThrow(
+        'NOTIFY_MODE',
+      );
+    },
+  );
+
+  it.each(['openclaw', 'claude'] as const)('accepts NOTIFY_MODE=%s', (notifyMode) => {
+    process.env = {
+      NOTIFY_MODE: notifyMode,
+      BRIDGE_API_TOKEN: 'token',
+      BRIDGE_CALLBACK_SECRET: 'secret',
+    };
+
+    expect(buildBridgeConfig(new ConfigService(), '/workspace/app', '/home/tester').notifyMode).toBe(
+      notifyMode,
+    );
+  });
 
   it('rejects invalid model reasoning effort values', () => {
     process.env = {

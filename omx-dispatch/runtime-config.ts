@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 export interface DispatchRuntimeConfig {
@@ -27,7 +28,6 @@ export interface DispatchRuntimeConfig {
 }
 
 export const DEFAULT_BRIDGE_URL = "http://localhost:3992";
-export const DEFAULT_SERVER_VERSION = "0.1.0";
 export const DEFAULT_WEBHOOK_PORT_MIN = 12000;
 export const DEFAULT_WEBHOOK_PORT_MAX = 12999;
 export const DEFAULT_WEBHOOK_BODY_LIMIT_BYTES = 1_000_000;
@@ -42,6 +42,34 @@ export const DEFAULT_MAX_WAIT_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_MIN_WAIT_POLL_INTERVAL_MS = 250;
 export const DEFAULT_MAX_WAIT_POLL_INTERVAL_MS = 10_000;
 export const DEFAULT_TERMINAL_NOTIFICATION_GRACE_MS = 2_000;
+
+export function loadDispatchPackageVersion(
+  moduleUrl: string | URL = import.meta.url,
+): string {
+  const packageJsonUrl = new URL("../package.json", moduleUrl);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(packageJsonUrl, "utf8")) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read omx-dispatch package metadata: ${detail}`);
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof (parsed as { version?: unknown }).version !== "string" ||
+    (parsed as { version: string }).version.trim().length === 0
+  ) {
+    throw new Error("omx-dispatch package metadata must contain a non-empty version");
+  }
+
+  return (parsed as { version: string }).version;
+}
+
+export const DISPATCH_PACKAGE_VERSION = loadDispatchPackageVersion();
+export const DEFAULT_SERVER_VERSION = DISPATCH_PACKAGE_VERSION;
 
 export function loadRuntimeConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -73,18 +101,21 @@ export function loadRuntimeConfig(
     bridgeRequestTimeoutMs: parsePositiveInt(
       env["BRIDGE_REQUEST_TIMEOUT_MS"],
       10_000,
+      "BRIDGE_REQUEST_TIMEOUT_MS",
     ),
-    webhookPort: Number.parseInt(env["WEBHOOK_PORT"] ?? "0", 10),
+    webhookPort: parseWebhookPort(env["WEBHOOK_PORT"]),
     webhookPortMin: DEFAULT_WEBHOOK_PORT_MIN,
     webhookPortMax: DEFAULT_WEBHOOK_PORT_MAX,
     webhookBodyLimitBytes: parsePositiveInt(
       env["OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES"],
       DEFAULT_WEBHOOK_BODY_LIMIT_BYTES,
+      "OMX_DISPATCH_WEBHOOK_BODY_LIMIT_BYTES",
     ),
     enableClaudeChannel: parseBoolean(env["ENABLE_CLAUDE_CHANNEL"]),
     maxNotificationQueueSize: parsePositiveInt(
       env["MAX_NOTIFICATION_QUEUE_SIZE"],
       DEFAULT_MAX_NOTIFICATION_QUEUE_SIZE,
+      "MAX_NOTIFICATION_QUEUE_SIZE",
     ),
     notificationStorePath: env["OMX_DISPATCH_NOTIFICATION_STORE_PATH"]
       ?? path.join(cwd, ".omx", "state", "omx-dispatch-notifications.jsonl"),
@@ -95,10 +126,12 @@ export function loadRuntimeConfig(
     defaultWaitTimeoutMs: parsePositiveInt(
       env["OMX_DISPATCH_WAIT_TIMEOUT_MS"],
       DEFAULT_WAIT_TIMEOUT_MS,
+      "OMX_DISPATCH_WAIT_TIMEOUT_MS",
     ),
     defaultWaitPollIntervalMs: parsePositiveInt(
       env["OMX_DISPATCH_WAIT_POLL_INTERVAL_MS"],
       DEFAULT_WAIT_POLL_INTERVAL_MS,
+      "OMX_DISPATCH_WAIT_POLL_INTERVAL_MS",
     ),
     maxWaitTimeoutMs: DEFAULT_MAX_WAIT_TIMEOUT_MS,
     minWaitPollIntervalMs: DEFAULT_MIN_WAIT_POLL_INTERVAL_MS,
@@ -120,9 +153,32 @@ function isLoopbackBridgeUrl(value: string): boolean {
   }
 }
 
-export function parsePositiveInt(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
+export function parsePositiveInt(
+  value: string | undefined,
+  fallback: number,
+  variableName: string = "value",
+): number {
+  const normalized = value?.trim();
+  if (!normalized) return fallback;
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${variableName} must be a positive integer`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${variableName} must be a positive safe integer`);
+  }
+  return parsed;
+}
 
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+function parseWebhookPort(value: string | undefined): number {
+  const normalized = value?.trim();
+  if (!normalized) return 0;
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error("WEBHOOK_PORT must be an integer between 0 and 65535");
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 65_535) {
+    throw new Error("WEBHOOK_PORT must be an integer between 0 and 65535");
+  }
+  return parsed;
 }

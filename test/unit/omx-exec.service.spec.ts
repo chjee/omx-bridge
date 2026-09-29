@@ -11,7 +11,7 @@ import { OmxExecService, type SpawnFunction } from '../../src/jobs/omx-exec.serv
 import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
 import { JobRunnerService } from '../../src/jobs/job-runner.service';
 import type { JobNotifyService } from '../../src/jobs/job-notify.service';
-import type { BridgeJob } from '../../src/jobs/job.types';
+import type { BridgeJob, OmxExecutionResult } from '../../src/jobs/job.types';
 import { createTempDir, waitFor } from '../helpers';
 
 class MockChildProcess extends EventEmitter {
@@ -334,6 +334,103 @@ describe('OmxExecService', () => {
     );
   });
 
+  it('returns cancelled without spawning when aborted during CWD resolution', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(Date.parse('2026-09-29T00:00:00.000Z'));
+    jest.spyOn(process, 'kill').mockReturnValue(true);
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => child as unknown as ChildProcessWithoutNullStreams);
+    const service = createService(spawnFn, { allowedCwdPrefixes: ['/workspace'] });
+    const readStdin = captureStdin(child);
+    let releaseCwd!: (value: string) => void;
+    const cwdBarrier = new Promise<string>((resolve) => { releaseCwd = resolve; });
+    jest.spyOn(service as unknown as {
+      resolveExecutionCwd: (
+        cwd: string | undefined,
+        startedAt: number,
+      ) => Promise<string | OmxExecutionResult | undefined>;
+    }, 'resolveExecutionCwd').mockReturnValue(cwdBarrier);
+    const controller = new AbortController();
+
+    const pending = service.execute('delayed prompt', {
+      cwd: '/workspace',
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    expect(spawnFn).not.toHaveBeenCalled();
+
+    jest.setSystemTime(Date.parse('2026-09-29T00:00:00.123Z'));
+    releaseCwd('/workspace');
+    await Promise.resolve();
+
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(readStdin()).toBe('');
+    await expect(pending).resolves.toEqual({
+      status: 'cancelled',
+      stdout: '',
+      stderr: 'Command cancelled',
+      exitCode: null,
+      execution: {
+        command: 'omx',
+        timeoutMs: 100,
+        maxOutputChars: 10,
+        durationMs: 123,
+        timedOut: false,
+        outputTruncated: false,
+        errorType: 'cancelled',
+      },
+    });
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
+  it('returns cancelled without spawning when the signal is already aborted', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(Date.parse('2026-09-29T00:00:00.000Z'));
+    const child = new MockChildProcess();
+    const spawnFn = jest.fn(() => child as unknown as ChildProcessWithoutNullStreams);
+    const service = createService(spawnFn);
+    const readStdin = captureStdin(child);
+    const controller = new AbortController();
+    controller.abort();
+
+    const pending = service.execute('already cancelled', { signal: controller.signal });
+
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(readStdin()).toBe('');
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled',
+      stderr: 'Command cancelled',
+      exitCode: null,
+      execution: {
+        timedOut: false,
+        outputTruncated: false,
+        errorType: 'cancelled',
+      },
+    });
+  });
+
+  it('preserves invalid CWD precedence for an already-aborted signal', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
+    const missing = path.join(root, 'missing');
+    const spawnFn = jest.fn();
+    const service = createService(spawnFn as unknown as SpawnFunction, {
+      allowedCwdPrefixes: [root],
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(service.execute('invalid cwd', {
+      cwd: missing,
+      signal: controller.signal,
+    })).resolves.toMatchObject({
+      status: 'failed',
+      exitCode: null,
+      execution: { errorType: 'invalid_cwd' },
+    });
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
   it('fails without spawning when cwd resolves outside allowed prefixes', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'omx-cwd-'));
     const allowed = path.join(root, 'allowed');
@@ -494,6 +591,31 @@ describe('OmxExecService', () => {
       execution: { errorType: 'cancelled' },
     });
     expect(processKill).toHaveBeenCalledWith(-424242, 'SIGTERM');
+  });
+
+  it('keeps an aborted execution pending until the child closes after escalation', async () => {
+    jest.useFakeTimers();
+    jest.spyOn(process, 'kill').mockReturnValue(true);
+    const child = new MockChildProcess();
+    const controller = new AbortController();
+    const service = createService(
+      jest.fn(() => child as unknown as ChildProcessWithoutNullStreams),
+      { jobTimeoutMs: 10_000, sigkillGraceMs: 1 },
+    );
+    let settled = false;
+
+    const pending = service.execute('cancel me', { signal: controller.signal });
+    void pending.then(() => { settled = true; });
+    controller.abort();
+    await jest.advanceTimersByTimeAsync(2_001);
+
+    expect(settled).toBe(false);
+
+    child.emit('close', null);
+    await expect(pending).resolves.toMatchObject({
+      status: 'cancelled',
+      execution: { errorType: 'cancelled' },
+    });
   });
 
   it('sends one bounded TERM-to-KILL escalation to the owned POSIX group', async () => {

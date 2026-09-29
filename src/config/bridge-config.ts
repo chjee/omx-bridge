@@ -106,13 +106,21 @@ export const DEFAULT_OMX_ENV_ALLOWLIST = [
   'OMX_DEFAULT_STANDARD_MODEL',
 ];
 
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-  if (!value) {
-    return fallback;
+function parsePositiveInt(
+  value: string | undefined,
+  fallback: number,
+  variableName: string,
+): number {
+  const normalized = value?.trim();
+  if (!normalized) return fallback;
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${variableName} must be a positive integer`);
   }
-
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${variableName} must be a positive safe integer`);
+  }
+  return parsed;
 }
 
 function parseBoundedPositiveInt(
@@ -120,37 +128,61 @@ function parseBoundedPositiveInt(
   fallback: number,
   minimum: number,
   maximum: number,
+  variableName: string,
 ): number {
   const normalized = value?.trim();
-  if (!normalized || !/^\d+$/.test(normalized)) {
-    return fallback;
+  if (!normalized) return fallback;
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${variableName} must be an integer between ${minimum} and ${maximum}`);
   }
   const parsed = Number(normalized);
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
-    return fallback;
+    throw new Error(`${variableName} must be an integer between ${minimum} and ${maximum}`);
   }
   return parsed;
 }
 
-function parseBodyLimit(value: string | undefined, fallback: string): string {
+function parseBodyLimit(
+  value: string | undefined,
+  fallback: string,
+  variableName: string,
+): string {
   const trimmed = value?.trim();
-  if (!trimmed) {
-    return fallback;
+  if (!trimmed) return fallback;
+  const match = /^(\d+)(?:b|kb|mb)?$/i.exec(trimmed);
+  if (!match) {
+    throw new Error(`${variableName} must be a positive byte limit using b, kb, or mb`);
   }
-
-  return /^\d+(?:b|kb|mb)?$/i.test(trimmed) ? trimmed : fallback;
+  const amount = Number(match[1]);
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error(`${variableName} must be a positive safe byte limit`);
+  }
+  return trimmed;
 }
 
-function parsePositiveIntList(value: string | undefined, fallback: number[]): number[] {
-  if (!value) {
-    return fallback;
+function parsePositiveIntList(
+  value: string | undefined,
+  fallback: number[],
+  variableName: string,
+): number[] {
+  const normalized = value?.trim();
+  if (!normalized) return fallback;
+  const parts = normalized.split(',').map((part) => part.trim());
+  if (parts.some((part) => !/^\d+$/.test(part))) {
+    throw new Error(`${variableName} must be a comma-separated list of positive integers`);
   }
+  const parsed = parts.map(Number);
+  if (parsed.some((part) => !Number.isSafeInteger(part) || part <= 0)) {
+    throw new Error(`${variableName} must contain only positive safe integers`);
+  }
+  return parsed;
+}
 
-  const parsed = value
-    .split(',')
-    .map((part) => Number.parseInt(part.trim(), 10))
-    .filter((part) => Number.isFinite(part) && part > 0);
-  return parsed.length > 0 ? parsed : fallback;
+function parseNotifyMode(value: string | undefined): NotifyMode {
+  const normalized = value?.trim();
+  if (!normalized) return 'openclaw';
+  if (normalized === 'openclaw' || normalized === 'claude') return normalized;
+  throw new Error('NOTIFY_MODE must be one of: openclaw, claude');
 }
 
 function parseAllowedCwdPrefixes(
@@ -217,8 +249,7 @@ export function buildBridgeConfig(
   homeDir: string = os.homedir(),
 ): BridgeConfig {
   const host = configService.get<string>('BRIDGE_HOST', '127.0.0.1');
-  const rawNotifyMode = configService.get<string>('NOTIFY_MODE', 'openclaw');
-  const notifyMode: NotifyMode = rawNotifyMode === 'claude' ? 'claude' : 'openclaw';
+  const notifyMode = parseNotifyMode(configService.get<string>('NOTIFY_MODE'));
   const openclawHooksUrl = configService.get<string>('OPENCLAW_HOOKS_URL') || undefined;
   const openclawHooksToken = configService.get<string>('OPENCLAW_HOOKS_TOKEN') || undefined;
   const callbackSecret = configService.get<string>('BRIDGE_CALLBACK_SECRET') || undefined;
@@ -244,6 +275,7 @@ export function buildBridgeConfig(
     requestBodyLimit: parseBodyLimit(
       configService.get<string>('BRIDGE_REQUEST_BODY_LIMIT'),
       DEFAULT_REQUEST_BODY_LIMIT,
+      'BRIDGE_REQUEST_BODY_LIMIT',
     ),
     jobsDirectory: configService.get<string>(
       'BRIDGE_JOBS_DIR',
@@ -266,52 +298,64 @@ export function buildBridgeConfig(
     jobPollIntervalMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_POLL_INTERVAL_MS'),
       500,
+      'BRIDGE_JOB_POLL_INTERVAL_MS',
     ),
     jobTimeoutMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_TIMEOUT_MS'),
       15 * 60 * 1000,
+      'BRIDGE_JOB_TIMEOUT_MS',
     ),
     maxOutputChars: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_OUTPUT_CHARS'),
       32_000,
+      'BRIDGE_MAX_OUTPUT_CHARS',
     ),
     tmuxMaxCaptureBytesPerStream: parseBoundedPositiveInt(
       configService.get<string>('BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM'),
       DEFAULT_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
       MIN_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
       MAX_TMUX_MAX_CAPTURE_BYTES_PER_STREAM,
+      'BRIDGE_TMUX_MAX_CAPTURE_BYTES_PER_STREAM',
     ),
     sigkillGraceMs: parsePositiveInt(
       configService.get<string>('BRIDGE_SIGKILL_GRACE_MS'),
       5_000,
+      'BRIDGE_SIGKILL_GRACE_MS',
     ),
     maxConcurrency: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_CONCURRENCY'),
       2,
+      'BRIDGE_MAX_CONCURRENCY',
     ),
     maxActiveJobs: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_ACTIVE_JOBS'),
       50,
+      'BRIDGE_MAX_ACTIVE_JOBS',
     ),
     jobRetentionDays: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_RETENTION_DAYS'),
       7,
+      'BRIDGE_JOB_RETENTION_DAYS',
     ),
     maxTerminalJobs: parsePositiveInt(
       configService.get<string>('BRIDGE_MAX_TERMINAL_JOBS'),
       1_000,
+      'BRIDGE_MAX_TERMINAL_JOBS',
     ),
     jobCleanupIntervalMs: parsePositiveInt(
       configService.get<string>('BRIDGE_JOB_CLEANUP_INTERVAL_MS'),
       60 * 60 * 1000,
+      'BRIDGE_JOB_CLEANUP_INTERVAL_MS',
     ),
     notifyRetryDelaysMs: parsePositiveIntList(
       configService.get<string>('BRIDGE_NOTIFY_RETRY_DELAYS_MS'),
       [500, 1_000, 2_000],
+      'BRIDGE_NOTIFY_RETRY_DELAYS_MS',
     ),
     notifyTimeoutMs: parsePositiveInt(
       configService.get<string>('BRIDGE_NOTIFY_TIMEOUT_MS'),
       5_000,
+      'BRIDGE_NOTIFY_TIMEOUT_MS',
     ),
     insecureLoopback,
     callbackSecret,

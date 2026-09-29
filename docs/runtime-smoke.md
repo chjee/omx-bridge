@@ -10,12 +10,40 @@ shutdown target the owned group with one bounded TERM-to-KILL escalation. On Win
 
 The supported production abnormal-exit boundary is the provided systemd unit:
 `KillMode=control-group`, `TimeoutStopSec=30s`, and `SendSIGKILL=yes`. Its
-30-second stop window leaves headroom over the default 5-second child escalation
-and the runner's bounded in-flight, notification, and cleanup waits. The
-deterministic runtime smoke inspects and signals only the uniquely owned fake
-process trees it creates. A forced bridge kill outside systemd is diagnostic
-evidence only: descendant cleanup after `SIGKILL`, a host crash, or supervisor
-failure is not guaranteed without cgroup-aware containment.
+30-second stop window leaves headroom over the default shutdown timing: captured
+claim, in-flight, reconciliation, and cleanup observers share one nominal 7-second
+window, and a post-reconciliation notification snapshot can add one more, for a
+maximum nominal timer budget of about 14 seconds. Event-loop delay, filesystem I/O,
+and Nest disposal are outside that timer formula. A timed-out captured claim,
+in-flight run, reconciliation, or cleanup retains the instance lock until the
+actual captured work settles and the bounded late-notification flush completes.
+When increasing
+`BRIDGE_SIGKILL_GRACE_MS`, keep `2 * (grace + 2000ms)` materially below the
+supervisor stop timeout. The deterministic runtime smoke inspects and signals only
+the uniquely owned fake process trees it creates. A forced bridge kill outside
+systemd is diagnostic evidence only: descendant cleanup after `SIGKILL`, a host
+crash, or supervisor failure is not guaranteed without cgroup-aware containment.
+
+## CWD filesystem timing contract
+
+The bridge canonicalizes a provided job `cwd` and every configured
+`BRIDGE_ALLOWED_CWD_PREFIXES` entry with `realpath` at submission and again
+immediately before execution. Keep those paths on a responsive local filesystem,
+or configure any network/FUSE mount with an operational request timeout that is
+materially shorter than the supervisor stop timeout. A hard NFS request, an
+unresponsive FUSE/autofs backend, or a WSL 9p/DrvFS path can delay canonical path
+resolution. On WSL, prefer worktrees under `/home/<user>` instead of `/mnt/c`.
+This guidance does not claim general NFS, FUSE, autofs, or 9p support.
+
+`BRIDGE_JOB_TIMEOUT_MS` bounds the child execution after `omx exec` is spawned;
+it does not time out CWD resolution. If shutdown starts while CWD resolution is
+pending, the shutdown hook can finish its bounded observer wait while the actual
+run remains unsettled. The bridge retains its instance lock until that captured
+run settles and the existing bounded late-notification flush completes. The
+provided systemd unit remains the supported production termination boundary for
+an indefinitely pending filesystem request. A direct non-systemd `app.close()`
+does not cancel the underlying filesystem request or force the Node.js process to
+exit.
 
 For merge/release gate selection, start with [release-verification.md](release-verification.md). This document contains the detailed runtime smoke procedures.
 
