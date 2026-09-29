@@ -40,6 +40,9 @@ export class OmxExecService {
     if (cwdResolution && typeof cwdResolution !== 'string') {
       return cwdResolution;
     }
+    if (options.signal?.aborted) {
+      return this.cancelledBeforeSpawn(startedAt);
+    }
     const executionCwd = cwdResolution;
 
     return new Promise<OmxExecutionResult>((resolve) => {
@@ -307,6 +310,24 @@ export class OmxExecService {
         },
       };
     }
+  }
+
+  private cancelledBeforeSpawn(startedAt: number): OmxExecutionResult {
+    return {
+      status: 'cancelled',
+      stdout: '',
+      stderr: 'Command cancelled',
+      exitCode: null,
+      execution: {
+        command: this.config.omxCommand,
+        timeoutMs: this.config.jobTimeoutMs,
+        maxOutputChars: this.config.maxOutputChars,
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        outputTruncated: false,
+        errorType: 'cancelled',
+      },
+    };
   }
 
   private emptyOutputCapture(): OutputCapture {
