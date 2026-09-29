@@ -61,22 +61,40 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.cleanupIntervalHandle);
       this.cleanupIntervalHandle = undefined;
     }
+    const reconciliation = this.tmuxReconcilePromise;
+    const cleanup = this.cleanupPromise;
 
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
     await this.waitForInFlightRuns();
     this.abortControllers.clear();
+    const reconciliationSettled = reconciliation
+      ? await this.waitForShutdownWork(reconciliation, 'tmux reconciliation')
+      : true;
     await this.waitForCompletionNotifications();
-    const cleanupSettled = await this.waitForCleanup();
-    if (cleanupSettled) {
+    const cleanupSettled = cleanup
+      ? await this.waitForShutdownWork(cleanup, 'cleanup')
+      : true;
+    if (reconciliationSettled && cleanupSettled) {
       await this.instanceLock?.release();
-    } else if (this.cleanupPromise && this.instanceLock) {
-      this.logger.warn('Cleanup did not settle before shutdown timeout; retaining instance lock');
-      void this.cleanupPromise
-        .finally(() => this.instanceLock?.release())
-        .catch(() => undefined);
+      return;
     }
+    const pendingLabels = [
+      ...(!reconciliationSettled ? ['tmux reconciliation'] : []),
+      ...(!cleanupSettled ? ['cleanup'] : []),
+    ];
+    if (this.instanceLock) {
+      this.logger.warn(
+        `${pendingLabels.join(' and ')} did not settle before shutdown timeout; retaining instance lock`,
+      );
+    }
+    const capturedWork: Promise<unknown>[] = [];
+    if (reconciliation) capturedWork.push(reconciliation);
+    if (cleanup) capturedWork.push(cleanup);
+    void this.releaseInstanceLockAfterShutdownWork(capturedWork).catch((error) => {
+      this.logger.warn(`Failed to release instance lock after shutdown work: ${String(error)}`);
+    });
   }
 
   async recoverInterruptedJobs(): Promise<void> {
@@ -185,6 +203,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   async runOnce(): Promise<boolean> {
     const reconciled = await this.reconcileRunningTmuxJobs();
+    if (this.shuttingDown) {
+      return reconciled > 0;
+    }
     const claimed = await this.claimNext();
     if (!claimed) {
       return reconciled > 0;
@@ -455,16 +476,31 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     clearTimeout(timeoutHandle);
   }
 
-  private async waitForCleanup(): Promise<boolean> {
-    const cleanup = this.cleanupPromise;
-    if (!cleanup) return true;
+  private async waitForShutdownWork(
+    work: Promise<unknown>,
+    label: string,
+  ): Promise<boolean> {
     const timeoutMs = this.config.sigkillGraceMs + 2_000;
     let timeoutHandle: NodeJS.Timeout | undefined;
     const settled = await Promise.race([
-      cleanup.then(() => true, () => true),
+      work.then(
+        () => true,
+        (error) => {
+          this.logger.warn(`${label} failed during shutdown: ${String(error)}`);
+          return true;
+        },
+      ),
       new Promise<boolean>((resolve) => { timeoutHandle = setTimeout(() => resolve(false), timeoutMs); }),
     ]);
     clearTimeout(timeoutHandle);
     return settled;
+  }
+
+  private async releaseInstanceLockAfterShutdownWork(
+    capturedWork: readonly Promise<unknown>[],
+  ): Promise<void> {
+    await Promise.allSettled(capturedWork);
+    await this.waitForCompletionNotifications();
+    await this.instanceLock?.release();
   }
 }
