@@ -10,12 +10,16 @@ shutdown target the owned group with one bounded TERM-to-KILL escalation. On Win
 
 The supported production abnormal-exit boundary is the provided systemd unit:
 `KillMode=control-group`, `TimeoutStopSec=30s`, and `SendSIGKILL=yes`. Its
-30-second stop window leaves headroom over the default 5-second child escalation
-and the runner's bounded in-flight, notification, and cleanup waits. The
-deterministic runtime smoke inspects and signals only the uniquely owned fake
-process trees it creates. A forced bridge kill outside systemd is diagnostic
-evidence only: descendant cleanup after `SIGKILL`, a host crash, or supervisor
-failure is not guaranteed without cgroup-aware containment.
+30-second stop window leaves headroom over the default shutdown timing: captured
+claim, in-flight, reconciliation, and cleanup observers share one nominal 7-second
+window, and a post-reconciliation notification snapshot can add one more, for a
+maximum nominal timer budget of about 14 seconds. Event-loop delay, filesystem I/O,
+and Nest disposal are outside that timer formula. When increasing
+`BRIDGE_SIGKILL_GRACE_MS`, keep `2 * (grace + 2000ms)` materially below the
+supervisor stop timeout. The deterministic runtime smoke inspects and signals only
+the uniquely owned fake process trees it creates. A forced bridge kill outside
+systemd is diagnostic evidence only: descendant cleanup after `SIGKILL`, a host
+crash, or supervisor failure is not guaranteed without cgroup-aware containment.
 
 For merge/release gate selection, start with [release-verification.md](release-verification.md). This document contains the detailed runtime smoke procedures.
 
