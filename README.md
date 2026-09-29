@@ -240,6 +240,14 @@ working directory. Provided `cwd` values must resolve via `realpath` under an
 allowed prefix; symlinks that point outside the allowed tree are rejected at
 submission time and again immediately before `omx exec` starts.
 
+Keep requested working directories and allowed prefixes on responsive local
+filesystems, or on mounts whose request timeout is operationally bounded well
+below the supervisor stop timeout. Canonical path validation can wait on an
+unavailable hard NFS mount, FUSE/autofs backend, or WSL 9p/DrvFS path, and
+`BRIDGE_JOB_TIMEOUT_MS` starts after that validation when the child is spawned;
+it does not bound `realpath`. On WSL, prefer a Linux-filesystem checkout under
+`/home/<user>` instead of submitting work directly from `/mnt/c`.
+
 ```env
 BRIDGE_ALLOWED_CWD_PREFIXES=~/workspace,/srv/projects
 ```
