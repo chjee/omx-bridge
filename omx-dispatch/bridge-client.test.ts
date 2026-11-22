@@ -83,6 +83,16 @@ test("formats non-JSON error response details", async () => {
   );
 });
 
+test("requestJson preserves an upstream abort before headers", async () => {
+  const upstreamError = new DOMException("upstream aborted", "AbortError");
+  const fetchImpl: BridgeFetch = async (_url, init) => {
+    assert.equal(init.signal?.aborted, false);
+    throw upstreamError;
+  };
+  const client = new BridgeClient({ baseUrl: "http://localhost", timeoutMs: 100, fetchImpl });
+  await assert.rejects(client.requestJson("jobs/1"), (error) => error === upstreamError);
+});
+
 test("requestJson preserves a body error that occurs before the timeout", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const bodyError = new DOMException("body stream aborted", "AbortError");

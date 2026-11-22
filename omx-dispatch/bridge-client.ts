@@ -57,15 +57,14 @@ export class BridgeClient {
   private async fetchTextWithTimeout(url: URL, init: RequestInit): Promise<{ response: Response; text: string }> {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), this.options.timeoutMs);
-    let response: Response | undefined;
     try {
-      response = await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         ...init,
         signal: controller.signal,
       });
       return { response, text: await response.text() };
     } catch (error) {
-      if (isAbortError(error) && (!response || controller.signal.aborted)) {
+      if (controller.signal.aborted && isAbortError(error)) {
         throw new Error(`Bridge request timed out after ${this.options.timeoutMs}ms`);
       }
       throw error;

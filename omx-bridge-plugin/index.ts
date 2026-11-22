@@ -307,15 +307,14 @@ async function fetchTextWithTimeout(
 ): Promise<{ response: Response; text: string }> {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-  let response: Response | undefined;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       ...init,
       signal: controller.signal,
     });
     return { response, text: await response.text() };
   } catch (error) {
-    if (isAbortError(error) && (!response || controller.signal.aborted)) {
+    if (controller.signal.aborted && isAbortError(error)) {
       throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
     }
     throw error;

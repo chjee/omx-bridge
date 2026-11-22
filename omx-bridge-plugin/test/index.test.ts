@@ -95,6 +95,39 @@ test("omx_get_job returns the shared full bridge job fixture without dropping fi
   }
 });
 
+test("omx_get_job preserves an upstream abort before headers", async (t) => {
+  const upstreamError = new DOMException("upstream aborted", "AbortError");
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    assert.equal(init?.signal?.aborted, false);
+    throw upstreamError;
+  };
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  const { api, tools } = createApi({ requestTimeoutMs: 100 });
+  plugin.register(api as unknown as PluginApi);
+  const getJob = tools.get("omx_get_job");
+  assert.ok(getJob);
+  await assert.rejects(getJob.execute("call-1", { jobId: "job-1" }), (error) => error === upstreamError);
+});
+
+test("omx_get_job times out while waiting for headers", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    const signal = init?.signal;
+    assert.ok(signal);
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  };
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  const { api, tools } = createApi({ requestTimeoutMs: 100 });
+  plugin.register(api as unknown as PluginApi);
+  const getJob = tools.get("omx_get_job");
+  assert.ok(getJob);
+  const request = getJob.execute("call-1", { jobId: "job-1" });
+  t.mock.timers.tick(100);
+  await assert.rejects(request, { message: "Bridge request timed out after 100ms" });
+});
+
 test("omx_get_job preserves a body error that occurs before the timeout", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const bodyError = new DOMException("body stream aborted", "AbortError");
