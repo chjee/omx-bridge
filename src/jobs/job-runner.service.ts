@@ -44,7 +44,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to reconcile terminal job notifications: ${String(error)}`);
     });
     this.cleanupIntervalHandle = setInterval(
-      () => void this.cleanupTerminalJobs(),
+      () => void this.cleanupTerminalJobs().catch((error) => {
+        this.logger.warn(`Scheduled terminal job cleanup failed: ${String(error)}`);
+      }),
       this.config.jobCleanupIntervalMs,
     );
     this.intervalHandle = setInterval(() => this.tick(), this.config.jobPollIntervalMs);
@@ -278,7 +280,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     const slots = this.config.maxConcurrency - this.inFlight.size;
     for (let i = 0; i < slots; i++) {
-      void this.runOnce();
+      void this.runOnce().catch((error) => {
+        this.logger.warn(`Job poll failed: ${String(error)}`);
+      });
     }
   }
 

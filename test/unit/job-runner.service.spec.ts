@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -1304,6 +1305,82 @@ describe('JobRunnerService', () => {
     expect(listByStatus).toHaveBeenCalledTimes(1);
     await expect(reconcile()).resolves.toBe(0);
     expect(listByStatus).toHaveBeenCalledTimes(2);
+  });
+
+  describe('scheduled runner recovery', () => {
+    const execute = jest.fn();
+    let runner: JobRunnerService;
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      execute.mockReset().mockResolvedValue(createExecutionResult());
+      runner = new JobRunnerService(
+        repository, { execute } as unknown as OmxExecService, mockJobNotify, config,
+      );
+    });
+
+    afterEach(async () => {
+      try {
+        await runner.onModuleDestroy();
+      } finally {
+        jest.restoreAllMocks();
+        jest.useRealTimers();
+      }
+    });
+
+    it('executes the queued job once on the next scheduled poll after a failed lookup', async () => {
+      config.maxConcurrency = 1;
+      const run = jest.spyOn(runner, 'runOnce');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      await runner.onModuleInit();
+      await expect(run.mock.results[0].value).resolves.toBe(false);
+
+      const job = await repository.save(createJob());
+      jest.spyOn(repository, 'listByStatus').mockRejectedValueOnce(new Error('queue lookup failed'));
+      await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/poll.*queue lookup failed/i));
+      await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs - 1);
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(execute).not.toHaveBeenCalled();
+      await expect(repository.getById(job.id)).resolves.toMatchObject({ status: 'queued' });
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(run.mock.results[2].value).resolves.toBe(true);
+      expect(execute).toHaveBeenCalledTimes(1);
+      await expect(repository.getById(job.id)).resolves.toMatchObject({ status: 'succeeded' });
+    });
+
+    it('cleans up on the next scheduled cleanup after a storage failure', async () => {
+      config.jobCleanupIntervalMs = 10;
+      config.jobPollIntervalMs = 1000;
+      const cleanup = jest.spyOn(runner, 'cleanupTerminalJobs');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      await runner.onModuleInit();
+      const job = await repository.save(createJob({
+        status: 'succeeded', finishedAt: '2000-01-01T00:00:00.000Z',
+      }));
+      jest.spyOn(repository, 'cleanupTerminalJobs').mockRejectedValueOnce(new Error('storage unavailable'));
+
+      await jest.advanceTimersByTimeAsync(config.jobCleanupIntervalMs);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/cleanup.*storage unavailable/i));
+      await jest.advanceTimersByTimeAsync(config.jobCleanupIntervalMs - 1);
+      expect(cleanup).toHaveBeenCalledTimes(2);
+      await expect(repository.getById(job.id)).resolves.toMatchObject({ status: 'succeeded' });
+
+      await jest.advanceTimersByTimeAsync(1);
+      await cleanup.mock.results[2].value;
+      expect(cleanup).toHaveBeenCalledTimes(3);
+      await expect(repository.getById(job.id)).resolves.toBeNull();
+    });
+
+    it('propagates repository errors to direct callers and during initial cleanup', async () => {
+      const error = new Error('storage unavailable');
+      jest.spyOn(repository, 'listByStatus').mockRejectedValueOnce(error);
+      await expect(runner.runOnce()).rejects.toBe(error);
+      jest.spyOn(repository, 'cleanupTerminalJobs').mockRejectedValue(error);
+      await expect(runner.cleanupTerminalJobs()).rejects.toBe(error);
+      await expect(runner.onModuleInit()).rejects.toBe(error);
+    });
   });
 
   it('trigger starts queued work without waiting for the polling interval', async () => {
