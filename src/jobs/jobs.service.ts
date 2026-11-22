@@ -39,13 +39,18 @@ export class JobsService {
         cwd: await this.assertAllowedCwd(sourceNormalizedInput.cwd),
       };
       const requestFingerprint = this.buildRequestFingerprint(normalizedInput);
-      const existingJob = await this.findExistingRequestJob(normalizedInput);
-      if (existingJob) {
-        this.assertRequestFingerprintMatches(existingJob, normalizedInput);
-        return existingJob;
+      const jobs = await this.repository.listAll();
+      if (normalizedInput.requestId) {
+        const existingJob = jobs.find((job) =>
+          job.requestId === normalizedInput.requestId && job.source === normalizedInput.source
+        );
+        if (existingJob) {
+          this.assertRequestFingerprintMatches(existingJob, normalizedInput);
+          return existingJob;
+        }
       }
 
-      const activeCount = await this.repository.countActive();
+      const activeCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
       if (activeCount >= this.config.maxActiveJobs) {
         throw new HttpException(
           `Job queue is full (${activeCount}/${this.config.maxActiveJobs} active jobs)`,
@@ -253,18 +258,6 @@ export class JobsService {
       source: 'channel',
       sourceName: input.sourceName ?? 'claude-synapse',
     };
-  }
-
-  private async findExistingRequestJob(input: CreateJobDto): Promise<BridgeJob | null> {
-    if (!input.requestId) {
-      return null;
-    }
-
-    const jobs = await this.repository.listAll();
-    return jobs.find((job) =>
-      job.requestId === input.requestId &&
-      job.source === input.source
-    ) ?? null;
   }
 
   private buildRequestFingerprint(input: CreateJobDto): string | undefined {
