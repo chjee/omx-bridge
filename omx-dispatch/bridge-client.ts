@@ -30,7 +30,7 @@ export class BridgeClient {
     init?: RequestInit,
     signatureHeader?: string,
   ): Promise<T> {
-    const response = await this.fetchWithTimeout(this.buildUrl(path), {
+    const { response, text } = await this.fetchTextWithTimeout(this.buildUrl(path), {
       ...init,
       headers: {
         Accept: "application/json",
@@ -41,7 +41,6 @@ export class BridgeClient {
       },
     });
 
-    const text = await response.text();
     const data = text.length > 0 ? safeJsonParse(text) : null;
 
     if (!response.ok) {
@@ -55,16 +54,18 @@ export class BridgeClient {
     return new URL(path, ensureTrailingSlash(this.options.baseUrl));
   }
 
-  private async fetchWithTimeout(url: URL, init: RequestInit): Promise<Response> {
+  private async fetchTextWithTimeout(url: URL, init: RequestInit): Promise<{ response: Response; text: string }> {
     const controller = new AbortController();
     const timeoutHandle = setTimeout(() => controller.abort(), this.options.timeoutMs);
+    let response: Response | undefined;
     try {
-      return await this.fetchImpl(url, {
+      response = await this.fetchImpl(url, {
         ...init,
         signal: controller.signal,
       });
+      return { response, text: await response.text() };
     } catch (error) {
-      if (isAbortError(error)) {
+      if (isAbortError(error) && (!response || controller.signal.aborted)) {
         throw new Error(`Bridge request timed out after ${this.options.timeoutMs}ms`);
       }
       throw error;

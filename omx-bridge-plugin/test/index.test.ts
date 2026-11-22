@@ -95,6 +95,59 @@ test("omx_get_job returns the shared full bridge job fixture without dropping fi
   }
 });
 
+test("omx_get_job preserves a body error that occurs before the timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const bodyError = new DOMException("body stream aborted", "AbortError");
+  let signal: AbortSignal | null | undefined;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    signal = init?.signal;
+    const response = new Response();
+    response.text = async () => { throw bodyError; };
+    return response;
+  };
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  const { api, tools } = createApi({ requestTimeoutMs: 100 });
+  plugin.register(api as unknown as PluginApi);
+  const getJob = tools.get("omx_get_job");
+  assert.ok(getJob);
+  await assert.rejects(getJob.execute("call-1", { jobId: "job-1" }), (error) => error === bodyError);
+  t.mock.timers.tick(100);
+  assert.ok(signal);
+  assert.equal(signal.aborted, false);
+});
+
+test("omx_get_job times out a pending body at the original request deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let bodySignal: AbortSignal | undefined;
+  const fetchImpl: typeof fetch = async (_url, init) => {
+    const signal = init?.signal;
+    assert.ok(signal);
+    t.mock.timers.tick(40);
+    const response = new Response();
+    response.text = () => {
+      bodySignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    return response;
+  };
+  t.mock.method(globalThis, "fetch", fetchImpl);
+  const { api, tools } = createApi({ requestTimeoutMs: 100 });
+  plugin.register(api as unknown as PluginApi);
+  const getJob = tools.get("omx_get_job");
+  assert.ok(getJob);
+  const request = getJob.execute("call-1", { jobId: "job-1" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(bodySignal, "response body read has started");
+  t.mock.timers.tick(59);
+  assert.equal(bodySignal.aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(bodySignal.aborted, true, "original request deadline must abort the body read");
+  await assert.rejects(request, { message: "Bridge request timed out after 100ms" });
+});
+
 test("omx_submit_job forwards OpenClaw routing fields to the bridge", async () => {
   const { api, tools } = createApi({
     bridgeUrl: "http://127.0.0.1:3992",
