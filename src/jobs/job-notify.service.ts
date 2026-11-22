@@ -18,6 +18,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function nextAttemptIndex(history: readonly NotifyOutcome[]): number {
+  let maxIndex = -1;
+  for (const { attemptIndex } of history) {
+    if (attemptIndex !== undefined && Number.isSafeInteger(attemptIndex) && attemptIndex >= 0) {
+      maxIndex = Math.max(maxIndex, attemptIndex);
+    }
+  }
+  if (maxIndex < 0) return history.length;
+  if (maxIndex < Number.MAX_SAFE_INTEGER) return maxIndex + 1;
+
+  const used = new Set(history.map((entry) => entry.attemptIndex));
+  let candidate = 0;
+  while (used.has(candidate)) candidate++;
+  return candidate;
+}
+
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -72,14 +88,7 @@ export class JobNotifyService {
       const latest = await this.repository.getById(jobId);
       if (!latest) return outcome;
       const history = latest.notifyHistory ?? [];
-      let maxIndex = -1;
-      for (const { attemptIndex: index } of history) {
-        if (index !== undefined && Number.isSafeInteger(index) && index >= 0) {
-          maxIndex = Math.max(maxIndex, index);
-        }
-      }
-      const attemptIndex = maxIndex >= 0 ? maxIndex + 1 : history.length;
-      const outcomeWithIndex = { ...outcome, attemptIndex };
+      const outcomeWithIndex = { ...outcome, attemptIndex: nextAttemptIndex(history) };
       const updatedHistory = [...history, outcomeWithIndex].slice(-10);
       try {
         await this.repository.save({

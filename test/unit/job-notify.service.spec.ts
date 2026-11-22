@@ -159,6 +159,7 @@ describe('JobNotifyService', () => {
   });
 
   it.each([
+    { indexes: [Number.MAX_SAFE_INTEGER, 0, 2], next: 1 },
     { indexes: [10, 10, undefined, -1, 1.5, 2 ** 53, 3], next: 11 },
     { indexes: [undefined, -1], next: 2 },
     { indexes: [undefined, 0, undefined], next: 1 },
@@ -180,24 +181,41 @@ describe('JobNotifyService', () => {
     expect(repoMock.current.notifyOutcome).toEqual(outcome);
   });
 
-  it('serializes concurrent automatic and manual attempts when history is full', async () => {
+  it('assigns safe indexes across the rollover without renumbering stored attempts', async () => {
+    const max = Number.MAX_SAFE_INTEGER;
     const job = createJob();
-    const repoMock = createRepoMock(job);
+    const initial = { mode: 'openclaw' as const, attemptedAt: job.createdAt, attemptIndex: max - 1 };
+    const repoMock = createRepoMock({ ...job, notifyHistory: [initial] });
+    const service = new JobNotifyService(createConfig({ notifyMode: 'openclaw', telegram: undefined }), repoMock.repo);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await service.notifyJobComplete(job);
+    }
+
+    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([max - 1, max, 0, 1]);
+    expect(repoMock.current.notifyOutcome?.attemptIndex).toBe(1);
+  });
+
+  it.each([
+    { last: 9, appended: [10, 11] },
+    { last: Number.MAX_SAFE_INTEGER, appended: [9, 0] },
+  ])('serializes concurrent attempts with a full history ending at $last', async ({ last, appended }) => {
+    const job = createJob();
+    const indexes = [0, 1, 2, 3, 4, 5, 6, 7, 8, last];
+    const initial = indexes.map((attemptIndex) => ({ attemptedAt: job.createdAt, mode: 'openclaw' as const, attemptIndex }));
+    const repoMock = createRepoMock({ ...job, notifyHistory: initial });
     const service = new JobNotifyService(
       createConfig({ notifyMode: 'openclaw', telegram: undefined }),
       repoMock.repo,
     );
 
-    for (let attempt = 0; attempt < 10; attempt++) {
-      await service.notifyJobComplete(job);
-    }
     const [autoOutcome, manualOutcome] = await Promise.all([
       service.notifyJobComplete(job),
       service.notifyJobComplete(job, { trigger: 'manual' }),
     ]);
 
     const history = repoMock.current.notifyHistory;
-    expect(history?.map((entry) => entry.attemptIndex)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(history?.map((entry) => entry.attemptIndex)).toEqual([...indexes.slice(2), ...appended]);
     expect(autoOutcome.trigger).toBe('auto');
     expect(manualOutcome.trigger).toBe('manual');
     expect(history?.slice(-2)).toEqual(expect.arrayContaining([autoOutcome, manualOutcome]));
