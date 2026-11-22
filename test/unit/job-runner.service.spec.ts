@@ -1350,6 +1350,80 @@ describe('JobRunnerService', () => {
       await expect(repository.getById(job.id)).resolves.toMatchObject({ status: 'succeeded' });
     });
 
+    function failPrelaunchRead(jobId: string, error: Error, beforeFailure?: () => Promise<void>) {
+      const read = repository.getById.bind(repository);
+      jest.spyOn(repository, 'getById')
+        .mockImplementationOnce(read) // The queued → running transition reads the current record.
+        .mockImplementationOnce(async (id) => {
+          expect(id).toBe(jobId);
+          await expect(read(id)).resolves.toMatchObject({ status: 'running' });
+          await beforeFailure?.();
+          throw error;
+        });
+    }
+
+    it('retries a claimed job after a prelaunch read failure on the next poll and drains the queue', async () => {
+      config.maxConcurrency = 1;
+      const run = jest.spyOn(runner, 'runOnce');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      await runner.onModuleInit();
+      await expect(run.mock.results[0].value).resolves.toBe(false);
+
+      const a = await repository.save(createJob({ prompt: 'A' }));
+      const b = await repository.save(createJob({
+        id: '00000000-0000-4000-a000-000000000002', prompt: 'B', queueOrder: '0000000000001-000002',
+      }));
+      const error = new Error('prelaunch read failed');
+      failPrelaunchRead(a.id, error);
+      const snapshot = async () => ({
+        states: [(await repository.getById(a.id))?.status, (await repository.getById(b.id))?.status],
+        executions: execute.mock.calls.map(([prompt]) => prompt),
+      });
+
+      await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs);
+      await expect(run.mock.results[1].value).rejects.toBe(error);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(error.message));
+      await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs - 1);
+      const beforeNextPoll = await snapshot();
+      const runsBeforeNextPoll = run.mock.calls.length;
+
+      await jest.advanceTimersByTimeAsync(1);
+      // Each successful completion can start the next run without advancing the clock.
+      for (let i = runsBeforeNextPoll; i < run.mock.results.length; i++) {
+        await run.mock.results[i].value;
+      }
+      expect({ beforeNextPoll, afterNextPoll: await snapshot() }).toEqual({
+        beforeNextPoll: { states: ['queued', 'queued'], executions: [] },
+        afterNextPoll: { states: ['succeeded', 'succeeded'], executions: ['A', 'B'] },
+      });
+      expect(runsBeforeNextPoll).toBe(2);
+    });
+
+    it.each(['cancelled', 'succeeded'] as const)('preserves a concurrent %s result on prelaunch read failure', async (status) => {
+      const job = await repository.save(createJob());
+      const error = new Error('prelaunch read failed');
+      failPrelaunchRead(job.id, error, async () => {
+        await repository.transition(job.id, ['running'], (current) => ({ ...current, status }));
+      });
+
+      await expect(runner.runOnce()).rejects.toBe(error);
+      await expect(repository.getById(job.id)).resolves.toMatchObject({ status });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('reports a failed requeue and preserves the original prelaunch lookup error', async () => {
+      const job = await repository.save(createJob());
+      const error = new Error('prelaunch read failed');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      failPrelaunchRead(job.id, error, async () => {
+        jest.spyOn(repository, 'transition').mockRejectedValueOnce(new Error('storage still unavailable'));
+      });
+
+      await expect(runner.runOnce()).rejects.toBe(error);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('storage still unavailable'));
+      expect(execute).not.toHaveBeenCalled();
+    });
+
     it('cleans up on the next scheduled cleanup after a storage failure', async () => {
       config.jobCleanupIntervalMs = 10;
       config.jobPollIntervalMs = 1000;
