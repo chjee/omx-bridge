@@ -71,9 +71,16 @@ export class JobNotifyService {
     return this.withPersistLock(jobId, async () => {
       const latest = await this.repository.getById(jobId);
       if (!latest) return outcome;
-      const attemptIndex = latest.notifyHistory?.length ?? 0;
+      const history = latest.notifyHistory ?? [];
+      let maxIndex = -1;
+      for (const { attemptIndex: index } of history) {
+        if (index !== undefined && Number.isSafeInteger(index) && index >= 0) {
+          maxIndex = Math.max(maxIndex, index);
+        }
+      }
+      const attemptIndex = maxIndex >= 0 ? maxIndex + 1 : history.length;
       const outcomeWithIndex = { ...outcome, attemptIndex };
-      const updatedHistory = [...(latest.notifyHistory ?? []), outcomeWithIndex].slice(-10);
+      const updatedHistory = [...history, outcomeWithIndex].slice(-10);
       try {
         await this.repository.save({
           ...latest,
