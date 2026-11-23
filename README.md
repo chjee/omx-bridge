@@ -166,7 +166,9 @@ restarts from repeatedly hitting downstream webhooks when the bounded
 To retry a recorded notification failure, send an authenticated
 `POST /jobs/:id/notify/retry` request with the bridge Bearer token. The job must
 already be terminal. Each manual retry appends its outcome to `notifyHistory`,
-which retains the latest 10 attempts.
+which retains the latest 10 attempts in recording order. Read `notifyOutcome`
+for the latest result. When the retained history contains `Number.MAX_SAFE_INTEGER`,
+the next `attemptIndex` is the smallest nonnegative integer absent from that history.
 
 For Claude mode:
 

@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.1.4] - Release candidate
+
+### Fixed
+
+- Log scheduled poll and cleanup failures so the next interval can retry. If a
+  claimed job cannot be read before launch, requeue it while it is still
+  running and preserve concurrent cancellation or completion.
+- Apply the Dispatch and OpenClaw HTTP request deadline through the response
+  body read. Preserve upstream abort errors when the local deadline has not expired.
+- Keep notification attempt indexes distinct in the ten retained entries
+  after the history fills and at the JavaScript safe integer limit.
+
+### Performance
+
+- Read the job store once instead of twice when admitting a new `requestId`.
+  Duplicate and conflicting submissions are still resolved before queue capacity.
+
+### Regression coverage
+
+- Exercise existing submission idempotency over loopback HTTP. When the bridge
+  accepts a job but the client times out reading the response, an identical
+  replay returns the stored ID with one execution and one completion webhook.
+
 ## [0.1.3] - 2026-09-29
 
 No breaking API, job payload, repository format, runtime dependency, or systemd
