@@ -44,7 +44,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to reconcile terminal job notifications: ${String(error)}`);
     });
     this.cleanupIntervalHandle = setInterval(
-      () => void this.cleanupTerminalJobs(),
+      () => void this.cleanupTerminalJobs().catch((error) => {
+        this.logger.warn(`Scheduled terminal job cleanup failed: ${String(error)}`);
+      }),
       this.config.jobCleanupIntervalMs,
     );
     this.intervalHandle = setInterval(() => this.tick(), this.config.jobPollIntervalMs);
@@ -237,15 +239,19 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return reconciled > 0;
     }
 
+    let lookupSucceeded = false;
     try {
-      const run = this.executeJob(claimed);
+      const run = this.readClaimedJob(claimed.id).then((currentJob) => {
+        lookupSucceeded = true;
+        return this.executeJob(claimed, currentJob);
+      });
       this.inFlightRuns.set(claimed.id, run);
       await run;
       return true;
     } finally {
       this.inFlightRuns.delete(claimed.id);
       this.inFlight.delete(claimed.id);
-      this.tick();
+      if (lookupSucceeded) this.tick();
     }
   }
 
@@ -278,7 +284,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
     const slots = this.config.maxConcurrency - this.inFlight.size;
     for (let i = 0; i < slots; i++) {
-      void this.runOnce();
+      void this.runOnce().catch((error) => {
+        this.logger.warn(`Job poll failed: ${String(error)}`);
+      });
     }
   }
 
@@ -341,8 +349,21 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return !outcome;
   }
 
-  private async executeJob(job: BridgeJob): Promise<void> {
-    const currentJob = await this.repository.getById(job.id);
+  private async readClaimedJob(jobId: string): Promise<BridgeJob | null> {
+    try {
+      return await this.repository.getById(jobId);
+    } catch (error) {
+      // Neither execution backend has started, so releasing this claim is safe.
+      try {
+        await this.requeueClaimedJob(jobId);
+      } catch (requeueError) {
+        this.logger.warn(`Failed to requeue job ${jobId} after prelaunch lookup failure: ${String(requeueError)}`);
+      }
+      throw error;
+    }
+  }
+
+  private async executeJob(job: BridgeJob, currentJob: BridgeJob | null): Promise<void> {
     if (!currentJob || currentJob.status !== 'running') {
       return;
     }

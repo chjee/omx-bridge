@@ -113,6 +113,26 @@ function createService(
 }
 
 describe('JobsService.createJob', () => {
+  it('reads the job list once for a new requestId', async () => {
+    const { service, repository } = createService();
+
+    await service.createJob({ prompt: 'submit once', requestId: 'req-new' });
+
+    expect(repository.listAll).toHaveBeenCalledTimes(1);
+    expect(repository.countActive).not.toHaveBeenCalled();
+  });
+
+  it('saves simultaneous submissions of the same request only once', async () => {
+    const { service, repository, jobRunnerService } = createService();
+    const input = { prompt: 'submit concurrently', requestId: 'req-concurrent' };
+
+    const [first, second] = await Promise.all([service.createJob(input), service.createJob(input)]);
+
+    expect(second.id).toBe(first.id);
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
+  });
+
   it('triggers the runner after a queued job is persisted', async () => {
     const { service, repository, jobRunnerService } = createService();
 
@@ -210,7 +230,7 @@ describe('JobsService.createJob', () => {
     }));
   });
 
-  it('returns an existing job for repeated source-scoped requestId submissions', async () => {
+  it('returns an existing job for a repeated source-scoped requestId even at capacity', async () => {
     const existingJob = createJob({
       prompt: 'same request retry',
       requestId: 'req-1',
@@ -218,7 +238,7 @@ describe('JobsService.createJob', () => {
       status: 'running',
     });
     const jobs = new Map([[existingJob.id, existingJob]]);
-    const { service, repository, jobRunnerService } = createService(jobs);
+    const { service, repository, jobRunnerService } = createService(jobs, { maxActiveJobs: 1 });
 
     const result = await service.createJob({
       prompt: 'same request retry',
@@ -303,9 +323,9 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects repeated source-scoped requestId submissions with a different payload', async () => {
+  it('returns 409 for a repeated source-scoped requestId with a different payload even at capacity', async () => {
     const jobs = new Map<string, BridgeJob>();
-    const { service, repository, jobRunnerService } = createService(jobs);
+    const { service, repository, jobRunnerService } = createService(jobs, { maxActiveJobs: 1 });
     await service.createJob({
       prompt: 'original prompt',
       requestId: 'req-conflict',
@@ -318,7 +338,7 @@ describe('JobsService.createJob', () => {
       requestId: 'req-conflict',
       source: 'dispatch',
       notifyUrl: 'http://127.0.0.1:12000/notify',
-    })).rejects.toThrow(ConflictException);
+    })).rejects.toMatchObject({ status: 409 });
 
     expect(repository.save).toHaveBeenCalledTimes(1);
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
@@ -348,12 +368,13 @@ describe('JobsService.createJob', () => {
     expect(jobRunnerService.trigger).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects new jobs when active job capacity is full', async () => {
-    const activeJob = createJob({ status: 'queued' });
+  it.each(['queued', 'running'] as const)('returns 429 when a %s job fills the queue', async (status) => {
+    const activeJob = createJob({ status });
     const jobs = new Map([[activeJob.id, activeJob]]);
     const { service, repository, jobRunnerService } = createService(jobs, { maxActiveJobs: 1 });
 
-    await expect(service.createJob({ prompt: 'overflow' })).rejects.toThrow(HttpException);
+    await expect(service.createJob({ prompt: 'overflow' })).rejects.toMatchObject({ status: 429 });
+    await expect(service.createJob({ prompt: 'overflow', requestId: 'new' })).rejects.toMatchObject({ status: 429 });
     expect(repository.save).not.toHaveBeenCalled();
     expect(jobRunnerService.trigger).not.toHaveBeenCalled();
   });

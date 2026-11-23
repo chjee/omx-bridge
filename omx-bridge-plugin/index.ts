@@ -300,20 +300,21 @@ function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
 }
 
-async function fetchWithTimeout(
+async function fetchTextWithTimeout(
   url: URL,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+): Promise<{ response: Response; text: string }> {
   const controller = new AbortController();
   const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       ...init,
       signal: controller.signal,
     });
+    return { response, text: await response.text() };
   } catch (error) {
-    if (isAbortError(error)) {
+    if (controller.signal.aborted && isAbortError(error)) {
       throw new Error(`Bridge request timed out after ${timeoutMs}ms`);
     }
     throw error;
@@ -329,7 +330,7 @@ async function requestJson<T>(
   signatureHeader?: string,
 ): Promise<T> {
   const pluginConfig = getPluginConfig(api);
-  const response = await fetchWithTimeout(buildBridgeUrl(api, path), {
+  const { response, text } = await fetchTextWithTimeout(buildBridgeUrl(api, path), {
     ...init,
     headers: {
       Accept: "application/json",
@@ -340,7 +341,6 @@ async function requestJson<T>(
     },
   }, pluginConfig.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
-  const text = await response.text();
   const data = text.length > 0 ? safeJsonParse(text) : null;
 
   if (!response.ok) {

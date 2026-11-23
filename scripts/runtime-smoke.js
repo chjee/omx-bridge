@@ -2,7 +2,9 @@
 'use strict';
 
 const { spawn } = require('node:child_process');
+const { rejects } = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { once } = require('node:events');
 const fs = require('node:fs');
 const http = require('node:http');
 const { createRequire } = require('node:module');
@@ -1166,10 +1168,11 @@ function startBridge({
 
 async function waitForBridge(port) {
   const deadline = Date.now() + 8_000;
+  const signal = AbortSignal.timeout(8_000);
   let lastError;
   while (Date.now() < deadline) {
     try {
-      const stats = await requestJson(port, 'GET', '/jobs/stats');
+      const stats = await requestJson(port, 'GET', '/jobs/stats', undefined, signal);
       assert(typeof stats.activeCount === 'number', 'bridge stats did not include activeCount');
       return stats;
     } catch (error) {
@@ -1180,9 +1183,10 @@ async function waitForBridge(port) {
   throw new Error(`bridge on port ${port} did not become ready: ${String(lastError)}`);
 }
 
-async function requestJson(port, method, route, body) {
+async function requestJson(port, method, route, body, signal) {
   const response = await fetch(`http://127.0.0.1:${port}${route}`, {
     method,
+    signal,
     headers: {
       Authorization: `Bearer ${apiToken}`,
       ...(body ? { 'Content-Type': 'application/json' } : {}),
@@ -1402,9 +1406,10 @@ async function waitForFakeTmuxSessionCleanup(fakeTmuxStateDir, sessionName, pid)
 
 async function waitForNotifyOutcome(port, jobId, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs;
+  const signal = AbortSignal.timeout(timeoutMs);
   let latest;
   while (Date.now() < deadline) {
-    latest = await requestJson(port, 'GET', `/jobs/${encodeURIComponent(jobId)}`);
+    latest = await requestJson(port, 'GET', `/jobs/${encodeURIComponent(jobId)}`, undefined, signal);
     if (latest.notifyOutcome) {
       return latest;
     }
@@ -2002,6 +2007,37 @@ async function smokeTmuxTimeoutRuntime() {
   log('tmux session timeout smoke passed');
 }
 
+async function connectDispatchClient(bridgePort, webhookPort, tempDir, requestTimeoutMs = 10_000) {
+  const { Client } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
+  const { StdioClientTransport } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [dispatchMain],
+    cwd: dispatchDir,
+    env: {
+      BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
+      BRIDGE_API_TOKEN: apiToken,
+      BRIDGE_REQUEST_TIMEOUT_MS: String(requestTimeoutMs),
+      BRIDGE_CALLBACK_SECRET: callbackSecret,
+      WEBHOOK_PORT: String(webhookPort),
+      OMX_DISPATCH_NOTIFICATION_STORE_PATH: path.join(tempDir, 'notifications.jsonl'),
+      OMX_DISPATCH_WAIT_TIMEOUT_MS: '10000',
+      OMX_DISPATCH_WAIT_POLL_INTERVAL_MS: '100',
+      OMX_DISPATCH_TERMINAL_NOTIFICATION_GRACE_MS: '2000',
+      ENABLE_CLAUDE_CHANNEL: 'false',
+    },
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'runtime-smoke', version: '1.0.0' });
+  try {
+    await client.connect(transport);
+    return client;
+  } catch (error) {
+    await client.close();
+    throw error;
+  }
+}
+
 async function smokeDispatchMcp() {
   const tempDir = makeTempDir('omx-bridge-smoke-dispatch-');
   let bridge;
@@ -2017,27 +2053,7 @@ async function smokeDispatchMcp() {
     });
     await waitForBridge(bridgePort);
 
-    const { Client } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
-    const { StdioClientTransport } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [dispatchMain],
-      cwd: dispatchDir,
-      env: {
-        BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
-        BRIDGE_API_TOKEN: apiToken,
-        BRIDGE_CALLBACK_SECRET: callbackSecret,
-        WEBHOOK_PORT: String(webhookPort),
-        OMX_DISPATCH_NOTIFICATION_STORE_PATH: path.join(tempDir, 'notifications.jsonl'),
-        OMX_DISPATCH_WAIT_TIMEOUT_MS: '10000',
-        OMX_DISPATCH_WAIT_POLL_INTERVAL_MS: '100',
-        OMX_DISPATCH_TERMINAL_NOTIFICATION_GRACE_MS: '2000',
-        ENABLE_CLAUDE_CHANNEL: 'false',
-      },
-      stderr: 'pipe',
-    });
-    client = new Client({ name: 'runtime-smoke', version: '1.0.0' });
-    await client.connect(transport);
+    client = await connectDispatchClient(bridgePort, webhookPort, tempDir);
     const health = parseToolJson(await client.callTool({ name: 'omx_health', arguments: {} }));
     assert(health.bridge?.reachable === true, 'omx_health did not report bridge reachable');
     const wait = parseToolJson(await client.callTool({
@@ -2083,6 +2099,106 @@ function parseToolJson(result) {
   const text = result?.content?.[0]?.text;
   assert(typeof text === 'string', 'MCP tool did not return text content');
   return JSON.parse(text);
+}
+
+async function smokeDispatchTimeoutReplay() {
+  const tempDir = makeTempDir('omx-bridge-smoke-timeout-replay-');
+  const jobsDir = path.join(tempDir, 'jobs');
+  const shim = path.join(tempDir, 'count-exec.sh');
+  const timeoutMs = 1_500;
+  const acceptedIds = [];
+  let heldSocket;
+  let bridge;
+  let client;
+  let proxy;
+  let failed = false;
+  try {
+    writeExecutable(shim, '#!/bin/sh\nset -e\nprintf "exec\\n" >> "$0.calls"\ncat >/dev/null\n');
+    const port = await getFreePort();
+    bridge = startBridge({ port, jobsDir, omxCommand: shim });
+    await waitForBridge(port);
+    const notify = await startNotifyServer();
+
+    proxy = http.createServer(async (req, res) => {
+      try {
+        assert(req.method === 'POST' && req.url === '/jobs', 'unexpected replay proxy request');
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const upstream = await fetch(`http://127.0.0.1:${port}/jobs`, {
+          method: 'POST',
+          headers: { authorization: req.headers.authorization, 'content-type': req.headers['content-type'] },
+          body: Buffer.concat(chunks),
+          signal: AbortSignal.timeout(5_000),
+        });
+        const body = await upstream.text();
+        assertEqual(upstream.status, 202, 'upstream submission status');
+        const { jobId } = JSON.parse(body);
+        assert(typeof jobId === 'string' && jobId.length > 0, 'bridge response missing jobId');
+        assert(!res.destroyed, 'client disconnected before bridge accepted submission');
+        acceptedIds.push(jobId);
+        res.writeHead(202, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+        if (acceptedIds.length === 1) {
+          heldSocket = req.socket;
+          res.flushHeaders(); // Leave the body pending until Dispatch aborts or teardown closes the socket.
+        } else {
+          res.end(body);
+        }
+      } catch (error) {
+        res.writeHead(502);
+        res.end(String(error));
+      }
+    });
+    await new Promise((resolve, reject) => {
+      proxy.once('error', reject);
+      proxy.listen(0, '127.0.0.1', resolve);
+    });
+    client = await connectDispatchClient(proxy.address().port, await getFreePort(), tempDir, timeoutMs);
+    const input = {
+      prompt: 'dispatch timeout replay', source: 'dispatch', requestId: 'smoke-timeout-replay',
+      notifyUrl: `http://127.0.0.1:${notify.port}/notify`,
+    };
+    const submit = () => client.callTool({ name: 'omx_submit_job', arguments: input }, undefined, { timeout: 8_000 });
+    await rejects(submit(), new RegExp(`Bridge request timed out after ${timeoutMs}ms`));
+    assertEqual(acceptedIds.length, 1, 'first submission accepted before timeout');
+    if (!heldSocket.destroyed) {
+      await once(heldSocket, 'close', { signal: AbortSignal.timeout(2_000) });
+    }
+    const [id] = acceptedIds;
+    const saved = JSON.parse(fs.readFileSync(path.join(jobsDir, `${id}.json`), 'utf8'));
+    assertEqual(saved.id, id, 'first accepted job on disk');
+    assertEqual(saved.requestId, input.requestId, 'first stored requestId');
+    assertEqual(saved.source, input.source, 'first stored source');
+    assertEqual(saved.notifyUrl, input.notifyUrl, 'first stored callback URL');
+
+    const replay = parseToolJson(await submit());
+    assertEqual(acceptedIds.length, 2, 'expected two accepted POSTs');
+    assertEqual(acceptedIds[1], id, 'second bridge 202 changed the job ID');
+    assertEqual(replay.jobId, id, 'replayed MCP submission changed the job ID');
+    const job = await waitForNotifyOutcome(port, id);
+    assertEqual(job.status, 'succeeded', 'replayed job terminal status');
+    assertEqual(job.notifyOutcome.trigger, 'auto', 'notification trigger');
+    assertEqual(job.notifyOutcome.claudeWebhook?.status, 'ok', 'persisted webhook outcome');
+    await stopChild(bridge);
+    const files = fs.readdirSync(jobsDir).filter((name) => name.endsWith('.json'));
+    assertEqual(files.length, 1, 'job files in the isolated store');
+    assertEqual(fs.readFileSync(`${shim}.calls`, 'utf8'), 'exec\n', 'actual OMX invocations');
+    assertEqual(notify.requests.length, 1, 'actual webhook receipts');
+    assertNotifyRequestReceived(notify.requests, id, 'timeout replay');
+    log('Dispatch body timeout replay passed: two 202s, same job ID, 1 job, 1 execution, 1 webhook');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('dispatch timeout replay', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    if (proxy) {
+      const closed = new Promise((resolve) => proxy.close(resolve));
+      proxy.closeAllConnections();
+      await closed;
+    }
+    await client?.close().catch(() => undefined);
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
 }
 
 async function smokeOpenClawPluginDiscovery() {
@@ -2206,6 +2322,7 @@ async function smokeLoopbackRuntime() {
   await smokeTmuxCancelRuntime();
   await smokeTmuxTimeoutRuntime();
   await smokeDispatchMcp();
+  await smokeDispatchTimeoutReplay();
   await smokeOpenClawPluginDiscovery();
   log('runtime smoke passed');
 }
@@ -2230,6 +2347,10 @@ async function main() {
     return;
   }
   assert(fs.existsSync(distMain), 'dist/main.js not found; run npm run build first');
+  if (mode === '--dispatch-timeout-replay') {
+    await smokeDispatchTimeoutReplay();
+    return;
+  }
   if (mode === '--loopback') {
     await smokeLoopbackRuntime();
     return;

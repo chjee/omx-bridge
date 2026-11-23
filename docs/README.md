@@ -8,6 +8,7 @@ index navigational; detailed procedures belong in the linked documents.
 | Question | Read |
 | --- | --- |
 | How should bridge maintenance work proceed? | [`agent-workflow.md`](agent-workflow.md) |
+| What improvements are planned and how will they be verified? | [`bridge-improvement-plan.md`](bridge-improvement-plan.md) |
 | Which verification lane applies before merge or release? | [`release-verification.md`](release-verification.md) |
 | How do I run deployed or loopback runtime smoke checks? | [`runtime-smoke.md`](runtime-smoke.md) |
 | Who owns completion routing and callback delivery? | [`routing-contract.md`](routing-contract.md) |

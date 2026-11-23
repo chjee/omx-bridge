@@ -140,7 +140,7 @@ describe('JobNotifyService', () => {
     expect(repoMock.current.notifyOutcome).toEqual(outcome);
   });
 
-  it('persists notify outcomes into notifyHistory with sequential attempt indexes', async () => {
+  it('keeps the latest ten outcomes with sequential indexes after twelve attempts', async () => {
     const job = createJob();
     const repoMock = createRepoMock(job);
     const service = new JobNotifyService(
@@ -148,19 +148,62 @@ describe('JobNotifyService', () => {
       repoMock.repo,
     );
 
-    const firstOutcome = await service.notifyJobComplete(job);
-    const secondOutcome = await service.notifyJobComplete(repoMock.current);
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await service.notifyJobComplete(job);
+    }
 
-    expect(repoMock.current.notifyHistory).toHaveLength(2);
-    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([0, 1]);
-    expect(repoMock.current.notifyHistory?.[0]).toEqual(firstOutcome);
-    expect(repoMock.current.notifyHistory?.[1]).toEqual(secondOutcome);
-    expect(repoMock.current.notifyOutcome).toEqual(secondOutcome);
+    const history = repoMock.current.notifyHistory;
+    expect(history?.map((entry) => entry.attemptIndex)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(repoMock.current.notifyOutcome?.attemptIndex).toBe(11);
+    expect(repoMock.current.notifyOutcome).toEqual(history?.at(-1));
   });
 
-  it('serializes concurrent notify outcome persistence for the same job', async () => {
+  it.each([
+    { indexes: [Number.MAX_SAFE_INTEGER, 0, 2], next: 1 },
+    { indexes: [10, 10, undefined, -1, 1.5, 2 ** 53, 3], next: 11 },
+    { indexes: [undefined, -1], next: 2 },
+    { indexes: [undefined, 0, undefined], next: 1 },
+    { indexes: [], next: 0 },
+  ])('assigns index $next for stored indexes $indexes', async ({ indexes, next }) => {
     const job = createJob();
-    const repoMock = createRepoMock(job);
+    const history = indexes.map((attemptIndex) => ({
+      attemptedAt: job.createdAt,
+      mode: 'openclaw' as const,
+      ...(attemptIndex === undefined ? {} : { attemptIndex }),
+    }));
+    const repoMock = createRepoMock({ ...job, notifyHistory: history });
+    const service = new JobNotifyService(createConfig({ notifyMode: 'openclaw' }), repoMock.repo);
+
+    const outcome = await service.notifyJobComplete(job);
+
+    expect(outcome.attemptIndex).toBe(next);
+    expect(repoMock.current.notifyHistory).toEqual([...history, outcome]);
+    expect(repoMock.current.notifyOutcome).toEqual(outcome);
+  });
+
+  it('assigns safe indexes across the rollover without renumbering stored attempts', async () => {
+    const max = Number.MAX_SAFE_INTEGER;
+    const job = createJob();
+    const initial = { mode: 'openclaw' as const, attemptedAt: job.createdAt, attemptIndex: max - 1 };
+    const repoMock = createRepoMock({ ...job, notifyHistory: [initial] });
+    const service = new JobNotifyService(createConfig({ notifyMode: 'openclaw', telegram: undefined }), repoMock.repo);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await service.notifyJobComplete(job);
+    }
+
+    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([max - 1, max, 0, 1]);
+    expect(repoMock.current.notifyOutcome?.attemptIndex).toBe(1);
+  });
+
+  it.each([
+    { last: 9, appended: [10, 11] },
+    { last: Number.MAX_SAFE_INTEGER, appended: [9, 0] },
+  ])('serializes concurrent attempts with a full history ending at $last', async ({ last, appended }) => {
+    const job = createJob();
+    const indexes = [0, 1, 2, 3, 4, 5, 6, 7, 8, last];
+    const initial = indexes.map((attemptIndex) => ({ attemptedAt: job.createdAt, mode: 'openclaw' as const, attemptIndex }));
+    const repoMock = createRepoMock({ ...job, notifyHistory: initial });
     const service = new JobNotifyService(
       createConfig({ notifyMode: 'openclaw', telegram: undefined }),
       repoMock.repo,
@@ -171,11 +214,12 @@ describe('JobNotifyService', () => {
       service.notifyJobComplete(job, { trigger: 'manual' }),
     ]);
 
-    expect(repoMock.current.notifyHistory).toHaveLength(2);
-    expect(repoMock.current.notifyHistory?.map((entry) => entry.attemptIndex)).toEqual([0, 1]);
-    expect(repoMock.current.notifyHistory?.map((entry) => entry.trigger)).toEqual(['auto', 'manual']);
-    expect(repoMock.current.notifyHistory).toEqual([autoOutcome, manualOutcome]);
-    expect(repoMock.current.notifyOutcome).toEqual(manualOutcome);
+    const history = repoMock.current.notifyHistory;
+    expect(history?.map((entry) => entry.attemptIndex)).toEqual([...indexes.slice(2), ...appended]);
+    expect(autoOutcome.trigger).toBe('auto');
+    expect(manualOutcome.trigger).toBe('manual');
+    expect(history?.slice(-2)).toEqual(expect.arrayContaining([autoOutcome, manualOutcome]));
+    expect(repoMock.current.notifyOutcome).toEqual(history?.at(-1));
   });
 
   it('marks manually triggered notify outcomes', async () => {

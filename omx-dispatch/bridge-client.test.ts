@@ -83,6 +83,61 @@ test("formats non-JSON error response details", async () => {
   );
 });
 
+test("requestJson preserves an upstream abort before headers", async () => {
+  const upstreamError = new DOMException("upstream aborted", "AbortError");
+  const fetchImpl: BridgeFetch = async (_url, init) => {
+    assert.equal(init.signal?.aborted, false);
+    throw upstreamError;
+  };
+  const client = new BridgeClient({ baseUrl: "http://localhost", timeoutMs: 100, fetchImpl });
+  await assert.rejects(client.requestJson("jobs/1"), (error) => error === upstreamError);
+});
+
+test("requestJson preserves a body error that occurs before the timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const bodyError = new DOMException("body stream aborted", "AbortError");
+  let signal: AbortSignal | null | undefined;
+  const fetchImpl: BridgeFetch = async (_url, init) => {
+    signal = init?.signal;
+    const response = new Response();
+    response.text = async () => { throw bodyError; };
+    return response;
+  };
+  const client = new BridgeClient({ baseUrl: "http://localhost", timeoutMs: 100, fetchImpl });
+  await assert.rejects(client.requestJson("jobs/1"), (error) => error === bodyError);
+  t.mock.timers.tick(100);
+  assert.ok(signal);
+  assert.equal(signal.aborted, false);
+});
+
+test("requestJson times out a pending body at the original request deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let bodySignal: AbortSignal | undefined;
+  const fetchImpl: BridgeFetch = async (_url, init) => {
+    const signal = init?.signal;
+    assert.ok(signal);
+    t.mock.timers.tick(40);
+    const response = new Response();
+    response.text = () => {
+      bodySignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    return response;
+  };
+  const client = new BridgeClient({ baseUrl: "http://localhost", timeoutMs: 100, fetchImpl });
+  const request = client.requestJson("jobs/1");
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(bodySignal, "response body read has started");
+  t.mock.timers.tick(59);
+  assert.equal(bodySignal.aborted, false);
+  t.mock.timers.tick(1);
+  assert.equal(bodySignal.aborted, true, "original request deadline must abort the body read");
+  await assert.rejects(request, { message: "Bridge request timed out after 100ms" });
+});
+
 test("turns aborts into bridge timeout errors", async () => {
   const fetchImpl: BridgeFetch = async (_url, init) => new Promise((_resolve, reject) => {
     init.signal?.addEventListener(
