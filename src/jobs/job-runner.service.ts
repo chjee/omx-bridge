@@ -10,6 +10,11 @@ import { TmuxSessionRunnerService } from './tmux-session-runner.service';
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
 const TMUX_RUNNER_UNAVAILABLE_MESSAGE = 'executionMode=tmux requires tmux session runner support.';
 
+// Shared only by slots launched by one tick. A later submission gets its own observation.
+interface PollCycle {
+  queueWasEmpty: boolean;
+}
+
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -227,10 +232,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return attempted;
   }
 
-  async runOnce(): Promise<boolean> {
+  async runOnce(cycle?: PollCycle): Promise<boolean> {
     let reconciled: number;
     try {
-      reconciled = await this.reconcileRunningTmuxJobs();
+      reconciled = await this.reconcileRunningTmuxJobs(cycle);
     } catch (error) {
       if (this.shuttingDown) {
         return false;
@@ -240,7 +245,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (this.shuttingDown) {
       return reconciled > 0;
     }
-    const claimed = await this.claimNext();
+    const claimed = await this.claimNext(cycle);
     if (!claimed) {
       return reconciled > 0;
     }
@@ -289,8 +294,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const slots = this.config.maxConcurrency - this.inFlight.size;
+    const cycle: PollCycle = { queueWasEmpty: false };
     for (let i = 0; i < slots; i++) {
-      void this.runOnce().catch((error) => {
+      void this.runOnce(cycle).catch((error) => {
         this.logger.warn(`Job poll failed: ${String(error)}`);
       });
     }
@@ -298,7 +304,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   // 클레임 단계는 직렬화: size 체크와 job snapshot + inFlight.add가 한 임계영역에서 일어나야
   // 동시 호출 시 같은 잡이 중복 클레임되지 않는다.
-  private async claimNext(): Promise<BridgeJob | null> {
+  private async claimNext(cycle?: PollCycle): Promise<BridgeJob | null> {
     let release!: () => void;
     const next = new Promise<void>((resolve) => {
       release = resolve;
@@ -310,10 +316,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       if (this.shuttingDown) {
         return null;
       }
-      if (this.inFlight.size >= this.config.maxConcurrency) {
+      if (cycle?.queueWasEmpty || this.inFlight.size >= this.config.maxConcurrency) {
         return null;
       }
-      const jobs = await this.repository.listAll();
+      const jobs = await this.readPollJobs(cycle);
       if (this.shuttingDown) {
         return null;
       }
@@ -471,12 +477,18 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async reconcileRunningTmuxJobs(): Promise<number> {
+  private async readPollJobs(cycle?: PollCycle): Promise<BridgeJob[]> {
+    const jobs = await this.repository.listAll();
+    if (cycle) cycle.queueWasEmpty = !jobs.some(job => job.status === 'queued');
+    return jobs;
+  }
+
+  private async reconcileRunningTmuxJobs(cycle?: PollCycle): Promise<number> {
     if (this.tmuxReconcilePromise) {
       await this.tmuxReconcilePromise;
       return 0;
     }
-    const reconcile = this.performRunningTmuxReconciliation();
+    const reconcile = this.performRunningTmuxReconciliation(cycle);
     this.tmuxReconcilePromise = reconcile;
     try {
       return await reconcile;
@@ -485,12 +497,12 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async performRunningTmuxReconciliation(): Promise<number> {
+  private async performRunningTmuxReconciliation(cycle?: PollCycle): Promise<number> {
     if (this.pendingTmuxStarts.size > 0) await this.retryPendingTmuxStarts(true);
-    const runningJobs = await this.repository.listByStatus('running');
+    const jobs = await this.readPollJobs(cycle);
     let completed = 0;
-    for (const job of runningJobs) {
-      if (job.executionMode !== 'tmux' || this.pendingTmuxStarts.has(job.id)) {
+    for (const job of jobs) {
+      if (job.status !== 'running' || job.executionMode !== 'tmux' || this.pendingTmuxStarts.has(job.id)) {
         continue;
       }
       if (await this.collectTmuxJob(job) === 'completed') {
