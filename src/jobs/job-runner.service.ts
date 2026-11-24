@@ -129,11 +129,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     for (const job of runningJobs) {
       if (this.pendingTmuxStarts.has(job.id)) continue;
       if (job.executionMode === 'tmux') {
-        const collected = await this.collectTmuxJob(job);
-        if (collected) {
-          continue;
-        }
-        if (job.session?.status === 'running') {
+        const collection = await this.collectTmuxJob(job);
+        if (collection !== 'no-result' || job.session?.status === 'running') {
           continue;
         }
       }
@@ -496,17 +493,23 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       if (job.executionMode !== 'tmux' || this.pendingTmuxStarts.has(job.id)) {
         continue;
       }
-      if (await this.collectTmuxJob(job)) {
+      if (await this.collectTmuxJob(job) === 'completed') {
         completed += 1;
       }
     }
     return completed;
   }
 
-  private async collectTmuxJob(job: BridgeJob): Promise<boolean> {
-    const collected = await this.tmuxSessionRunner?.collect(job);
+  private async collectTmuxJob(job: BridgeJob): Promise<'completed' | 'no-result' | 'retry'> {
+    let collected;
+    try {
+      collected = await this.tmuxSessionRunner?.collect(job);
+    } catch (error) {
+      this.logger.warn(`Failed to collect tmux result for job ${job.id}: ${String(error)}`);
+      return 'retry';
+    }
     if (!collected) {
-      return false;
+      return 'no-result';
     }
 
     const transition = await this.repository.transition(job.id, ['running'], (latestJob) => ({
@@ -519,9 +522,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       execution: collected.result.execution,
       session: collected.session,
     }));
-    if (!transition.transitioned || !transition.job) return false;
+    if (!transition.transitioned || !transition.job) return 'no-result';
     this.trackCompletionNotification(transition.job);
-    return true;
+    return 'completed';
   }
 
   private async markRunningJobFailed(jobId: string, error: unknown, notify = true): Promise<void> {

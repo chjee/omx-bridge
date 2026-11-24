@@ -282,6 +282,12 @@ function createSuccessShim(dir) {
   return filePath;
 }
 
+function createCountingExecShim(dir) {
+  const shim = path.join(dir, 'count-exec.sh');
+  writeExecutable(shim, '#!/bin/sh\nset -e\nprintf "exec\\n" >> "$0.calls"\ncat >/dev/null\n');
+  return shim;
+}
+
 function createLiveOmxShim(dir) {
   const filePath = path.join(dir, 'fake-omx-live.sh');
   writeExecutable(filePath, [
@@ -2113,6 +2119,105 @@ async function smokeTmuxPendingRecoveryRuntime() {
   log('tmux pending recovery runtime smoke passed');
 }
 
+async function smokeTmuxCollectionFailureIsolationRuntime() {
+  const tempDir = makeTempDir('omx-bridge-smoke-tmux-collection-');
+  let bridge;
+  let failed = false;
+  try {
+    const jobsDir = path.join(tempDir, 'jobs');
+    const tmuxSessionsDir = path.join(tempDir, 'sessions');
+    const fakeTmuxStateDir = path.join(tempDir, 'fake-tmux-state');
+    const aId = '60000000-0000-4000-a000-000000000096';
+    const aSessionName = 'omx-bridge-' + aId.replace(/-/g, '').slice(0, 24);
+    const aSessionDir = path.join(tmuxSessionsDir, aId);
+    const aExitCode = path.join(aSessionDir, 'exit-code');
+    const notify = await startNotifyServer();
+    const createdAt = new Date(Date.now() - 2_000).toISOString();
+    const startedAt = new Date(Date.now() - 1_000).toISOString();
+    const aJob = {
+      id: aId,
+      prompt: 'runtime smoke unreadable tmux result',
+      executionMode: 'tmux',
+      queueOrder: '0000000000001-000001',
+      status: 'running',
+      createdAt,
+      startedAt,
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      notifyUrl: 'http://127.0.0.1:' + notify.port + '/notify',
+      execution: { command: 'tmux', timeoutMs: 60_000, maxOutputChars: 32_000 },
+      session: {
+        backend: 'tmux',
+        sessionName: aSessionName,
+        status: 'running',
+        createdAt: startedAt,
+        updatedAt: startedAt,
+        attachCommand: 'tmux attach -t ' + aSessionName,
+      },
+    };
+    fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(aSessionDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(fakeTmuxStateDir, { recursive: true });
+    fs.writeFileSync(path.join(jobsDir, aId + '.json'), JSON.stringify(aJob) + '\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(aSessionDir, 'session.json'), JSON.stringify(aJob.session) + '\n', { mode: 0o600 });
+    fs.mkdirSync(aExitCode); // readFile fails with EISDIR, including under privileged CI.
+    fs.writeFileSync(path.join(fakeTmuxStateDir, aSessionName + '.running'), '');
+    const shim = createCountingExecShim(tempDir);
+
+    const port = await getFreePort();
+    bridge = startBridge({
+      port,
+      jobsDir,
+      omxCommand: shim,
+      tmuxCommand: createFakeTmuxShim(tempDir),
+      tmuxSessionsDir,
+      allowedCwdPrefixes: tempDir,
+      omxEnvAllowlist: 'PATH,FAKE_TMUX_STATE_DIR',
+      bridgeEnv: {
+        FAKE_TMUX_STATE_DIR: fakeTmuxStateDir,
+        CLAUDE_NOTIFY_URL: 'http://127.0.0.1:' + notify.port + '/notify',
+        BRIDGE_MAX_CONCURRENCY: '2',
+        BRIDGE_JOB_POLL_INTERVAL_MS: '50',
+        BRIDGE_JOB_TIMEOUT_MS: '60000',
+      },
+    });
+    await waitForBridge(port);
+    const bSubmit = await requestJson(port, 'POST', '/jobs', {
+      prompt: 'runtime smoke queued work proceeds after tmux collect failure',
+      requestId: 'runtime-smoke-tmux-collection-b',
+      source: 'dispatch',
+      cwd: tempDir,
+    });
+    const bJob = await waitForNotifyOutcome(port, bSubmit.jobId);
+    assertEqual(bJob.status, 'succeeded', 'queued job B did not finish after A collection failure', compactJobDiagnostic(bJob));
+    const unreadableA = await requestJson(port, 'GET', '/jobs/' + encodeURIComponent(aId));
+    assertEqual(unreadableA.status, 'running', 'A became terminal while its result was unreadable', compactJobDiagnostic(unreadableA));
+    assertEqual(notify.requests.length, 1, 'A emitted a completion notification before its result was readable', compactNotifyRequests(notify.requests));
+    assertEqual(notify.requests[0]?.json?.id, bSubmit.jobId, 'first completion notification was not B', compactNotifyRequests(notify.requests));
+
+    fs.writeFileSync(path.join(aSessionDir, 'stdout.log'), 'A_RESULT\n', { mode: 0o600 });
+    const restoredExitCode = path.join(tempDir, 'restored-exit-code');
+    fs.writeFileSync(restoredExitCode, '0\n', { mode: 0o600 });
+    fs.rmdirSync(aExitCode);
+    fs.renameSync(restoredExitCode, aExitCode);
+    const aJobAfterRestore = await waitForNotifyOutcome(port, aId);
+    assertEqual(aJobAfterRestore.status, 'succeeded', 'A did not recover after its result became readable', compactJobDiagnostic(aJobAfterRestore));
+    assertEqual(aJobAfterRestore.stdout, 'A_RESULT\n', 'A recovered with unexpected stdout', compactJobDiagnostic(aJobAfterRestore));
+    assertEqual(notify.requests.length, 2, 'A completion notification count mismatch after recovery', compactNotifyRequests(notify.requests));
+    assertEqual(notify.requests[1]?.json?.id, aId, 'second completion notification was not A', compactNotifyRequests(notify.requests));
+    assertEqual(fs.readFileSync(`${shim}.calls`, 'utf8'), 'exec\n', 'actual B execution count');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('tmux collection failure isolation runtime smoke', tempDir, [bridge].filter(Boolean));
+    throw error;
+  } finally {
+    await stopChild(bridge);
+    cleanupTempDir(tempDir, failed);
+  }
+  log('tmux collection failure isolation runtime smoke passed');
+}
+
 async function connectDispatchClient(bridgePort, webhookPort, tempDir, requestTimeoutMs = 10_000) {
   const { Client } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/index.js'));
   const { StdioClientTransport } = require(dispatchRequire.resolve('@modelcontextprotocol/sdk/client/stdio.js'));
@@ -2210,7 +2315,6 @@ function parseToolJson(result) {
 async function smokeDispatchTimeoutReplay() {
   const tempDir = makeTempDir('omx-bridge-smoke-timeout-replay-');
   const jobsDir = path.join(tempDir, 'jobs');
-  const shim = path.join(tempDir, 'count-exec.sh');
   const timeoutMs = 1_500;
   const acceptedIds = [];
   let heldSocket;
@@ -2219,7 +2323,7 @@ async function smokeDispatchTimeoutReplay() {
   let proxy;
   let failed = false;
   try {
-    writeExecutable(shim, '#!/bin/sh\nset -e\nprintf "exec\\n" >> "$0.calls"\ncat >/dev/null\n');
+    const shim = createCountingExecShim(tempDir);
     const port = await getFreePort();
     bridge = startBridge({ port, jobsDir, omxCommand: shim });
     await waitForBridge(port);
@@ -2428,6 +2532,7 @@ async function smokeLoopbackRuntime() {
   await smokeTmuxCancelRuntime();
   await smokeTmuxTimeoutRuntime();
   await smokeTmuxPendingRecoveryRuntime();
+  await smokeTmuxCollectionFailureIsolationRuntime();
   await smokeDispatchMcp();
   await smokeDispatchTimeoutReplay();
   await smokeOpenClawPluginDiscovery();
