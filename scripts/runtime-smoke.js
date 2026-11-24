@@ -2360,6 +2360,57 @@ async function smokeDispatchMcp() {
   log('omx-dispatch MCP health and submit-and-wait passed');
 }
 
+async function smokeDispatchStoredNotificationWait() {
+  const tempDir = makeTempDir('omx-bridge-smoke-dispatch-stored-');
+  const replay = { prompt: 'replay B', source: 'dispatch', requestId: 'stored-replay-b' };
+  const receivedAt = new Date().toISOString();
+  const storedJobs = [
+    { ...replay, id: 'stored-b', status: 'succeeded', stdout: 'B output', exitCode: 0 },
+    { id: 'stored-a', status: 'succeeded', stdout: 'A output', exitCode: 0 },
+  ];
+  const requests = [];
+  // An accepted replay returns B's existing ID. Any bridge read would fail.
+  const server = http.createServer((req, res) => {
+    req.resume();
+    requests.push(`${req.method} ${req.url}`);
+    if (req.method === 'POST' && req.url === '/jobs') {
+      res.writeHead(202, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ jobId: 'stored-b', status: 'succeeded' }));
+    } else {
+      res.writeHead(503);
+      res.end();
+    }
+  });
+  let client;
+  let failed = false;
+  try {
+    fs.writeFileSync(path.join(tempDir, 'notifications.jsonl'),
+      storedJobs.map(job => JSON.stringify({ receivedAt, job })).join('\n') + '\n', { mode: 0o600 });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    client = await connectDispatchClient(server.address().port, await getFreePort(), tempDir);
+
+    const a = parseToolJson(await client.callTool({ name: 'omx_wait_for_job', arguments: { jobId: 'stored-a' } }));
+    assertEqual(a.job.id, 'stored-a', 'wait returned the wrong stored job');
+    assertEqual(a.job.stdout, 'A output', 'stored A output');
+    assertEqual(requests.length, 0, 'wait with a stored result contacted the bridge');
+
+    const b = parseToolJson(await client.callTool({ name: 'omx_submit_job_and_wait', arguments: replay }));
+    assertEqual(b.job.id, 'stored-b', 'submit-and-wait returned the wrong stored job');
+    assertEqual(b.job.stdout, 'B output', 'B notification was lost while waiting for A');
+    assertEqual(requests.join(', '), 'POST /jobs', 'submit-and-wait should only send its submission');
+  } catch (error) {
+    failed = true;
+    printSmokeDiagnostics('Dispatch stored notification wait', tempDir, []);
+    throw error;
+  } finally {
+    await client?.close().catch(() => undefined);
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    cleanupTempDir(tempDir, failed);
+  }
+  log('Dispatch served both stored results with one submission POST and zero GETs');
+}
+
 function parseToolJson(result) {
   const text = result?.content?.[0]?.text;
   assert(typeof text === 'string', 'MCP tool did not return text content');
@@ -2588,6 +2639,7 @@ async function smokeLoopbackRuntime() {
   await smokeTmuxPendingRecoveryRuntime();
   await smokeTmuxCollectionFailureIsolationRuntime();
   await smokeDispatchMcp();
+  await smokeDispatchStoredNotificationWait();
   await smokeDispatchTimeoutReplay();
   await smokeOpenClawPluginDiscovery();
   log('runtime smoke passed');
