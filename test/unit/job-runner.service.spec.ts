@@ -820,7 +820,7 @@ describe('JobRunnerService', () => {
     expect(releaseLock).toHaveBeenCalledTimes(1);
   });
 
-  it('isolates tmux reconciliation rejection during shutdown and clears the guard', async () => {
+  it('drains a failed tmux collection during shutdown and clears the guard', async () => {
     const runningTmuxJob = createJob({
       executionMode: 'tmux',
       status: 'running',
@@ -868,7 +868,7 @@ describe('JobRunnerService', () => {
     }).reconcileRunningTmuxJobs()).resolves.toBe(0);
 
     expect(stateWhileCollectPending).toEqual({ destroySettled: false, releaseCalls: 0 });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('tmux reconciliation'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${runningTmuxJob.id}: Error: tmux reconcile failed`));
     expect(collect).toHaveBeenCalledTimes(2);
     expect(execute).not.toHaveBeenCalled();
     expect(releaseLock).toHaveBeenCalledTimes(1);
@@ -1305,6 +1305,83 @@ describe('JobRunnerService', () => {
     expect(listByStatus).toHaveBeenCalledTimes(1);
     await expect(reconcile()).resolves.toBe(0);
     expect(listByStatus).toHaveBeenCalledTimes(2);
+  });
+
+  describe('tmux result collection failures', () => {
+    it.each([
+      ['poll', 2, 'running'],
+      ['poll', 1, 'running'],
+      ['restart', 2, 'running'],
+      ['restart', 2, 'starting'],
+    ] as const)('%s with %i slots preserves the unreadable %s session', async (entry, slots, sessionStatus) => {
+      config.maxConcurrency = slots;
+      config.jobPollIntervalMs = 60_000;
+      const now = new Date().toISOString();
+      const a = createJob({
+        executionMode: 'tmux', status: 'running', startedAt: now,
+        session: {
+          backend: 'tmux', sessionName: 'session-a', status: sessionStatus,
+          attachCommand: 'tmux attach -t session-a', createdAt: now, updatedAt: now,
+        },
+      });
+      const b = createJob({ id: '00000000-0000-4000-a000-000000000002', prompt: 'job B' });
+      await repository.save(a);
+      await repository.save(b);
+      const exitFile = path.join(config.tmuxSessionsDirectory, a.id, 'exit-code');
+      // A directory in place of the exit file makes readFile fail even when CI runs as root.
+      await fs.mkdir(exitFile, { recursive: true });
+      const execute = jest.fn().mockResolvedValue(createExecutionResult());
+      const notify = jest.fn().mockResolvedValue(undefined);
+      const tmux = new TmuxSessionRunnerService(config, jest.fn());
+      const runner = new JobRunnerService(
+        repository, { execute } as unknown as OmxExecService,
+        { notifyJobComplete: notify } as unknown as JobNotifyService, config, tmux,
+      );
+      const polls = jest.spyOn(runner, 'runOnce');
+      const collect = jest.spyOn(tmux, 'collect');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      const notificationsForA = () => notify.mock.calls.filter(([job]) => job.id === a.id).length;
+      try {
+        if (entry === 'restart') await runner.onModuleInit();
+        else await runner.runOnce();
+        // Include the first startup tick and the follow-up tick triggered when B finishes.
+        for (const poll of polls.mock.results) await poll.value;
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(new RegExp(a.id + '.*EISDIR')));
+        await expect(repository.getById(a.id)).resolves.toEqual(a);
+        expect(notificationsForA()).toBe(0);
+        expect(execute).toHaveBeenCalledTimes(slots === 2 ? 1 : 0);
+        await expect(repository.getById(b.id)).resolves.toMatchObject({ status: slots === 2 ? 'succeeded' : 'queued' });
+
+        await fs.rmdir(exitFile);
+        await fs.writeFile(exitFile, '0\n');
+        await fs.writeFile(path.join(path.dirname(exitFile), 'stdout.log'), 'result A');
+        collect.mockClear();
+        await runner.runOnce();
+        await runner.runOnce();
+        for (const poll of polls.mock.results) await poll.value;
+        expect(collect).toHaveBeenCalledTimes(1);
+        await expect(repository.getById(a.id)).resolves.toMatchObject({
+          status: 'succeeded', stdout: 'result A', exitCode: 0, session: { status: 'exited' },
+        });
+        expect(notificationsForA()).toBe(1);
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenCalledWith(b.prompt, expect.anything());
+      } finally {
+        await runner.onModuleDestroy();
+        warn.mockRestore();
+      }
+    });
+
+    it.each(['poll', 'restart'])('propagates a running list read failure during %s', async (entry) => {
+      const error = new Error('running job list unreadable');
+      jest.spyOn(repository, 'listByStatus').mockRejectedValueOnce(error);
+      const runner = new JobRunnerService(repository, {} as OmxExecService, mockJobNotify, config);
+      try {
+        await expect(entry === 'poll' ? runner.runOnce() : runner.onModuleInit()).rejects.toBe(error);
+      } finally {
+        await runner.onModuleDestroy();
+      }
+    });
   });
 
   describe('scheduled runner recovery', () => {
