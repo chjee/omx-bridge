@@ -2,7 +2,22 @@
 
 ## [Unreleased]
 
-## [0.1.4] - Release candidate
+## [0.1.5] - Release candidate
+
+- Recover unlinked tmux starts across restarts and preserve a winning cancel
+  or completion callback. A failed collection can retry while other jobs use
+  free slots, including during startup recovery.
+- Hold a timed-out job's slot until tmux termination succeeds or the session is
+  confirmed absent. A normal result recorded before the retry can still win.
+- Serve a stored Dispatch completion without a bridge GET. A notification miss
+  now needs one GET on the first poll.
+- With 1,000 retained jobs, concurrency 2 and 500 ms polling, idle scans fell
+  from 3 to 1 per tick and idle p95 from 309.89 to 117.65 ms. The 25 ms budget
+  was the threshold for starting the optimization.
+- Before downgrading to v0.1.4, drain pending tmux starts on the new version.
+  See the [release notes and rollback check](docs/release-notes-v0.1.5.md).
+
+## [0.1.4] - 2026-11-23
 
 ### Fixed
 

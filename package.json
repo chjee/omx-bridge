@@ -1,6 +1,6 @@
 {
   "name": "omx-bridge",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "description": "OpenClaw to OMX bridge service",
   "license": "MIT",
