@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
@@ -12,6 +13,7 @@ import { CwdBoundaryError, resolveAllowedExecutionCwd } from './cwd-boundary';
 import type { BridgeJob, OmxExecutionResult, TmuxSessionState } from './job.types';
 import { buildOmxExecArgs } from './omx-exec-args';
 import {
+  assertPrivateOwnedFile,
   assertPrivateOwnedDirectory,
   ensurePrivateOwnedDirectory,
   JOB_ID_PATTERN,
@@ -84,6 +86,9 @@ const STDERR_FILE = 'stderr.log';
 const EXIT_CODE_FILE = 'exit-code';
 const RUNNER_FILE = 'run.sh';
 const SESSION_FILE = 'session.json';
+const CLEANUP_PENDING_FILE = 'cleanup-pending.json';
+const CLEANUP_PENDING_TEMP_FILE_PATTERN = /^cleanup-pending\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
+const CANONICAL_SESSION_NAME_PATTERN = /^omx-bridge-[0-9a-f]{24}$/;
 const EXIT_CODE_GRACE_MS = 100;
 const EXIT_CODE_GRACE_INTERVAL_MS = 10;
 const SESSION_FILES = new Set([
@@ -93,6 +98,7 @@ const SESSION_FILES = new Set([
   EXIT_CODE_FILE,
   RUNNER_FILE,
   SESSION_FILE,
+  CLEANUP_PENDING_FILE,
   TMUX_CAPTURE_WRAPPER_FILE,
   TMUX_CAPTURE_METADATA_FILE,
   TMUX_CAPTURE_STDOUT_TAIL_FILE,
@@ -151,6 +157,7 @@ export class TmuxSessionRunnerService {
       encoding: 'utf8',
       mode: 0o700,
     });
+    await this.writePendingStart(job.id, sessionName);
 
     const args = [
       'new-session',
@@ -172,6 +179,104 @@ export class TmuxSessionRunnerService {
     };
     await this.writeSessionState(job.id, runningSession);
     return runningSession;
+  }
+
+  async listPendingStarts(): Promise<string[]> {
+    await this.ensureReady();
+    const entries = await fs.readdir(this.config.tmuxSessionsDirectory, { withFileTypes: true });
+    const pendingIds: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !JOB_ID_PATTERN.test(entry.name)) {
+        continue;
+      }
+      try {
+        await fs.lstat(this.pendingStartFile(entry.name));
+        pendingIds.push(entry.name);
+      } catch (error) {
+        if (!this.isMissingFile(error)) {
+          throw error;
+        }
+      }
+    }
+    return pendingIds.sort();
+  }
+
+  async readPendingStart(jobId: string): Promise<string | null> {
+    if (!JOB_ID_PATTERN.test(jobId)) {
+      throw new Error(`Invalid pending tmux job id: ${jobId}`);
+    }
+    await this.ensureReady();
+    if (!await this.assertExistingSessionDirectory(jobId)) {
+      return null;
+    }
+    const markerPath = this.pendingStartFile(jobId);
+    let raw: string;
+    try {
+      await assertPrivateOwnedFile(markerPath, 'Bridge tmux pending cleanup marker');
+      raw = await fs.readFile(markerPath, 'utf8');
+    } catch (error) {
+      if (this.isMissingFile(error)) {
+        return null;
+      }
+      throw error;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`Invalid pending tmux cleanup marker for ${jobId}`);
+    }
+    if (!this.isPendingStart(parsed, jobId)) {
+      throw new Error(`Invalid pending tmux cleanup marker for ${jobId}`);
+    }
+    return parsed.sessionName;
+  }
+
+  async clearPendingStart(jobId: string): Promise<void> {
+    if (!JOB_ID_PATTERN.test(jobId)) {
+      throw new Error(`Invalid pending tmux job id: ${jobId}`);
+    }
+    await this.ensureReady();
+    if (!await this.assertExistingSessionDirectory(jobId)) {
+      return;
+    }
+    const markerPath = this.pendingStartFile(jobId);
+    try {
+      await assertPrivateOwnedFile(markerPath, 'Bridge tmux pending cleanup marker');
+      await fs.rm(markerPath);
+    } catch (error) {
+      if (!this.isMissingFile(error)) {
+        throw error;
+      }
+    }
+  }
+
+  async reclaimPendingSession(sessionName: string): Promise<boolean> {
+    if (!CANONICAL_SESSION_NAME_PATTERN.test(sessionName)) {
+      throw new Error(`Invalid pending tmux session name: ${sessionName}`);
+    }
+    const target = `=${sessionName}`;
+    const beforeKill = await this.sessionLiveness(target);
+    if (beforeKill === 'missing') {
+      return true;
+    }
+    if (beforeKill === 'unknown') {
+      throw new Error(`Unable to determine tmux session status: ${sessionName}`);
+    }
+
+    const killed = await this.runTmux(['kill-session', '-t', target]);
+    if (killed.code === 0) {
+      return true;
+    }
+
+    const afterFailedKill = await this.sessionLiveness(target);
+    if (afterFailedKill === 'missing') {
+      return true;
+    }
+    if (afterFailedKill === 'unknown') {
+      throw new Error(`Unable to determine tmux session status after cleanup: ${sessionName}`);
+    }
+    return false;
   }
 
   async collect(job: BridgeJob): Promise<TmuxCollectResult | null> {
@@ -328,10 +433,13 @@ export class TmuxSessionRunnerService {
       await assertPrivateOwnedDirectory(
         directory,
         'Bridge tmux cleanup directory',
-        (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+        (entry) => entry.isFile() && this.isSessionFile(entry.name),
       );
     } catch (error) {
       return { jobId, status: 'failed', detail: this.describeError(error) };
+    }
+    if (await this.hasPendingStartMarker(jobId)) {
+      return { jobId, status: 'liveness_unknown', detail: 'pending_cleanup' };
     }
 
     const sessionName = await this.readPersistedSessionName(jobId);
@@ -347,7 +455,7 @@ export class TmuxSessionRunnerService {
       await assertPrivateOwnedDirectory(
         directory,
         'Bridge tmux cleanup directory',
-        (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+        (entry) => entry.isFile() && this.isSessionFile(entry.name),
       );
       const finalStat = await fs.lstat(directory);
       if (finalStat.dev !== stat.dev || finalStat.ino !== stat.ino) {
@@ -446,6 +554,13 @@ export class TmuxSessionRunnerService {
   private async hasSession(sessionName: string): Promise<boolean> {
     const result = await this.runTmux(['has-session', '-t', sessionName]);
     return result.code === 0;
+  }
+
+  private async sessionLiveness(target: string): Promise<'live' | 'missing' | 'unknown'> {
+    const result = await this.runTmux(['has-session', '-t', target]);
+    if (result.code === 0) return 'live';
+    if (this.isConfirmedMissingSession(result)) return 'missing';
+    return 'unknown';
   }
 
   private runTmux(args: readonly string[]): Promise<TmuxCommandResult> {
@@ -695,7 +810,14 @@ export class TmuxSessionRunnerService {
   }
 
   private isConfirmedMissingSession(result: TmuxCommandResult): boolean {
-    return result.code === 1 && /can't find session|no such (?:fake )?session|no server running/i.test(result.stderr);
+    if (result.code !== 1) {
+      return false;
+    }
+    const diagnostic = result.stderr.trim();
+    return /^can't find session(?:: .*)?$/i.test(diagnostic) ||
+      /^no such (?:fake )?session(?::.*)?$/i.test(diagnostic) ||
+      /^no server running(?: on .+)?$/i.test(diagnostic) ||
+      /^error connecting to \/.+ \(No such file or directory\)$/i.test(diagnostic);
   }
 
   private async writeSessionState(jobId: string, session: TmuxSessionState): Promise<void> {
@@ -738,8 +860,25 @@ export class TmuxSessionRunnerService {
     return ensurePrivateOwnedDirectory(
       directory,
       'Bridge tmux job directory',
-      (entry) => entry.isFile() && SESSION_FILES.has(entry.name),
+      (entry) => entry.isFile() && this.isSessionFile(entry.name),
     );
+  }
+
+  private async assertExistingSessionDirectory(jobId: string): Promise<boolean> {
+    const directory = this.sessionDirectory(jobId);
+    try {
+      await assertPrivateOwnedDirectory(
+        directory,
+        'Bridge tmux job directory',
+        (entry) => entry.isFile() && this.isSessionFile(entry.name),
+      );
+      return true;
+    } catch (error) {
+      if (this.isMissingFile(error)) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private durationMs(job: BridgeJob): number {
@@ -797,6 +936,54 @@ export class TmuxSessionRunnerService {
 
   private sessionFile(jobId: string): string {
     return path.join(this.sessionDirectory(jobId), SESSION_FILE);
+  }
+
+  private pendingStartFile(jobId: string): string {
+    return path.join(this.sessionDirectory(jobId), CLEANUP_PENDING_FILE);
+  }
+
+  private async writePendingStart(jobId: string, sessionName: string): Promise<void> {
+    const targetPath = this.pendingStartFile(jobId);
+    const temporaryPath = path.join(
+      this.sessionDirectory(jobId),
+      `cleanup-pending.${randomUUID()}.tmp`,
+    );
+    try {
+      await fs.writeFile(temporaryPath, `${JSON.stringify({ jobId, sessionName })}\n`, {
+        encoding: 'utf8',
+        mode: PRIVATE_FILE_MODE,
+        flag: 'wx',
+      });
+      await fs.rename(temporaryPath, targetPath);
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private isPendingStart(value: unknown, jobId: string): value is { jobId: string; sessionName: string } {
+    if (typeof value !== 'object' || value === null) return false;
+    const record = value as Record<string, unknown>;
+    return Object.keys(record).length === 2 &&
+      record.jobId === jobId &&
+      typeof record.sessionName === 'string' &&
+      record.sessionName === this.buildSessionName(jobId);
+  }
+
+  private isSessionFile(fileName: string): boolean {
+    return SESSION_FILES.has(fileName) || CLEANUP_PENDING_TEMP_FILE_PATTERN.test(fileName);
+  }
+
+  private async hasPendingStartMarker(jobId: string): Promise<boolean> {
+    try {
+      const marker = await fs.lstat(this.pendingStartFile(jobId));
+      return marker.isFile() && !marker.isSymbolicLink();
+    } catch (error) {
+      if (this.isMissingFile(error)) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   private shellQuote(value: string): string {

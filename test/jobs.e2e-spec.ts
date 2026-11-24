@@ -87,6 +87,8 @@ class FakeOmxExecService {
 
 class FakeTmuxSessionRunnerService {
   public readonly startedJobIds: string[] = [];
+  readonly listPendingStarts = jest.fn().mockResolvedValue([]);
+  readonly clearPendingStart = jest.fn().mockResolvedValue(undefined);
 
   async start(job: BridgeJob): Promise<NonNullable<BridgeJob['session']>> {
     this.startedJobIds.push(job.id);

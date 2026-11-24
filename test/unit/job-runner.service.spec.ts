@@ -1480,6 +1480,7 @@ describe('JobRunnerService', () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
     const tmuxSessionRunner = {
       collect: jest.fn().mockResolvedValue(null),
+      clearPendingStart: jest.fn().mockResolvedValue(undefined),
       start: jest.fn().mockResolvedValue({
         backend: 'tmux',
         sessionName: 'omx-bridge-test',
@@ -1858,7 +1859,7 @@ describe('JobRunnerService', () => {
       { execute: jest.fn() } as unknown as OmxExecService,
       mockJobNotify,
       config,
-      { ensureReady, collect: jest.fn().mockResolvedValue(null) } as unknown as TmuxSessionRunnerService,
+      { ensureReady, listPendingStarts: async () => [], collect: async () => null } as unknown as TmuxSessionRunnerService,
     );
 
     try {
