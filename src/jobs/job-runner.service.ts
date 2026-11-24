@@ -17,6 +17,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
   private readonly inFlightRuns = new Map<string, Promise<void>>();
+  // Rebuilt from on-disk start markers at boot. In-flight starts own their marker until handoff.
+  private readonly pendingTmuxStarts = new Set<string>();
   private readonly completionNotifications = new Map<string, Promise<void>>();
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
@@ -38,6 +40,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     await this.instanceLock?.acquire();
     await this.repository.ensureReady();
     await this.tmuxSessionRunner?.ensureReady?.();
+    for (const id of await this.tmuxSessionRunner?.listPendingStarts() ?? []) {
+      this.pendingTmuxStarts.add(id);
+    }
+    // Startup's terminal notification scan delivers newly recovered failures.
+    await this.retryPendingTmuxStarts(false);
     await this.recoverInterruptedJobs();
     await this.cleanupTerminalJobs();
     void this.reconcileTerminalNotifications().catch((error) => {
@@ -120,6 +127,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   async recoverInterruptedJobs(): Promise<void> {
     const runningJobs = await this.repository.listByStatus('running');
     for (const job of runningJobs) {
+      if (this.pendingTmuxStarts.has(job.id)) continue;
       if (job.executionMode === 'tmux') {
         const collected = await this.collectTmuxJob(job);
         if (collected) {
@@ -160,6 +168,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     const result = await this.repository.cleanupTerminalJobs({
       retentionDays: this.config.jobRetentionDays,
       maxTerminalJobs: this.config.maxTerminalJobs,
+      protectedJobIds: this.pendingTmuxStarts,
     });
     if (result.deleted > 0) {
       this.logger.log(
@@ -313,11 +322,12 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       }
       const queuedJobs = jobs.filter((job) => job.status === 'queued');
       const runningJobs = jobs.filter((job) => job.status === 'running');
-      const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
-      if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
+      const occupied = new Set([...this.inFlight, ...this.pendingTmuxStarts]);
+      for (const job of runningJobs) occupied.add(job.id);
+      if (occupied.size >= this.config.maxConcurrency) {
         return null;
       }
-      const candidate = queuedJobs.find((job) => !this.inFlight.has(job.id));
+      const candidate = queuedJobs.find((job) => !occupied.has(job.id));
       if (!candidate) {
         return null;
       }
@@ -413,18 +423,54 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   private async startTmuxJob(job: BridgeJob): Promise<void> {
     this.logger.log(`Starting tmux job ${job.id}`);
-    const runningJob = job;
 
     if (!this.tmuxSessionRunner) {
       await this.markRunningJobFailed(job.id, new Error(TMUX_RUNNER_UNAVAILABLE_MESSAGE));
       return;
     }
 
+    this.pendingTmuxStarts.add(job.id);
     try {
-      const session = await this.tmuxSessionRunner.start(runningJob);
-      await this.repository.transition(job.id, ['running'], (current) => ({ ...current, session }));
+      const session = await this.tmuxSessionRunner.start(job);
+      const attached = await this.repository.transition(job.id, ['running'], (current) => ({ ...current, session }));
+      if (attached.transitioned) {
+        await this.tmuxSessionRunner.clearPendingStart(job.id);
+        this.pendingTmuxStarts.delete(job.id);
+        return;
+      }
     } catch (error) {
-      await this.markRunningJobFailed(job.id, error);
+      await this.resolvePendingTmuxStart(job.id, error, true);
+      return;
+    }
+    await this.resolvePendingTmuxStart(job.id, 'Job completed during tmux startup', true);
+  }
+
+  private async retryPendingTmuxStarts(notify: boolean): Promise<void> {
+    for (const id of this.pendingTmuxStarts) {
+      if (this.inFlight.has(id)) continue;
+      await this.resolvePendingTmuxStart(id, 'Tmux startup interrupted before session attachment', notify);
+    }
+  }
+
+  private async resolvePendingTmuxStart(id: string, startError: unknown, notify: boolean): Promise<void> {
+    const tmux = this.tmuxSessionRunner!;
+    try {
+      const sessionName = await tmux.readPendingStart(id);
+      const job = await this.repository.getById(id);
+      if (job?.session && sessionName && job.session.sessionName !== sessionName) {
+        throw new Error('Pending tmux session differs from stored job session');
+      }
+      if (!job?.session) {
+        if (sessionName && !await tmux.reclaimPendingSession(sessionName)) {
+          throw new Error('Unable to confirm tmux session termination');
+        }
+        if (job?.status === 'running') await this.markRunningJobFailed(id, startError, notify);
+      }
+      // A matching attached session is owned by its job, even after a crash before unlink.
+      if (sessionName) await tmux.clearPendingStart(id);
+      this.pendingTmuxStarts.delete(id);
+    } catch (error) {
+      this.logger.warn(`Tmux start recovery pending for ${id}: ${String(error)}`);
     }
   }
 
@@ -443,10 +489,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async performRunningTmuxReconciliation(): Promise<number> {
+    if (this.pendingTmuxStarts.size > 0) await this.retryPendingTmuxStarts(true);
     const runningJobs = await this.repository.listByStatus('running');
     let completed = 0;
     for (const job of runningJobs) {
-      if (job.executionMode !== 'tmux') {
+      if (job.executionMode !== 'tmux' || this.pendingTmuxStarts.has(job.id)) {
         continue;
       }
       if (await this.collectTmuxJob(job)) {
@@ -477,7 +524,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
-  private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {
+  private async markRunningJobFailed(jobId: string, error: unknown, notify = true): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const transition = await this.repository.transition(jobId, ['running'], (latestJob) => ({
       ...latestJob,
@@ -492,7 +539,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }));
     if (!transition.transitioned || !transition.job) return;
     this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
-    this.trackCompletionNotification(transition.job);
+    if (notify) this.trackCompletionNotification(transition.job);
   }
 
   trackCompletionNotification(job: BridgeJob): void {

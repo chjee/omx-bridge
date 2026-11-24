@@ -415,6 +415,17 @@ describe('JobQueueRepository', () => {
     await expect(repository.getById(TEST_ID_2)).resolves.toMatchObject({ status: 'failed' });
   });
 
+  it('retains an expired terminal result while its tmux session still needs recovery', async () => {
+    const cancelled = createJob({ status: 'cancelled', executionMode: 'tmux' });
+    await repository.save(cancelled);
+    const protectedJobIds = new Set([cancelled.id]);
+    const options = { retentionDays: 1, maxTerminalJobs: 0, now: new Date('2026-05-01'), protectedJobIds };
+    await expect(repository.cleanupTerminalJobs(options)).resolves.toMatchObject({ deleted: 0, retained: 1 });
+    await expect(repository.getById(cancelled.id)).resolves.toEqual(cancelled);
+    protectedJobIds.clear();
+    await expect(repository.cleanupTerminalJobs(options)).resolves.toMatchObject({ deleted: 1, retained: 0 });
+  });
+
   it('uses createdAt as the cleanup age for terminal jobs with blank finishedAt', async () => {
     await repository.save(createJob({
       id: TEST_ID_1,
