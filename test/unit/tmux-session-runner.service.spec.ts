@@ -1018,7 +1018,7 @@ describe('TmuxSessionRunnerService', () => {
     });
     expect(spawnFn).toHaveBeenCalledWith(
       'tmux',
-      ['kill-session', '-t', 'omx-bridge-test'],
+      ['kill-session', '-t', '=omx-bridge-test'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
   });

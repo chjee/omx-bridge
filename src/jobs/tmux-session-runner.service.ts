@@ -255,15 +255,18 @@ export class TmuxSessionRunnerService {
     if (!CANONICAL_SESSION_NAME_PATTERN.test(sessionName)) {
       throw new Error(`Invalid pending tmux session name: ${sessionName}`);
     }
-    const target = `=${sessionName}`;
-    const beforeKill = await this.sessionLiveness(target);
+    const beforeKill = await this.sessionLiveness(`=${sessionName}`);
     if (beforeKill === 'missing') {
       return true;
     }
     if (beforeKill === 'unknown') {
       throw new Error(`Unable to determine tmux session status: ${sessionName}`);
     }
+    return this.killAndConfirmSessionGone(sessionName);
+  }
 
+  private async killAndConfirmSessionGone(sessionName: string): Promise<boolean> {
+    const target = `=${sessionName}`;
     const killed = await this.runTmux(['kill-session', '-t', target]);
     if (killed.code === 0) {
       return true;
@@ -321,7 +324,9 @@ export class TmuxSessionRunnerService {
     }
 
     if (this.isTimedOut(job)) {
-      await this.runTmux(['kill-session', '-t', job.session.sessionName]);
+      if (!await this.killAndConfirmSessionGone(job.session.sessionName)) {
+        throw new Error(`Timed-out tmux session is still running: ${job.session.sessionName}`);
+      }
       const capture = await this.readCaptureMetadata(job.id);
       const stdout = await this.readCaptureOutput(this.stdoutFile(job.id), this.stdoutTailFile(job.id), capture?.stdout);
       const stderr = await this.readCaptureOutput(this.stderrFile(job.id), this.stderrTailFile(job.id), capture?.stderr);
