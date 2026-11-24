@@ -1307,6 +1307,90 @@ describe('JobRunnerService', () => {
     expect(listByStatus).toHaveBeenCalledTimes(2);
   });
 
+  describe('tmux timeout confirmation', () => {
+    it.each([
+      ['exit already recorded', 'success', 0],
+      ['kill succeeds', 'timeout', 1],
+      ['session absent after failed kill', 'timeout', 1],
+      ['still live', 'timeout', 2],
+      ['liveness unknown', 'timeout', 2],
+      ['still live', 'success', 1],
+    ] as const)('%s ends in %s with %i kill commands', async (first, outcome, expectedKills) => {
+      config.maxConcurrency = 1;
+      const startedAt = new Date(Date.now() - config.jobTimeoutMs - 1000).toISOString();
+      const a = createJob({
+        status: 'running', executionMode: 'tmux', startedAt,
+        session: {
+          backend: 'tmux', sessionName: 'session-a', status: 'running',
+          createdAt: startedAt, updatedAt: startedAt, attachCommand: 'tmux attach -t session-a',
+        },
+      });
+      const b = createJob({ id: '00000000-0000-4000-a000-000000000002', prompt: 'job B' });
+      await repository.save(a);
+      await repository.save(b);
+      const directory = path.join(config.tmuxSessionsDirectory, a.id);
+      const exitFile = path.join(directory, 'exit-code');
+      await fs.mkdir(directory, { recursive: true });
+      const sessionFile = path.join(directory, 'session.json');
+      await fs.writeFile(sessionFile, JSON.stringify(a.session));
+      await fs.writeFile(path.join(directory, 'stdout.log'), 'A output');
+      if (first === 'exit already recorded') await fs.writeFile(exitFile, '0\n');
+
+      let kills = 0;
+      let probes = 0;
+      const spawn: TmuxSpawnFunction = (_command, args = []) => {
+        if (args[0] === 'kill-session') {
+          kills++;
+          return kills > 1 || first === 'kill succeeds' ? tmuxProbe(0, '') : tmuxProbe(1, 'kill failed');
+        }
+        if (args[0] !== 'has-session') throw new Error('Unexpected tmux command');
+        probes++;
+        if (first === 'still live') return tmuxProbe(0, '');
+        if (first === 'session absent after failed kill') return tmuxProbe(1, "can't find session: session-a");
+        return tmuxProbe(1, 'permission denied');
+      };
+      const execute = jest.fn().mockResolvedValue(createExecutionResult());
+      const notify = jest.fn().mockResolvedValue(undefined);
+      const runner = new JobRunnerService(
+        repository, { execute } as unknown as OmxExecService, { notifyJobComplete: notify } as unknown as JobNotifyService,
+        config, new TmuxSessionRunnerService(config, spawn),
+      );
+      const notificationsForA = () => notify.mock.calls.filter(([job]) => job.id === a.id).length;
+      try {
+        await runner.runOnce();
+        if (first === 'still live' || first === 'liveness unknown') {
+          await expect(repository.getById(a.id)).resolves.toEqual(a);
+          expect(JSON.parse(await fs.readFile(sessionFile, 'utf8'))).toEqual(a.session);
+          await expect(repository.getById(b.id)).resolves.toMatchObject({ status: 'queued' });
+          expect(notificationsForA()).toBe(0);
+          expect(execute).not.toHaveBeenCalled();
+          expect(kills).toBe(1);
+          expect(probes).toBe(1);
+          if (outcome === 'success') await fs.writeFile(exitFile, '0\n');
+          await runner.runOnce();
+        }
+        await runner.runOnce(); // A terminal job must not be killed or announced again.
+        const result = await repository.getById(a.id);
+        if (outcome === 'success') {
+          expect(result).toMatchObject({ status: 'succeeded', stdout: 'A output', exitCode: 0 });
+          expect(result?.execution.timedOut).not.toBe(true);
+        } else {
+          expect(result).toMatchObject({
+            status: 'failed', exitCode: null, stdout: 'A output',
+            execution: { errorType: 'timeout', timedOut: true },
+          });
+        }
+        expect(kills).toBe(expectedKills);
+        expect(probes).toBe(first === 'kill succeeds' || first === 'exit already recorded' ? 0 : 1);
+        expect(notificationsForA()).toBe(1);
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenCalledWith(b.prompt, expect.anything());
+      } finally {
+        await runner.onModuleDestroy();
+      }
+    });
+  });
+
   describe('tmux result collection failures', () => {
     it.each([
       ['poll', 2, 'running'],
