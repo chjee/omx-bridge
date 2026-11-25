@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { BridgeHttpError } from "./bridge-client.js";
 import { CallbackConflictError, JobOperations, type JobOperationsConfig } from "./job-operations.js";
-import type { JobNotification, NotificationStats } from "./notification-store.js";
+import { NotificationStore, type JobNotification, type NotificationStats } from "./notification-store.js";
 import type { BridgeJob, JobStatus } from "./tool-handlers.js";
+import { normalizeNotification } from "./webhook-codec.js";
 
 interface CapturedRequest {
   path: string;
@@ -242,27 +246,73 @@ test("reports bridge health as reachable or unreachable while preserving notific
   });
 });
 
-test("wait returns a matching notification before polling terminal fallback", async () => {
-  const notificationJob = createJob({ id: "job-1", status: "succeeded", stdout: "done" });
-  const { operations, requests } = createOperations({
-    requestJson: async () => createJob({ id: "job-1", status: "running" }),
-    drainNotificationForJob: async () => createNotification(notificationJob),
+test("offline waits consume only their own persisted results without a GET", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "dispatch-wait-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = new NotificationStore<BridgeJob>({
+    storePath: path.join(dir, "notifications.jsonl"), maxQueueSize: 10, lockStaleMs: 30_000,
+    lockTimeoutMs: 5_000, previewMax: 2, previewTextMax: 128, normalizeNotification,
   });
+  const a = createJob({ id: "job-a", status: "succeeded", stdout: "output A", exitCode: 0 });
+  const b = createJob({ id: "job-b", status: "failed", stderr: "error B", exitCode: 1 });
+  await store.enqueue(createNotification(b));
+  await store.enqueue(createNotification(a));
+  const { operations, requests } = createOperations({
+    requestJson: async () => { throw new Error("bridge offline"); },
+    drainNotificationForJob: (id) => store.drainForJob(id),
+  });
+  for (const job of [a, b]) {
+    const result = await operations.waitForJobCompletion(job.id);
+    assert.equal(result.jobId, job.id);
+    assert.equal(result.job.id, job.id);
+    assert.equal(result.status, job.status);
+    assert.equal(result.job.stdout, job.stdout);
+    assert.equal(result.job.stderr, job.stderr);
+    assert.equal(result.job.exitCode, job.exitCode);
+    assert.deepEqual(result.notification?.job, result.job);
+    assert.equal(result.completed, true);
+    assert.equal(result.timedOut, false);
+    assert.equal(requests.length, 0);
+  }
+  assert.equal((await store.getStats()).pending, 0);
+});
 
-  const result = await operations.waitForJobCompletion("job-1", { waitTimeoutMs: 1000 });
-
+test("wait polls once on a miss and consumes a notification arriving before the next poll", async () => {
+  const notification = createNotification(createJob({ status: "succeeded", stdout: "finished" }));
+  let pending: JobNotification<BridgeJob> | null = null;
+  const { operations, requests } = createOperations({
+    requestJson: async () => createJob({ status: "running" }),
+    drainNotificationForJob: async () => pending,
+    sleep: async () => {
+      assert.equal(requests.length, 1, "first poll must issue exactly one request");
+      pending = notification;
+    },
+  });
+  const result = await operations.waitForJobCompletion(notification.job.id);
+  assert.deepEqual(result.notification, notification);
   assert.equal(result.status, "succeeded");
-  assert.equal(result.completed, true);
-  assert.equal(result.timedOut, false);
-  assert.equal(result.notification?.job.stdout, "done");
+  assert.deepEqual(requests.map(({ path, init }) => [path, init?.method]), [["jobs/job-1", "GET"]]);
+});
+
+test("wait propagates the original GET error after a notification miss", async () => {
+  const offline = new Error("bridge offline");
+  const drained: string[] = [];
+  const { operations, requests, sleeps } = createOperations({
+    requestJson: async () => { throw offline; },
+    drainNotificationForJob: async (id) => { drained.push(id); return null; },
+  });
+  await assert.rejects(operations.waitForJobCompletion("job-1"), (error) => error === offline);
+  assert.deepEqual(drained, ["job-1"]);
   assert.equal(requests.length, 1);
+  assert.deepEqual(sleeps, []);
 });
 
 test("wait reports missing notification after terminal grace", async () => {
-  const timeline = [0, 0, 250, 500];
-  const { operations, sleeps } = createOperations({
+  let elapsed = 0;
+  const { operations, requests } = createOperations({
     requestJson: async () => createJob({ id: "job-1", status: "succeeded", stdout: "done" }),
-    now: () => timeline.shift() ?? 500,
+    now: () => elapsed,
+    sleep: async (ms) => { elapsed += ms; },
   });
 
   const result = await operations.waitForJobCompletion("job-1", { waitTimeoutMs: 5_000, pollIntervalMs: 1_000 });
@@ -271,14 +321,16 @@ test("wait reports missing notification after terminal grace", async () => {
   assert.equal(result.completed, true);
   assert.equal(result.timedOut, false);
   assert.equal(result.notificationMissing, true);
-  assert.deepEqual(sleeps, [250]);
+  assert.equal(elapsed, 500);
+  assert.equal(requests.length, 3); // At 0, 250 and 500 ms.
 });
 
 test("wait times out when the bridge job remains non-terminal", async () => {
-  const timeline = [0, 500, 1_000];
-  const { operations, sleeps } = createOperations({
+  let elapsed = 0;
+  const { operations, requests } = createOperations({
     requestJson: async () => createJob({ id: "job-1", status: "running" }),
-    now: () => timeline.shift() ?? 1_000,
+    now: () => elapsed,
+    sleep: async (ms) => { elapsed += ms; },
   });
 
   const result = await operations.waitForJobCompletion("job-1", { waitTimeoutMs: 1_000, pollIntervalMs: 500 });
@@ -287,5 +339,6 @@ test("wait times out when the bridge job remains non-terminal", async () => {
   assert.equal(result.completed, false);
   assert.equal(result.timedOut, true);
   assert.equal(result.notification, null);
-  assert.deepEqual(sleeps, [500]);
+  assert.equal(elapsed, 1_000);
+  assert.equal(requests.length, 3); // At 0, 500 and 1000 ms.
 });

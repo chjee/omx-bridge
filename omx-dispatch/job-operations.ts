@@ -164,7 +164,6 @@ export class JobOperations {
   ): Promise<WaitForJobResult> {
     const { waitTimeoutMs, pollIntervalMs } = this.resolveWaitOptions(options);
     const deadline = this.now() + waitTimeoutMs;
-    let latestJob = await this.getBridgeJob(jobId);
     let terminalObservedAt: number | undefined;
 
     while (true) {
@@ -180,7 +179,7 @@ export class JobOperations {
         };
       }
 
-      latestJob = await this.getBridgeJob(jobId);
+      const latestJob = await this.getBridgeJob(jobId);
       if (isTerminalJobStatus(latestJob.status)) {
         terminalObservedAt ??= this.now();
         if (this.now() - terminalObservedAt >= this.config.terminalNotificationGraceMs) {

@@ -32,6 +32,7 @@ export interface CleanupTerminalJobsOptions {
   retentionDays: number;
   maxTerminalJobs: number;
   now?: Date;
+  protectedJobIds?: ReadonlySet<string>;
 }
 
 export interface CleanupTerminalJobsResult {
@@ -176,16 +177,17 @@ export class JobQueueRepository {
       .filter((job) => TERMINAL_STATUSES.has(job.status))
       .sort((left, right) => this.terminalSortKey(left).localeCompare(this.terminalSortKey(right)));
 
+    const eligible = terminalJobs.filter((job) => !options.protectedJobIds?.has(job.id));
     const deleteIds = new Set<string>();
-    for (const job of terminalJobs) {
+    for (const job of eligible) {
       const terminalAtMs = this.terminalTimestampMs(job);
       if (Number.isFinite(terminalAtMs) && terminalAtMs < cutoffMs) {
         deleteIds.add(job.id);
       }
     }
 
-    const remainingAfterAge = terminalJobs.filter((job) => !deleteIds.has(job.id));
-    const overflow = Math.max(0, remainingAfterAge.length - options.maxTerminalJobs);
+    const remainingAfterAge = eligible.filter((job) => !deleteIds.has(job.id));
+    const overflow = Math.max(0, terminalJobs.length - deleteIds.size - options.maxTerminalJobs);
     for (const job of remainingAfterAge.slice(0, overflow)) {
       deleteIds.add(job.id);
     }

@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 import type { BridgeConfig } from '../../src/config/bridge-config';
 import { JobQueueRepository } from '../../src/jobs/job-queue.repository';
 import { JobRunnerService } from '../../src/jobs/job-runner.service';
+import { JobsService } from '../../src/jobs/jobs.service';
 import type { BridgeJob, OmxExecutionResult } from '../../src/jobs/job.types';
 import type { OmxExecService } from '../../src/jobs/omx-exec.service';
 import type { JobNotifyService } from '../../src/jobs/job-notify.service';
@@ -820,7 +821,7 @@ describe('JobRunnerService', () => {
     expect(releaseLock).toHaveBeenCalledTimes(1);
   });
 
-  it('isolates tmux reconciliation rejection during shutdown and clears the guard', async () => {
+  it('drains a failed tmux collection during shutdown and clears the guard', async () => {
     const runningTmuxJob = createJob({
       executionMode: 'tmux',
       status: 'running',
@@ -868,7 +869,7 @@ describe('JobRunnerService', () => {
     }).reconcileRunningTmuxJobs()).resolves.toBe(0);
 
     expect(stateWhileCollectPending).toEqual({ destroySettled: false, releaseCalls: 0 });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('tmux reconciliation'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`${runningTmuxJob.id}: Error: tmux reconcile failed`));
     expect(collect).toHaveBeenCalledTimes(2);
     expect(execute).not.toHaveBeenCalled();
     expect(releaseLock).toHaveBeenCalledTimes(1);
@@ -888,7 +889,7 @@ describe('JobRunnerService', () => {
         },
       });
       await repository.save(runningTmuxJob);
-      jest.spyOn(repository, 'listByStatus').mockResolvedValue([runningTmuxJob]);
+      jest.spyOn(repository, 'listAll').mockResolvedValue([runningTmuxJob]);
       let releaseCollect!: () => void;
       const collected = {
         session: {
@@ -1225,6 +1226,94 @@ describe('JobRunnerService', () => {
     expect(listAll).toHaveBeenCalledTimes(1);
   });
 
+  it('uses one full job snapshot for an idle two-slot trigger', async () => {
+    config.maxConcurrency = 2;
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn() } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+    );
+    const listAll = jest.spyOn(repository, 'listAll');
+    const runs = jest.spyOn(runner, 'runOnce');
+    runner.trigger();
+    await Promise.all(runs.mock.results.map(result => result.value));
+    expect(listAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('wakes for concurrent submissions during a stale scan and reserves the external tmux slot', async () => {
+    config.maxConcurrency = 2;
+    const external = createJob({
+      id: '00000000-0000-4000-a000-000000000001',
+      executionMode: 'tmux',
+      status: 'running',
+      startedAt: '2026-04-02T00:00:00.000Z',
+      session: {
+        backend: 'tmux',
+        sessionName: 'external-tmux',
+        status: 'running',
+        createdAt: '2026-04-02T00:00:00.000Z',
+        updatedAt: '2026-04-02T00:00:00.000Z',
+        attachCommand: 'tmux attach -t external-tmux',
+      },
+    });
+    await repository.save(external);
+    const originalListAll = repository.listAll.bind(repository);
+    let releaseSnapshot!: () => void;
+    const snapshotHeld = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    let snapshotStarted!: () => void;
+    const snapshotRead = new Promise<void>((resolve) => { snapshotStarted = resolve; });
+    jest.spyOn(repository, 'listAll').mockImplementationOnce(async () => {
+      const snapshot = await originalListAll();
+      snapshotStarted();
+      await snapshotHeld;
+      return snapshot;
+    });
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    const firstExecution = new Promise<OmxExecutionResult>((resolve) => {
+      releaseFirst = () => resolve(createExecutionResult());
+    });
+    const runner = new JobRunnerService(
+      repository,
+      { execute: jest.fn((prompt: string) => {
+        started.push(prompt);
+        return prompt === 'first' ? firstExecution : Promise.resolve(createExecutionResult());
+      }) } as unknown as OmxExecService,
+      mockJobNotify,
+      config,
+      { collect: jest.fn().mockResolvedValue(null) } as unknown as TmuxSessionRunnerService,
+    );
+    const jobs = new JobsService(repository, runner, mockJobNotify, config);
+    const runs = jest.spyOn(runner, 'runOnce');
+    try {
+      runner.trigger();
+      await snapshotRead;
+      const [first, second] = await Promise.all([
+        jobs.createJob({ prompt: 'first', source: 'dispatch', requestId: 'first-request' }),
+        jobs.createJob({ prompt: 'second', source: 'dispatch', requestId: 'second-request' }),
+      ]);
+      releaseSnapshot();
+      await waitFor(() => Promise.resolve(started.length), count => count > 0);
+      const priorRuns = runs.mock.calls.length;
+      runner.trigger();
+      await Promise.all(runs.mock.results.slice(priorRuns).map(result => result.value));
+      expect(started).toEqual(['first']);
+      await expect(repository.getById(first.id)).resolves.toMatchObject({ status: 'running' });
+      await expect(repository.getById(second.id)).resolves.toMatchObject({ status: 'queued' });
+
+      releaseFirst();
+      for (const result of runs.mock.results) await result.value;
+      expect(started).toEqual(['first', 'second']);
+      await expect(repository.getById(second.id)).resolves.toMatchObject({ status: 'succeeded' });
+      await expect(repository.getById(external.id)).resolves.toEqual(external);
+    } finally {
+      releaseSnapshot();
+      releaseFirst();
+      await runner.onModuleDestroy();
+    }
+  });
+
   it('coalesces overlapping tmux reconciliation into one collect and one completion', async () => {
     const runningJob = createJob({
       executionMode: 'tmux',
@@ -1240,9 +1329,7 @@ describe('JobRunnerService', () => {
       },
     });
     await repository.save(runningJob);
-    jest.spyOn(repository, 'listByStatus').mockImplementation(async (status) => (
-      status === 'running' ? [runningJob] : []
-    ));
+    jest.spyOn(repository, 'listAll').mockResolvedValue([runningJob]);
     const collected = {
       session: {
         ...runningJob.session!,
@@ -1282,7 +1369,7 @@ describe('JobRunnerService', () => {
   });
 
   it('clears a rejected tmux reconcile guard so a later pass retries', async () => {
-    const listByStatus = jest.spyOn(repository, 'listByStatus')
+    const list = jest.spyOn(repository, 'listAll')
       .mockRejectedValueOnce(new Error('tmux scan failed'))
       .mockResolvedValue([]);
     const runner = new JobRunnerService(
@@ -1302,9 +1389,170 @@ describe('JobRunnerService', () => {
       expect.objectContaining({ status: 'rejected' }),
       expect.objectContaining({ status: 'rejected' }),
     ]);
-    expect(listByStatus).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledTimes(1);
     await expect(reconcile()).resolves.toBe(0);
-    expect(listByStatus).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  describe('tmux timeout confirmation', () => {
+    it.each([
+      ['exit already recorded', 'success', 0],
+      ['kill succeeds', 'timeout', 1],
+      ['session absent after failed kill', 'timeout', 1],
+      ['still live', 'timeout', 2],
+      ['liveness unknown', 'timeout', 2],
+      ['still live', 'success', 1],
+    ] as const)('%s ends in %s with %i kill commands', async (first, outcome, expectedKills) => {
+      config.maxConcurrency = 1;
+      const startedAt = new Date(Date.now() - config.jobTimeoutMs - 1000).toISOString();
+      const a = createJob({
+        status: 'running', executionMode: 'tmux', startedAt,
+        session: {
+          backend: 'tmux', sessionName: 'session-a', status: 'running',
+          createdAt: startedAt, updatedAt: startedAt, attachCommand: 'tmux attach -t session-a',
+        },
+      });
+      const b = createJob({ id: '00000000-0000-4000-a000-000000000002', prompt: 'job B' });
+      await repository.save(a);
+      await repository.save(b);
+      const directory = path.join(config.tmuxSessionsDirectory, a.id);
+      const exitFile = path.join(directory, 'exit-code');
+      await fs.mkdir(directory, { recursive: true });
+      const sessionFile = path.join(directory, 'session.json');
+      await fs.writeFile(sessionFile, JSON.stringify(a.session));
+      await fs.writeFile(path.join(directory, 'stdout.log'), 'A output');
+      if (first === 'exit already recorded') await fs.writeFile(exitFile, '0\n');
+
+      let kills = 0;
+      let probes = 0;
+      const spawn: TmuxSpawnFunction = (_command, args = []) => {
+        if (args[0] === 'kill-session') {
+          kills++;
+          return kills > 1 || first === 'kill succeeds' ? tmuxProbe(0, '') : tmuxProbe(1, 'kill failed');
+        }
+        if (args[0] !== 'has-session') throw new Error('Unexpected tmux command');
+        probes++;
+        if (first === 'still live') return tmuxProbe(0, '');
+        if (first === 'session absent after failed kill') return tmuxProbe(1, "can't find session: session-a");
+        return tmuxProbe(1, 'permission denied');
+      };
+      const execute = jest.fn().mockResolvedValue(createExecutionResult());
+      const notify = jest.fn().mockResolvedValue(undefined);
+      const runner = new JobRunnerService(
+        repository, { execute } as unknown as OmxExecService, { notifyJobComplete: notify } as unknown as JobNotifyService,
+        config, new TmuxSessionRunnerService(config, spawn),
+      );
+      const notificationsForA = () => notify.mock.calls.filter(([job]) => job.id === a.id).length;
+      try {
+        await runner.runOnce();
+        if (first === 'still live' || first === 'liveness unknown') {
+          await expect(repository.getById(a.id)).resolves.toEqual(a);
+          expect(JSON.parse(await fs.readFile(sessionFile, 'utf8'))).toEqual(a.session);
+          await expect(repository.getById(b.id)).resolves.toMatchObject({ status: 'queued' });
+          expect(notificationsForA()).toBe(0);
+          expect(execute).not.toHaveBeenCalled();
+          expect(kills).toBe(1);
+          expect(probes).toBe(1);
+          if (outcome === 'success') await fs.writeFile(exitFile, '0\n');
+          await runner.runOnce();
+        }
+        await runner.runOnce(); // A terminal job must not be killed or announced again.
+        const result = await repository.getById(a.id);
+        if (outcome === 'success') {
+          expect(result).toMatchObject({ status: 'succeeded', stdout: 'A output', exitCode: 0 });
+          expect(result?.execution.timedOut).not.toBe(true);
+        } else {
+          expect(result).toMatchObject({
+            status: 'failed', exitCode: null, stdout: 'A output',
+            execution: { errorType: 'timeout', timedOut: true },
+          });
+        }
+        expect(kills).toBe(expectedKills);
+        expect(probes).toBe(first === 'kill succeeds' || first === 'exit already recorded' ? 0 : 1);
+        expect(notificationsForA()).toBe(1);
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenCalledWith(b.prompt, expect.anything());
+      } finally {
+        await runner.onModuleDestroy();
+      }
+    });
+  });
+
+  describe('tmux result collection failures', () => {
+    it.each([
+      ['poll', 2, 'running'],
+      ['poll', 1, 'running'],
+      ['restart', 2, 'running'],
+      ['restart', 2, 'starting'],
+    ] as const)('%s with %i slots preserves the unreadable %s session', async (entry, slots, sessionStatus) => {
+      config.maxConcurrency = slots;
+      config.jobPollIntervalMs = 60_000;
+      const now = new Date().toISOString();
+      const a = createJob({
+        executionMode: 'tmux', status: 'running', startedAt: now,
+        session: {
+          backend: 'tmux', sessionName: 'session-a', status: sessionStatus,
+          attachCommand: 'tmux attach -t session-a', createdAt: now, updatedAt: now,
+        },
+      });
+      const b = createJob({ id: '00000000-0000-4000-a000-000000000002', prompt: 'job B' });
+      await repository.save(a);
+      await repository.save(b);
+      const exitFile = path.join(config.tmuxSessionsDirectory, a.id, 'exit-code');
+      // A directory in place of the exit file makes readFile fail even when CI runs as root.
+      await fs.mkdir(exitFile, { recursive: true });
+      const execute = jest.fn().mockResolvedValue(createExecutionResult());
+      const notify = jest.fn().mockResolvedValue(undefined);
+      const tmux = new TmuxSessionRunnerService(config, jest.fn());
+      const runner = new JobRunnerService(
+        repository, { execute } as unknown as OmxExecService,
+        { notifyJobComplete: notify } as unknown as JobNotifyService, config, tmux,
+      );
+      const polls = jest.spyOn(runner, 'runOnce');
+      const collect = jest.spyOn(tmux, 'collect');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      const notificationsForA = () => notify.mock.calls.filter(([job]) => job.id === a.id).length;
+      try {
+        if (entry === 'restart') await runner.onModuleInit();
+        else await runner.runOnce();
+        // Include the first startup tick and the follow-up tick triggered when B finishes.
+        for (const poll of polls.mock.results) await poll.value;
+        expect(warn).toHaveBeenCalledWith(expect.stringMatching(new RegExp(a.id + '.*EISDIR')));
+        await expect(repository.getById(a.id)).resolves.toEqual(a);
+        expect(notificationsForA()).toBe(0);
+        expect(execute).toHaveBeenCalledTimes(slots === 2 ? 1 : 0);
+        await expect(repository.getById(b.id)).resolves.toMatchObject({ status: slots === 2 ? 'succeeded' : 'queued' });
+
+        await fs.rmdir(exitFile);
+        await fs.writeFile(exitFile, '0\n');
+        await fs.writeFile(path.join(path.dirname(exitFile), 'stdout.log'), 'result A');
+        collect.mockClear();
+        await runner.runOnce();
+        await runner.runOnce();
+        for (const poll of polls.mock.results) await poll.value;
+        expect(collect).toHaveBeenCalledTimes(1);
+        await expect(repository.getById(a.id)).resolves.toMatchObject({
+          status: 'succeeded', stdout: 'result A', exitCode: 0, session: { status: 'exited' },
+        });
+        expect(notificationsForA()).toBe(1);
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(execute).toHaveBeenCalledWith(b.prompt, expect.anything());
+      } finally {
+        await runner.onModuleDestroy();
+        warn.mockRestore();
+      }
+    });
+
+    it.each(['poll', 'restart'])('propagates a running list read failure during %s', async (entry) => {
+      const error = new Error('running job list unreadable');
+      jest.spyOn(repository, 'listAll').mockRejectedValueOnce(error);
+      const runner = new JobRunnerService(repository, {} as OmxExecService, mockJobNotify, config);
+      try {
+        await expect(entry === 'poll' ? runner.runOnce() : runner.onModuleInit()).rejects.toBe(error);
+      } finally {
+        await runner.onModuleDestroy();
+      }
+    });
   });
 
   describe('scheduled runner recovery', () => {
@@ -1336,7 +1584,7 @@ describe('JobRunnerService', () => {
       await expect(run.mock.results[0].value).resolves.toBe(false);
 
       const job = await repository.save(createJob());
-      jest.spyOn(repository, 'listByStatus').mockRejectedValueOnce(new Error('queue lookup failed'));
+      jest.spyOn(repository, 'listAll').mockRejectedValueOnce(new Error('queue lookup failed'));
       await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs);
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/poll.*queue lookup failed/i));
       await jest.advanceTimersByTimeAsync(config.jobPollIntervalMs - 1);
@@ -1449,7 +1697,7 @@ describe('JobRunnerService', () => {
 
     it('propagates repository errors to direct callers and during initial cleanup', async () => {
       const error = new Error('storage unavailable');
-      jest.spyOn(repository, 'listByStatus').mockRejectedValueOnce(error);
+      jest.spyOn(repository, 'listAll').mockRejectedValueOnce(error);
       await expect(runner.runOnce()).rejects.toBe(error);
       jest.spyOn(repository, 'cleanupTerminalJobs').mockRejectedValue(error);
       await expect(runner.cleanupTerminalJobs()).rejects.toBe(error);
@@ -1480,6 +1728,7 @@ describe('JobRunnerService', () => {
     const execute = jest.fn().mockResolvedValue(createExecutionResult());
     const tmuxSessionRunner = {
       collect: jest.fn().mockResolvedValue(null),
+      clearPendingStart: jest.fn().mockResolvedValue(undefined),
       start: jest.fn().mockResolvedValue({
         backend: 'tmux',
         sessionName: 'omx-bridge-test',
@@ -1858,7 +2107,7 @@ describe('JobRunnerService', () => {
       { execute: jest.fn() } as unknown as OmxExecService,
       mockJobNotify,
       config,
-      { ensureReady, collect: jest.fn().mockResolvedValue(null) } as unknown as TmuxSessionRunnerService,
+      { ensureReady, listPendingStarts: async () => [], collect: async () => null } as unknown as TmuxSessionRunnerService,
     );
 
     try {

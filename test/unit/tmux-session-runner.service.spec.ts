@@ -1018,7 +1018,7 @@ describe('TmuxSessionRunnerService', () => {
     });
     expect(spawnFn).toHaveBeenCalledWith(
       'tmux',
-      ['kill-session', '-t', 'omx-bridge-test'],
+      ['kill-session', '-t', '=omx-bridge-test'],
       expect.objectContaining({ stdio: 'pipe' }),
     );
   });
@@ -1341,6 +1341,159 @@ describe('TmuxSessionRunnerService', () => {
 
     expect(collected?.result.stdout).not.toContain('\uFFFD');
     expect(collected?.result.stdout.length).toBeLessThanOrEqual(40);
+  });
+
+  it('writes a private pending cleanup marker before starting a tmux session', async () => {
+    const config = await createConfig();
+    const child = new MockChildProcess();
+    const service = new TmuxSessionRunnerService(config, jest.fn(() => {
+      setImmediate(() => child.emit('close', 0));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as TmuxSpawnFunction);
+    const job = createJob();
+
+    const session = await service.start(job);
+    const markerPath = path.join(config.tmuxSessionsDirectory, job.id, 'cleanup-pending.json');
+
+    await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
+      `${JSON.stringify({ jobId: job.id, sessionName: session.sessionName })}\n`,
+    );
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(markerPath)).mode & 0o777).toBe(0o600);
+    }
+    await expect(service.listPendingStarts()).resolves.toEqual([job.id]);
+    await expect(service.readPendingStart(job.id)).resolves.toBe(session.sessionName);
+    await expect(service.removeArtifacts(job.id, session.sessionName)).resolves.toEqual({
+      jobId: job.id,
+      status: 'liveness_unknown',
+      detail: 'pending_cleanup',
+    });
+    await service.clearPendingStart(job.id);
+    await expect(service.readPendingStart(job.id)).resolves.toBeNull();
+  });
+
+  it('fails closed on malformed pending cleanup markers', async () => {
+    const config = await createConfig();
+    const job = createJob();
+    const directory = path.join(config.tmuxSessionsDirectory, job.id);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'cleanup-pending.json'), JSON.stringify({
+      jobId: job.id,
+      sessionName: 'foreign-session',
+    }));
+    const service = new TmuxSessionRunnerService(
+      config,
+      jest.fn(() => new MockChildProcess() as unknown as ChildProcessWithoutNullStreams) as TmuxSpawnFunction,
+    );
+
+    await expect(service.readPendingStart(job.id)).rejects.toThrow('Invalid pending tmux cleanup marker');
+    await expect(service.reclaimPendingSession('foreign-session')).rejects.toThrow(
+      'Invalid pending tmux session name',
+    );
+  });
+
+  it('distinguishes missing, live, and unknown pending session cleanup outcomes', async () => {
+    const config = await createConfig();
+    const job = createJob();
+    const sessionName = canonicalSessionName(job.id);
+    const calls: string[][] = [];
+    const spawnFn = jest.fn((_command, args) => {
+      calls.push([...(args ?? [])]);
+      const child = new MockChildProcess();
+      setImmediate(() => {
+        if (calls.length === 1) {
+          child.stderr.write(`can't find session: ${sessionName}`);
+          child.emit('close', 1);
+        } else if (calls.length === 2 || calls.length === 3) {
+          child.emit('close', 0);
+        } else {
+          child.stderr.write('transport unavailable');
+          child.emit('close', 1);
+        }
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
+
+    await expect(service.reclaimPendingSession(sessionName)).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    await expect(service.reclaimPendingSession(sessionName)).resolves.toBe(true);
+    expect(calls[1]).toEqual(['has-session', '-t', `=${sessionName}`]);
+    expect(calls[2]).toEqual(['kill-session', '-t', `=${sessionName}`]);
+    await expect(service.reclaimPendingSession(sessionName)).rejects.toThrow(
+      'Unable to determine tmux session status',
+    );
+  });
+
+  it('rechecks liveness after a failed pending-session kill', async () => {
+    const config = await createConfig();
+    const job = createJob();
+    const sessionName = canonicalSessionName(job.id);
+    let calls = 0;
+    const spawnFn = jest.fn(() => {
+      const child = new MockChildProcess();
+      calls += 1;
+      setImmediate(() => {
+        if (calls === 1 || calls === 4 || calls === 6) {
+          child.emit('close', 0);
+        } else if (calls === 3) {
+          child.stderr.write(`can't find session: ${sessionName}`);
+          child.emit('close', 1);
+        } else {
+          child.stderr.write('permission denied');
+          child.emit('close', 1);
+        }
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const service = new TmuxSessionRunnerService(config, spawnFn as TmuxSpawnFunction);
+
+    await expect(service.reclaimPendingSession(sessionName)).resolves.toBe(true);
+    await expect(service.reclaimPendingSession(sessionName)).resolves.toBe(false);
+    expect(calls).toBe(6);
+  });
+
+  it('accepts an anchored missing tmux socket diagnostic as pending-session absence', async () => {
+    const config = await createConfig();
+    const sessionName = canonicalSessionName(createJob().id);
+    const service = new TmuxSessionRunnerService(config, jest.fn(() => {
+      const child = new MockChildProcess();
+      setImmediate(() => {
+        child.stderr.write(
+          'error connecting to /tmp/tmux-1000/server.sock (No such file or directory)',
+        );
+        child.emit('close', 1);
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as TmuxSpawnFunction);
+
+    await expect(service.reclaimPendingSession(sessionName)).resolves.toBe(true);
+  });
+
+  it('keeps pending-session liveness unknown for tmux permission and binary errors', async () => {
+    const config = await createConfig();
+    const sessionName = canonicalSessionName(createJob().id);
+    let calls = 0;
+    const service = new TmuxSessionRunnerService(config, jest.fn(() => {
+      const child = new MockChildProcess();
+      calls += 1;
+      setImmediate(() => {
+        if (calls === 1) {
+          child.stderr.write('error connecting to /tmp/tmux-1000/server.sock (Operation not permitted)');
+          child.emit('close', 1);
+          return;
+        }
+        child.emit('error', new Error('spawn tmux ENOENT'));
+      });
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as TmuxSpawnFunction);
+
+    await expect(service.reclaimPendingSession(sessionName)).rejects.toThrow(
+      'Unable to determine tmux session status',
+    );
+    await expect(service.reclaimPendingSession(sessionName)).rejects.toThrow(
+      'Unable to determine tmux session status',
+    );
   });
 
   it('sweeps only stale inactive orphan directories', async () => {

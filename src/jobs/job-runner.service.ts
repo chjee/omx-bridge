@@ -10,6 +10,11 @@ import { TmuxSessionRunnerService } from './tmux-session-runner.service';
 const RESTART_INTERRUPTED_MESSAGE = 'Process was interrupted by service restart before completion.';
 const TMUX_RUNNER_UNAVAILABLE_MESSAGE = 'executionMode=tmux requires tmux session runner support.';
 
+// Shared only by slots launched by one tick. A later submission gets its own observation.
+interface PollCycle {
+  queueWasEmpty: boolean;
+}
+
 @Injectable()
 export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(JobRunnerService.name);
@@ -17,6 +22,8 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly inFlight = new Set<string>();
   private readonly inFlightRuns = new Map<string, Promise<void>>();
+  // Rebuilt from on-disk start markers at boot. In-flight starts own their marker until handoff.
+  private readonly pendingTmuxStarts = new Set<string>();
   private readonly completionNotifications = new Map<string, Promise<void>>();
   private claimMutex: Promise<void> = Promise.resolve();
   private cleanupIntervalHandle?: NodeJS.Timeout;
@@ -38,6 +45,11 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     await this.instanceLock?.acquire();
     await this.repository.ensureReady();
     await this.tmuxSessionRunner?.ensureReady?.();
+    for (const id of await this.tmuxSessionRunner?.listPendingStarts() ?? []) {
+      this.pendingTmuxStarts.add(id);
+    }
+    // Startup's terminal notification scan delivers newly recovered failures.
+    await this.retryPendingTmuxStarts(false);
     await this.recoverInterruptedJobs();
     await this.cleanupTerminalJobs();
     void this.reconcileTerminalNotifications().catch((error) => {
@@ -120,12 +132,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
   async recoverInterruptedJobs(): Promise<void> {
     const runningJobs = await this.repository.listByStatus('running');
     for (const job of runningJobs) {
+      if (this.pendingTmuxStarts.has(job.id)) continue;
       if (job.executionMode === 'tmux') {
-        const collected = await this.collectTmuxJob(job);
-        if (collected) {
-          continue;
-        }
-        if (job.session?.status === 'running') {
+        const collection = await this.collectTmuxJob(job);
+        if (collection !== 'no-result' || job.session?.status === 'running') {
           continue;
         }
       }
@@ -160,6 +170,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     const result = await this.repository.cleanupTerminalJobs({
       retentionDays: this.config.jobRetentionDays,
       maxTerminalJobs: this.config.maxTerminalJobs,
+      protectedJobIds: this.pendingTmuxStarts,
     });
     if (result.deleted > 0) {
       this.logger.log(
@@ -221,10 +232,10 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     return attempted;
   }
 
-  async runOnce(): Promise<boolean> {
+  async runOnce(cycle?: PollCycle): Promise<boolean> {
     let reconciled: number;
     try {
-      reconciled = await this.reconcileRunningTmuxJobs();
+      reconciled = await this.reconcileRunningTmuxJobs(cycle);
     } catch (error) {
       if (this.shuttingDown) {
         return false;
@@ -234,7 +245,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     if (this.shuttingDown) {
       return reconciled > 0;
     }
-    const claimed = await this.claimNext();
+    const claimed = await this.claimNext(cycle);
     if (!claimed) {
       return reconciled > 0;
     }
@@ -283,8 +294,9 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const slots = this.config.maxConcurrency - this.inFlight.size;
+    const cycle: PollCycle = { queueWasEmpty: false };
     for (let i = 0; i < slots; i++) {
-      void this.runOnce().catch((error) => {
+      void this.runOnce(cycle).catch((error) => {
         this.logger.warn(`Job poll failed: ${String(error)}`);
       });
     }
@@ -292,7 +304,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   // 클레임 단계는 직렬화: size 체크와 job snapshot + inFlight.add가 한 임계영역에서 일어나야
   // 동시 호출 시 같은 잡이 중복 클레임되지 않는다.
-  private async claimNext(): Promise<BridgeJob | null> {
+  private async claimNext(cycle?: PollCycle): Promise<BridgeJob | null> {
     let release!: () => void;
     const next = new Promise<void>((resolve) => {
       release = resolve;
@@ -304,20 +316,21 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       if (this.shuttingDown) {
         return null;
       }
-      if (this.inFlight.size >= this.config.maxConcurrency) {
+      if (cycle?.queueWasEmpty || this.inFlight.size >= this.config.maxConcurrency) {
         return null;
       }
-      const jobs = await this.repository.listAll();
+      const jobs = await this.readPollJobs(cycle);
       if (this.shuttingDown) {
         return null;
       }
       const queuedJobs = jobs.filter((job) => job.status === 'queued');
       const runningJobs = jobs.filter((job) => job.status === 'running');
-      const externallyRunningCount = runningJobs.filter((job) => !this.inFlight.has(job.id)).length;
-      if (this.inFlight.size + externallyRunningCount >= this.config.maxConcurrency) {
+      const occupied = new Set([...this.inFlight, ...this.pendingTmuxStarts]);
+      for (const job of runningJobs) occupied.add(job.id);
+      if (occupied.size >= this.config.maxConcurrency) {
         return null;
       }
-      const candidate = queuedJobs.find((job) => !this.inFlight.has(job.id));
+      const candidate = queuedJobs.find((job) => !occupied.has(job.id));
       if (!candidate) {
         return null;
       }
@@ -413,27 +426,69 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
 
   private async startTmuxJob(job: BridgeJob): Promise<void> {
     this.logger.log(`Starting tmux job ${job.id}`);
-    const runningJob = job;
 
     if (!this.tmuxSessionRunner) {
       await this.markRunningJobFailed(job.id, new Error(TMUX_RUNNER_UNAVAILABLE_MESSAGE));
       return;
     }
 
+    this.pendingTmuxStarts.add(job.id);
     try {
-      const session = await this.tmuxSessionRunner.start(runningJob);
-      await this.repository.transition(job.id, ['running'], (current) => ({ ...current, session }));
+      const session = await this.tmuxSessionRunner.start(job);
+      const attached = await this.repository.transition(job.id, ['running'], (current) => ({ ...current, session }));
+      if (attached.transitioned) {
+        await this.tmuxSessionRunner.clearPendingStart(job.id);
+        this.pendingTmuxStarts.delete(job.id);
+        return;
+      }
     } catch (error) {
-      await this.markRunningJobFailed(job.id, error);
+      await this.resolvePendingTmuxStart(job.id, error, true);
+      return;
+    }
+    await this.resolvePendingTmuxStart(job.id, 'Job completed during tmux startup', true);
+  }
+
+  private async retryPendingTmuxStarts(notify: boolean): Promise<void> {
+    for (const id of this.pendingTmuxStarts) {
+      if (this.inFlight.has(id)) continue;
+      await this.resolvePendingTmuxStart(id, 'Tmux startup interrupted before session attachment', notify);
     }
   }
 
-  private async reconcileRunningTmuxJobs(): Promise<number> {
+  private async resolvePendingTmuxStart(id: string, startError: unknown, notify: boolean): Promise<void> {
+    const tmux = this.tmuxSessionRunner!;
+    try {
+      const sessionName = await tmux.readPendingStart(id);
+      const job = await this.repository.getById(id);
+      if (job?.session && sessionName && job.session.sessionName !== sessionName) {
+        throw new Error('Pending tmux session differs from stored job session');
+      }
+      if (!job?.session) {
+        if (sessionName && !await tmux.reclaimPendingSession(sessionName)) {
+          throw new Error('Unable to confirm tmux session termination');
+        }
+        if (job?.status === 'running') await this.markRunningJobFailed(id, startError, notify);
+      }
+      // A matching attached session is owned by its job, even after a crash before unlink.
+      if (sessionName) await tmux.clearPendingStart(id);
+      this.pendingTmuxStarts.delete(id);
+    } catch (error) {
+      this.logger.warn(`Tmux start recovery pending for ${id}: ${String(error)}`);
+    }
+  }
+
+  private async readPollJobs(cycle?: PollCycle): Promise<BridgeJob[]> {
+    const jobs = await this.repository.listAll();
+    if (cycle) cycle.queueWasEmpty = !jobs.some(job => job.status === 'queued');
+    return jobs;
+  }
+
+  private async reconcileRunningTmuxJobs(cycle?: PollCycle): Promise<number> {
     if (this.tmuxReconcilePromise) {
       await this.tmuxReconcilePromise;
       return 0;
     }
-    const reconcile = this.performRunningTmuxReconciliation();
+    const reconcile = this.performRunningTmuxReconciliation(cycle);
     this.tmuxReconcilePromise = reconcile;
     try {
       return await reconcile;
@@ -442,24 +497,31 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async performRunningTmuxReconciliation(): Promise<number> {
-    const runningJobs = await this.repository.listByStatus('running');
+  private async performRunningTmuxReconciliation(cycle?: PollCycle): Promise<number> {
+    if (this.pendingTmuxStarts.size > 0) await this.retryPendingTmuxStarts(true);
+    const jobs = await this.readPollJobs(cycle);
     let completed = 0;
-    for (const job of runningJobs) {
-      if (job.executionMode !== 'tmux') {
+    for (const job of jobs) {
+      if (job.status !== 'running' || job.executionMode !== 'tmux' || this.pendingTmuxStarts.has(job.id)) {
         continue;
       }
-      if (await this.collectTmuxJob(job)) {
+      if (await this.collectTmuxJob(job) === 'completed') {
         completed += 1;
       }
     }
     return completed;
   }
 
-  private async collectTmuxJob(job: BridgeJob): Promise<boolean> {
-    const collected = await this.tmuxSessionRunner?.collect(job);
+  private async collectTmuxJob(job: BridgeJob): Promise<'completed' | 'no-result' | 'retry'> {
+    let collected;
+    try {
+      collected = await this.tmuxSessionRunner?.collect(job);
+    } catch (error) {
+      this.logger.warn(`Failed to collect tmux result for job ${job.id}: ${String(error)}`);
+      return 'retry';
+    }
     if (!collected) {
-      return false;
+      return 'no-result';
     }
 
     const transition = await this.repository.transition(job.id, ['running'], (latestJob) => ({
@@ -472,12 +534,12 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
       execution: collected.result.execution,
       session: collected.session,
     }));
-    if (!transition.transitioned || !transition.job) return false;
+    if (!transition.transitioned || !transition.job) return 'no-result';
     this.trackCompletionNotification(transition.job);
-    return true;
+    return 'completed';
   }
 
-  private async markRunningJobFailed(jobId: string, error: unknown): Promise<void> {
+  private async markRunningJobFailed(jobId: string, error: unknown, notify = true): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     const transition = await this.repository.transition(jobId, ['running'], (latestJob) => ({
       ...latestJob,
@@ -492,7 +554,7 @@ export class JobRunnerService implements OnModuleInit, OnModuleDestroy {
     }));
     if (!transition.transitioned || !transition.job) return;
     this.logger.error(`Job ${jobId} failed after an unexpected execution error: ${message}`);
-    this.trackCompletionNotification(transition.job);
+    if (notify) this.trackCompletionNotification(transition.job);
   }
 
   trackCompletionNotification(job: BridgeJob): void {
